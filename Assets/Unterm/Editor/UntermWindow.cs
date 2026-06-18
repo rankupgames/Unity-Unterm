@@ -1,0 +1,452 @@
+using System;
+using System.IO;
+using UnityEditor;
+using UnityEngine;
+
+namespace Unterm.Editor
+{
+    /// <summary>
+    /// A terminal window: a native wgpu-rendered VT grid (PTY-backed shell)
+    /// hosted in an <see cref="EditorWindow"/> and blitted with IMGUI. The shell
+    /// and grid live in the native plugin keyed by a stable id, so they survive
+    /// C# domain reloads; this window re-adopts by id after a reload and only
+    /// kills the shell when the window actually closes.
+    ///
+    /// Multiple windows are independent terminals: each is created via
+    /// <see cref="CreateWindow"/> (not the singleton <c>GetWindow</c>), gets its
+    /// own id, and shares one native wgpu device with the others.
+    /// </summary>
+    public sealed class UntermWindow : EditorWindow
+    {
+        private const float ToolbarHeight = 20f;
+        private const float DefaultFontPt = 13f;
+
+        private UntermNative _native;
+        // The terminal lives in the native registry; we hold its id and re-adopt
+        // it across domain reloads (it's serialized with the window).
+        [SerializeField] private long _termIdRaw;
+        [SerializeField] private float _fontPt = DefaultFontPt;
+        private ulong Tid => (ulong)_termIdRaw;
+
+        private Texture2D _tex;
+        private IntPtr _externalTexPtr;
+        private string _status = "";
+        private bool _alive = true;
+
+        private static bool s_reloading;
+
+        [MenuItem("Window/Unterm/New Terminal %#t")]
+        public static void OpenNew()
+        {
+            var w = CreateWindow<UntermWindow>();
+            w.titleContent = new GUIContent("Terminal");
+            w.minSize = new Vector2(240, 120);
+            w.Show();
+            w.Focus();
+        }
+
+        private static string BundlePath =>
+            Path.Combine(Application.dataPath, "Unterm/Plugins/macOS/unterm.bundle");
+
+        private static string ProjectRoot =>
+            Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;
+
+        private void OnEnable()
+        {
+            s_reloading = false;
+            wantsMouseMove = false;
+            AssemblyReloadEvents.beforeAssemblyReload += OnBeforeReload;
+            EditorApplication.update += OnEditorUpdate;
+            LoadNative();
+        }
+
+        private void OnDisable()
+        {
+            AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeReload;
+            EditorApplication.update -= OnEditorUpdate;
+            // On a domain reload keep the native terminal (and the mapped image)
+            // alive so the shell + scrollback survive the recompile; only tear it
+            // all down when the window is actually closing.
+            Teardown(keepTerminal: s_reloading);
+        }
+
+        private static void OnBeforeReload() => s_reloading = true;
+
+        private void LoadNative(bool freshInstance = false)
+        {
+            try
+            {
+                _native = new UntermNative();
+                _native.Load(BundlePath, freshInstance);
+
+                float ppp = EditorGUIUtility.pixelsPerPoint;
+                var (w, h) = CurrentPixelSize();
+
+                // Re-adopt the existing terminal across reload, else create one.
+                if (Tid == 0 || !_native.Exists(Tid))
+                {
+                    _termIdRaw = (long)_native.Create(w, h, ppp, ProjectRoot);
+                    ApplyFont();
+                    _native.SetFontSize(Tid, _fontPt);
+                }
+
+                ApplyTheme();
+                _native.SetFocus(Tid, true);
+                RenderNow();
+                _status = "ready";
+            }
+            catch (Exception e)
+            {
+                _status = "load failed: " + e.Message;
+                Debug.LogError("[Unterm] " + e);
+                Teardown(keepTerminal: false);
+            }
+        }
+
+        // Use the editor's monospace font if we can find one, else fall back to
+        // the native generic monospace family.
+        private void ApplyFont()
+        {
+            // Menlo first: a clean "Menlo" family with full Regular/Bold/Italic
+            // faces. (SF Mono registers under a private ".SF NS Mono" name that
+            // doesn't resolve by name, and Monaco reports as non-monospaced.)
+            string[] candidates =
+            {
+                "/System/Library/Fonts/Menlo.ttc",
+                "/System/Library/Fonts/SFNSMono.ttf",
+                "/System/Library/Fonts/Monaco.ttf",
+            };
+            foreach (var p in candidates)
+            {
+                if (File.Exists(p)) { _native.SetFont(Tid, p); break; }
+            }
+        }
+
+        private void Teardown(bool keepTerminal)
+        {
+            if (_tex != null)
+            {
+                DestroyImmediate(_tex);
+                _tex = null;
+                _externalTexPtr = IntPtr.Zero;
+            }
+
+            if (!keepTerminal)
+            {
+                if (_native != null && Tid != 0)
+                    _native.Destroy(Tid);
+                _termIdRaw = 0;
+                _native?.Dispose(); // dlclose on real teardown
+            }
+            // On reload: drop the managed wrapper WITHOUT dlclose so the native
+            // image (and the terminal registry) stay mapped for re-adoption.
+            _native = null;
+        }
+
+        private (uint, uint) CurrentPixelSize()
+        {
+            float ppp = EditorGUIUtility.pixelsPerPoint;
+            uint w = (uint)Mathf.Max(1, Mathf.RoundToInt(position.width * ppp));
+            uint h = (uint)Mathf.Max(1, Mathf.RoundToInt((position.height - ToolbarHeight) * ppp));
+            return (w, h);
+        }
+
+        // Poll native state off the editor tick; re-render only when it changed.
+        private void OnEditorUpdate()
+        {
+            if (_native == null || Tid == 0) return;
+
+            bool repaint = false;
+
+            string title = _native.Title(Tid);
+            _alive = _native.IsAlive(Tid);
+            string want = string.IsNullOrEmpty(title) ? "Terminal" : title;
+            if (!_alive) want += " (exited)";
+            if (titleContent.text != want)
+            {
+                titleContent = new GUIContent(want);
+                repaint = true;
+            }
+
+            if (_native.Dirty(Tid))
+            {
+                RenderNow();
+                repaint = true;
+            }
+            if (repaint) Repaint();
+        }
+
+        private void RenderNow()
+        {
+            if (_native == null || Tid == 0) return;
+            var (w, h) = CurrentPixelSize();
+            _native.Resize(Tid, w, h, EditorGUIUtility.pixelsPerPoint);
+            _native.Render(Tid);
+            UploadZeroCopy((int)w, (int)h);
+        }
+
+        private void ApplyTheme()
+        {
+            Color32 bg, fg, cursor;
+            if (EditorGUIUtility.isProSkin)
+            {
+                bg = new Color32(24, 24, 24, 255);
+                fg = new Color32(208, 208, 212, 255);
+                cursor = new Color32(220, 220, 224, 255);
+            }
+            else
+            {
+                bg = new Color32(250, 250, 250, 255);
+                fg = new Color32(28, 28, 30, 255);
+                cursor = new Color32(40, 40, 44, 255);
+            }
+            _native.SetColors(Tid, fg, bg, cursor);
+        }
+
+        // Wrap the native IOSurface-backed MTLTexture directly — no CPU copy.
+        // Falls back to readback only if the texture is somehow unavailable.
+        private void UploadZeroCopy(int iw, int ih)
+        {
+            IntPtr texPtr = _native.RawTexture(Tid);
+            if (texPtr == IntPtr.Zero)
+            {
+                UploadReadback(iw, ih);
+                return;
+            }
+            if (_tex == null || _tex.width != iw || _tex.height != ih || _externalTexPtr != texPtr)
+            {
+                if (_tex != null) DestroyImmediate(_tex);
+                _tex = Texture2D.CreateExternalTexture(iw, ih, TextureFormat.RGBA32, false, false, texPtr);
+                _tex.filterMode = FilterMode.Bilinear;
+                _tex.hideFlags = HideFlags.HideAndDontSave;
+                _externalTexPtr = texPtr;
+            }
+            else
+            {
+                _tex.UpdateExternalTexture(texPtr);
+            }
+        }
+
+        private void UploadReadback(int iw, int ih)
+        {
+            IntPtr px = _native.GetPixels(Tid, out int len);
+            if (px == IntPtr.Zero || len <= 0) { _status = "no pixels"; return; }
+            if (_tex == null || _tex.width != iw || _tex.height != ih || _externalTexPtr != IntPtr.Zero)
+            {
+                if (_tex != null) DestroyImmediate(_tex);
+                _tex = new Texture2D(iw, ih, TextureFormat.RGBA32, false)
+                {
+                    filterMode = FilterMode.Bilinear,
+                    hideFlags = HideFlags.HideAndDontSave,
+                };
+                _externalTexPtr = IntPtr.Zero;
+            }
+            _tex.LoadRawTextureData(px, len);
+            _tex.Apply(false);
+        }
+
+        private void OnFocus()
+        {
+            if (_native != null && Tid != 0) _native.SetFocus(Tid, true);
+        }
+
+        private void OnLostFocus()
+        {
+            if (_native != null && Tid != 0) _native.SetFocus(Tid, false);
+        }
+
+        private void OnGUI()
+        {
+            DrawToolbar();
+
+            var rect = new Rect(0, ToolbarHeight, position.width, position.height - ToolbarHeight);
+
+            // Re-render when the draw area no longer matches the texture (resize).
+            var (cw, ch) = CurrentPixelSize();
+            if (_native != null && Tid != 0 &&
+                (_tex == null || _tex.width != (int)cw || _tex.height != (int)ch))
+            {
+                RenderNow();
+            }
+
+            HandleInput(rect);
+
+            if (_tex != null)
+            {
+                // Native frame is top-down; Texture2D samples bottom-up, so flip V.
+                GUI.DrawTextureWithTexCoords(rect, _tex, new Rect(0, 1, 1, -1));
+            }
+            else
+            {
+                EditorGUI.LabelField(rect, _status, EditorStyles.centeredGreyMiniLabel);
+            }
+        }
+
+        private void DrawToolbar()
+        {
+            using (new GUILayout.HorizontalScope(EditorStyles.toolbar))
+            {
+                if (!_alive && GUILayout.Button("Restart", EditorStyles.toolbarButton, GUILayout.Width(60)))
+                    Restart();
+
+                GUILayout.FlexibleSpace();
+
+                // Font size controls, pinned to the right edge.
+                if (GUILayout.Button("-", EditorStyles.toolbarButton, GUILayout.Width(24)))
+                    ChangeFont(-1f);
+                if (GUILayout.Button("+", EditorStyles.toolbarButton, GUILayout.Width(24)))
+                    ChangeFont(+1f);
+            }
+        }
+
+        private void ChangeFont(float delta)
+        {
+            _fontPt = Mathf.Clamp(_fontPt + delta, 8f, 32f);
+            if (_native != null && Tid != 0)
+            {
+                _native.SetFontSize(Tid, _fontPt);
+                RenderNow();
+                Repaint();
+            }
+        }
+
+        private void Restart()
+        {
+            if (_native == null) return;
+            if (Tid != 0) _native.Destroy(Tid);
+            _termIdRaw = 0;
+            var (w, h) = CurrentPixelSize();
+            _termIdRaw = (long)_native.Create(w, h, EditorGUIUtility.pixelsPerPoint, ProjectRoot);
+            ApplyFont();
+            _native.SetFontSize(Tid, _fontPt);
+            ApplyTheme();
+            _native.SetFocus(Tid, true);
+            RenderNow();
+            Repaint();
+        }
+
+        private void HandleInput(Rect rect)
+        {
+            if (_native == null || Tid == 0) return;
+            var e = Event.current;
+
+            // Mouse-wheel scroll through scrollback (in lines).
+            if (e.type == EventType.ScrollWheel && rect.Contains(e.mousePosition))
+            {
+                int lines = Mathf.RoundToInt(Mathf.Clamp(-e.delta.y, -5f, 5f));
+                if (lines == 0) lines = e.delta.y > 0 ? -1 : 1;
+                _native.Scroll(Tid, lines);
+                RenderNow();
+                Repaint();
+                e.Use();
+                return;
+            }
+
+            // Take keyboard focus when clicked.
+            if (e.type == EventType.MouseDown && rect.Contains(e.mousePosition))
+            {
+                GUIUtility.keyboardControl = 0;
+                Focus();
+                e.Use();
+                return;
+            }
+
+            if (e.type != EventType.KeyDown) return;
+
+            // Cmd shortcuts: paste / (future) copy. Don't forward Cmd to the PTY.
+            if (e.command)
+            {
+                if (e.keyCode == KeyCode.V)
+                {
+                    string clip = EditorGUIUtility.systemCopyBuffer;
+                    if (!string.IsNullOrEmpty(clip)) _native.SendText(Tid, clip);
+                    e.Use();
+                }
+                return;
+            }
+
+            // Named special keys first (so Enter sends CR, not '\n').
+            string special = SpecialKeyName(e.keyCode);
+            if (special != null)
+            {
+                _native.SendKey(Tid, special, e.control, e.alt, e.shift);
+                e.Use();
+                return;
+            }
+
+            // Ctrl-combo (Ctrl-C, Ctrl-D, ...): encode from the physical key.
+            if (e.control)
+            {
+                string name = CtrlComboName(e.keyCode, e.character);
+                if (name != null)
+                {
+                    _native.SendKey(Tid, name, true, e.alt, e.shift);
+                    e.Use();
+                }
+                return;
+            }
+
+            // Plain printable input (incl. IME-committed characters).
+            char c = e.character;
+            if (c != '\0' && (c >= ' ' || c == '\t') && c != 0x7f)
+            {
+                _native.SendText(Tid, c.ToString());
+                e.Use();
+            }
+        }
+
+        private static string SpecialKeyName(KeyCode k)
+        {
+            switch (k)
+            {
+                case KeyCode.Return: case KeyCode.KeypadEnter: return "Enter";
+                case KeyCode.Backspace: return "Backspace";
+                case KeyCode.Tab: return "Tab";
+                case KeyCode.Escape: return "Escape";
+                case KeyCode.UpArrow: return "Up";
+                case KeyCode.DownArrow: return "Down";
+                case KeyCode.LeftArrow: return "Left";
+                case KeyCode.RightArrow: return "Right";
+                case KeyCode.Home: return "Home";
+                case KeyCode.End: return "End";
+                case KeyCode.PageUp: return "PageUp";
+                case KeyCode.PageDown: return "PageDown";
+                case KeyCode.Insert: return "Insert";
+                case KeyCode.Delete: return "Delete";
+                case KeyCode.F1: return "F1";
+                case KeyCode.F2: return "F2";
+                case KeyCode.F3: return "F3";
+                case KeyCode.F4: return "F4";
+                case KeyCode.F5: return "F5";
+                case KeyCode.F6: return "F6";
+                case KeyCode.F7: return "F7";
+                case KeyCode.F8: return "F8";
+                case KeyCode.F9: return "F9";
+                case KeyCode.F10: return "F10";
+                case KeyCode.F11: return "F11";
+                case KeyCode.F12: return "F12";
+                default: return null;
+            }
+        }
+
+        // The character to control-encode for a Ctrl-<key> combo.
+        private static string CtrlComboName(KeyCode k, char ch)
+        {
+            if (k >= KeyCode.A && k <= KeyCode.Z)
+                return ((char)('a' + (k - KeyCode.A))).ToString();
+            if (k >= KeyCode.Alpha0 && k <= KeyCode.Alpha9)
+                return ((char)('0' + (k - KeyCode.Alpha0))).ToString();
+            switch (k)
+            {
+                case KeyCode.LeftBracket: return "[";
+                case KeyCode.RightBracket: return "]";
+                case KeyCode.Backslash: return "\\";
+                case KeyCode.Space: return " ";
+                case KeyCode.Minus: return "-";
+                case KeyCode.Slash: return "/";
+                default:
+                    return (ch != '\0' && ch >= ' ') ? ch.ToString() : null;
+            }
+        }
+    }
+}

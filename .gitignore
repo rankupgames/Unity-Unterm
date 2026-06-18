@@ -104,3 +104,11 @@ InitTestScene*.unity*
 
 # Auto-generated cache in Assets folder
 /[Aa]ssets/[Ss]ceneDependencyCache*
+
+# === Unterm native (Rust) ===
+# Rust intermediate build output (not distributed). The built .bundle under
+# Assets/Unterm/Plugins/macOS is committed so the plugin ships with the project.
+/native/target/
+# Headless example output
+/native/unterm.png
+/native/**/unterm.png

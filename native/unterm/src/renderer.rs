@@ -1,0 +1,560 @@
+//! Offscreen wgpu/glyphon renderer for a terminal grid.
+//!
+//! Renders an `alacritty_terminal` grid into an IOSurface-backed `MTLTexture`
+//! that Unity samples zero-copy. Cell backgrounds, the cursor, and selection
+//! are instanced quads; text is one shaped glyphon `Buffer` per visible row,
+//! relying on a monospace font so columns line up. Everything renders at
+//! physical (HiDPI) pixels so glyphs stay crisp on Retina.
+
+use glyphon::{
+    fontdb, Attrs, Buffer, Color, Family, Metrics, Resolution, Shaping, Style, TextArea, TextAtlas,
+    TextBounds, TextRenderer, Viewport, Weight,
+};
+
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::{point_to_viewport, TermMode, Term};
+
+use crate::gpu::{self, FORMAT};
+use crate::iosurface::{IOSurfaceRef, SharedSurface};
+use crate::palette::{self, Theme};
+use crate::quads::{Quad, QuadRenderer};
+use crate::term::EventProxy;
+use std::ffi::c_void;
+
+/// Padding inside the window edge, in points (scaled to physical px).
+const PAD_PT: f32 = 2.0;
+/// Default monospace size in points.
+const DEFAULT_FONT_PT: f32 = 13.0;
+
+/// A single cell resolved for drawing.
+#[derive(Clone, Copy)]
+struct CellVis {
+    ch: char,
+    fg: [u8; 3],
+    bg: [u8; 3],
+    bold: bool,
+    italic: bool,
+    /// The trailing half of a wide (CJK) glyph — drawn by its lead cell.
+    spacer: bool,
+    /// Whether `bg` differs from the default and needs a fill quad.
+    bg_fill: bool,
+}
+
+pub struct Renderer {
+    width: u32,
+    height: u32,
+    shared: SharedSurface,
+    view: wgpu::TextureView,
+    pixels: Vec<u8>,
+
+    scale: f32,
+    font_pt: f32,
+    /// Primary monospace family (loaded font name); None = generic monospace.
+    font_family: Option<String>,
+    /// Cached cell metrics in physical px (recomputed on font/scale change).
+    cell_w: f32,
+    cell_h: f32,
+    metrics_dirty: bool,
+
+    viewport: Viewport,
+    atlas: TextAtlas,
+    text_renderer: TextRenderer,
+    quads: QuadRenderer,
+}
+
+impl Renderer {
+    pub fn new(width: u32, height: u32) -> Self {
+        let g = gpu::gpu();
+        let (shared, view) = create_target(&g.device, width, height);
+        let viewport = Viewport::new(&g.device, &g.cache);
+        let mut atlas = TextAtlas::new(&g.device, &g.queue, &g.cache, FORMAT);
+        let text_renderer =
+            TextRenderer::new(&mut atlas, &g.device, wgpu::MultisampleState::default(), None);
+        let quads = QuadRenderer::new(&g.device, FORMAT);
+
+        Renderer {
+            width,
+            height,
+            shared,
+            view,
+            pixels: Vec::new(),
+            scale: 1.0,
+            font_pt: DEFAULT_FONT_PT,
+            font_family: None,
+            cell_w: 8.0,
+            cell_h: 16.0,
+            metrics_dirty: true,
+            viewport,
+            atlas,
+            text_renderer,
+            quads,
+        }
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    pub fn set_scale(&mut self, scale: f32) {
+        let s = scale.max(0.5);
+        if s != self.scale {
+            self.scale = s;
+            self.metrics_dirty = true;
+        }
+    }
+
+    pub fn set_font_size(&mut self, points: f32) {
+        let p = points.clamp(6.0, 64.0);
+        if p != self.font_pt {
+            self.font_pt = p;
+            self.metrics_dirty = true;
+        }
+    }
+
+    /// Load a font file and make its best monospace family the primary one.
+    pub fn set_font(&mut self, path: &str) {
+        let mut fs = gpu::font_system().lock().unwrap();
+        let before = fs.db().faces().count();
+        if let Err(e) = fs.db_mut().load_font_file(path) {
+            log::warn!("unterm: failed to load font {path}: {e}");
+            return;
+        }
+        // Among the file's faces, pick the best family to address by name:
+        // prefer monospaced, upright, weight closest to Regular (400). Skip
+        // private ('.'-prefixed) family names — they don't resolve by name and
+        // cause a silent fall back to a proportional default.
+        let chosen = fs
+            .db()
+            .faces()
+            .skip(before)
+            .filter_map(|f| {
+                let (name, _) = f.families.first()?;
+                if name.starts_with('.') {
+                    return None;
+                }
+                Some((
+                    (!f.monospaced) as i32,
+                    (f.style != fontdb::Style::Normal) as i32,
+                    (f.weight.0 as i32 - 400).abs(),
+                    name.clone(),
+                ))
+            })
+            .min()
+            .map(|(_, _, _, name)| name);
+        match chosen {
+            Some(name) => self.font_family = Some(name),
+            None => log::warn!("unterm: no addressable monospace family in {path}"),
+        }
+        self.metrics_dirty = true;
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        let width = width.max(1);
+        let height = height.max(1);
+        if width == self.width && height == self.height {
+            return;
+        }
+        self.width = width;
+        self.height = height;
+        let g = gpu::gpu();
+        let (shared, view) = create_target(&g.device, width, height);
+        self.shared = shared;
+        self.view = view;
+    }
+
+    /// The current cell grid size derived from the pixel size and metrics.
+    pub fn cell_grid_size(&mut self) -> (usize, usize) {
+        self.ensure_metrics();
+        let pad = PAD_PT * self.scale;
+        let avail_w = (self.width as f32 - pad * 2.0).max(self.cell_w);
+        let avail_h = (self.height as f32 - pad * 2.0).max(self.cell_h);
+        let cols = (avail_w / self.cell_w).floor().max(1.0) as usize;
+        let rows = (avail_h / self.cell_h).floor().max(1.0) as usize;
+        (cols, rows)
+    }
+
+    fn font_px(&self) -> f32 {
+        (self.font_pt * self.scale).max(4.0)
+    }
+
+    fn line_height(&self) -> f32 {
+        (self.font_px() * 1.25).round().max(1.0)
+    }
+
+    fn family(&self) -> Family<'_> {
+        match self.font_family.as_deref() {
+            Some(name) => Family::Name(name),
+            None => Family::Monospace,
+        }
+    }
+
+    /// Recompute cell width/height from the font by measuring an 'M' advance.
+    fn ensure_metrics(&mut self) {
+        if !self.metrics_dirty {
+            return;
+        }
+        let font_px = self.font_px();
+        let line_h = self.line_height();
+        let family = self.family();
+        let mut fs = gpu::font_system().lock().unwrap();
+        let mut buf = Buffer::new(&mut fs, Metrics::new(font_px, line_h));
+        buf.set_size(&mut fs, None, None);
+        let sample = "MMMMMMMMMMMMMMMMMMMM"; // 20 cells, averaged for stability
+        buf.set_text(
+            &mut fs,
+            sample,
+            Attrs::new().family(family),
+            Shaping::Advanced,
+        );
+        buf.shape_until_scroll(&mut fs, false);
+        let line_w = buf
+            .layout_runs()
+            .next()
+            .map(|r| r.line_w)
+            .unwrap_or(font_px * 0.6 * sample.len() as f32);
+        drop(fs);
+        self.cell_w = (line_w / sample.len() as f32).max(1.0);
+        self.cell_h = line_h;
+        self.metrics_dirty = false;
+    }
+
+    pub fn iosurface(&self) -> IOSurfaceRef {
+        self.shared.surface()
+    }
+
+    pub fn raw_texture(&self) -> *mut c_void {
+        self.shared.raw_texture()
+    }
+
+    /// Render `term`'s visible grid into the IOSurface target.
+    pub fn render(&mut self, term: &Term<EventProxy>, theme: &Theme, focused: bool) {
+        self.ensure_metrics();
+
+        let grid = term.grid();
+        let cols = grid.columns();
+        let rows = grid.screen_lines();
+        let display_offset = grid.display_offset();
+        let show_cursor = term.mode().contains(TermMode::SHOW_CURSOR) && display_offset == 0;
+
+        let pad = PAD_PT * self.scale;
+        let cell_w = self.cell_w;
+        let cell_h = self.cell_h;
+
+        // --- Resolve every visible cell. ---
+        let blank = CellVis {
+            ch: ' ',
+            fg: theme.fg,
+            bg: theme.bg,
+            bold: false,
+            italic: false,
+            spacer: false,
+            bg_fill: false,
+        };
+        let mut cells = vec![blank; cols * rows];
+        for indexed in grid.display_iter() {
+            let Some(vp) = point_to_viewport(display_offset, indexed.point) else {
+                continue;
+            };
+            if vp.line >= rows || vp.column.0 >= cols {
+                continue;
+            }
+            let cell = indexed.cell;
+            let flags = cell.flags;
+            let mut fg = palette::resolve(cell.fg, theme);
+            let mut bg = palette::resolve(cell.bg, theme);
+            if flags.contains(Flags::INVERSE) {
+                std::mem::swap(&mut fg, &mut bg);
+            }
+            if flags.contains(Flags::DIM) {
+                fg = [fg[0] / 2 + fg[0] / 4, fg[1] / 2 + fg[1] / 4, fg[2] / 2 + fg[2] / 4];
+            }
+            let hidden = flags.contains(Flags::HIDDEN);
+            let spacer = flags.contains(Flags::WIDE_CHAR_SPACER);
+            cells[vp.line * cols + vp.column.0] = CellVis {
+                ch: if hidden { ' ' } else { cell.c },
+                fg,
+                bg,
+                bold: flags.contains(Flags::BOLD),
+                italic: flags.contains(Flags::ITALIC),
+                spacer,
+                bg_fill: bg != theme.bg,
+            };
+        }
+
+        // --- Cursor. ---
+        let cursor_vp = point_to_viewport(display_offset, grid.cursor.point)
+            .filter(|p| p.line < rows && p.column.0 < cols);
+        if show_cursor && focused {
+            if let Some(p) = cursor_vp {
+                // Invert the glyph under a focused block cursor for contrast.
+                let idx = p.line * cols + p.column.0;
+                cells[idx].fg = theme.bg;
+                cells[idx].bold = false;
+            }
+        }
+
+        // --- Background + cursor quads (drawn under the text). ---
+        let mut quads: Vec<Quad> = Vec::new();
+        for row in 0..rows {
+            for col in 0..cols {
+                let cv = cells[row * cols + col];
+                if cv.bg_fill {
+                    quads.push(Quad {
+                        x: pad + col as f32 * cell_w,
+                        y: pad + row as f32 * cell_h,
+                        w: cell_w,
+                        h: cell_h,
+                        color: linear(cv.bg, 1.0),
+                        radius: 0.0,
+                    });
+                }
+            }
+        }
+        if show_cursor {
+            if let Some(p) = cursor_vp {
+                let x = pad + p.column.0 as f32 * cell_w;
+                let y = pad + p.line as f32 * cell_h;
+                let col = linear(theme.cursor, 1.0);
+                if focused {
+                    quads.push(Quad { x, y, w: cell_w, h: cell_h, color: col, radius: 0.0 });
+                } else {
+                    // Hollow outline when the window isn't focused.
+                    let t = (1.0 * self.scale).max(1.0);
+                    quads.push(Quad { x, y, w: cell_w, h: t, color: col, radius: 0.0 });
+                    quads.push(Quad { x, y: y + cell_h - t, w: cell_w, h: t, color: col, radius: 0.0 });
+                    quads.push(Quad { x, y, w: t, h: cell_h, color: col, radius: 0.0 });
+                    quads.push(Quad { x: x + cell_w - t, y, w: t, h: cell_h, color: col, radius: 0.0 });
+                }
+            }
+        }
+
+        // --- One shaped buffer per non-empty row. ---
+        let font_px = self.font_px();
+        let line_h = self.line_height();
+        let font_family = self.font_family.clone();
+        let family = match font_family.as_deref() {
+            Some(n) => Family::Name(n),
+            None => Family::Monospace,
+        };
+
+        let mut row_buffers: Vec<(Buffer, f32)> = Vec::with_capacity(rows);
+        {
+            let mut fs = gpu::font_system().lock().unwrap();
+            for row in 0..rows {
+                let base = row * cols;
+                // Build the row string + color/style runs, skipping wide spacers.
+                let mut text = String::with_capacity(cols);
+                let mut runs: Vec<(usize, usize, [u8; 3], bool, bool)> = Vec::new();
+                let mut cur: Option<(usize, [u8; 3], bool, bool)> = None;
+                for col in 0..cols {
+                    let cv = cells[base + col];
+                    if cv.spacer {
+                        continue;
+                    }
+                    let key = (cv.fg, cv.bold, cv.italic);
+                    match cur {
+                        Some((_, fg, b, i)) if (fg, b, i) == key => {}
+                        _ => {
+                            if let Some((s, fg, b, i)) = cur.take() {
+                                runs.push((s, text.len(), fg, b, i));
+                            }
+                            cur = Some((text.len(), key.0, key.1, key.2));
+                        }
+                    }
+                    text.push(cv.ch);
+                }
+                if let Some((s, fg, b, i)) = cur.take() {
+                    runs.push((s, text.len(), fg, b, i));
+                }
+
+                // Trim trailing blanks (no ink) to keep the atlas small.
+                let keep = text.trim_end_matches(' ').len();
+                if keep == 0 {
+                    continue;
+                }
+
+                let mut buf = Buffer::new(&mut fs, Metrics::new(font_px, line_h));
+                buf.set_size(&mut fs, None, Some(line_h));
+                let spans = runs.iter().filter_map(|&(s, e, fg, bold, italic)| {
+                    let e = e.min(keep);
+                    if s >= e {
+                        return None;
+                    }
+                    let attrs = Attrs::new()
+                        .family(family)
+                        .color(Color::rgb(fg[0], fg[1], fg[2]))
+                        .weight(if bold { Weight::BOLD } else { Weight::NORMAL })
+                        .style(if italic { Style::Italic } else { Style::Normal });
+                    Some((&text[s..e], attrs))
+                });
+                buf.set_rich_text(&mut fs, spans, Attrs::new().family(family), Shaping::Advanced);
+                buf.shape_until_scroll(&mut fs, false);
+                row_buffers.push((buf, pad + row as f32 * cell_h));
+            }
+
+            // --- Prepare GPU passes. ---
+            let bounds = TextBounds {
+                left: 0,
+                top: 0,
+                right: self.width as i32,
+                bottom: self.height as i32,
+            };
+            let default_color = Color::rgb(theme.fg[0], theme.fg[1], theme.fg[2]);
+            let areas: Vec<TextArea> = row_buffers
+                .iter()
+                .map(|(buf, top)| TextArea {
+                    buffer: buf,
+                    left: pad,
+                    top: *top,
+                    scale: 1.0,
+                    bounds,
+                    default_color,
+                    custom_glyphs: &[],
+                })
+                .collect();
+
+            let g = gpu::gpu();
+            self.viewport.update(
+                &g.queue,
+                Resolution {
+                    width: self.width,
+                    height: self.height,
+                },
+            );
+            self.quads
+                .prepare(&g.device, &g.queue, (self.width as f32, self.height as f32), &quads);
+            self.text_renderer
+                .prepare(
+                    &g.device,
+                    &g.queue,
+                    &mut fs,
+                    &mut self.atlas,
+                    &self.viewport,
+                    areas,
+                    &mut glyphon::SwashCache::new(),
+                )
+                .expect("unterm: glyphon prepare failed");
+        }
+
+        // --- Encode + submit. ---
+        let g = gpu::gpu();
+        let clear = {
+            let c = linear(theme.bg, 1.0);
+            wgpu::Color { r: c[0] as f64, g: c[1] as f64, b: c[2] as f64, a: 1.0 }
+        };
+        let mut encoder = g
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("unterm-encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("unterm-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.quads.render(&mut pass);
+            self.text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .expect("unterm: glyphon render failed");
+        }
+        g.queue.submit([encoder.finish()]);
+        // Force completion so Unity samples a finished frame (zero-copy has no
+        // readback to implicitly synchronize on).
+        g.device.poll(wgpu::Maintain::Wait);
+        self.atlas.trim();
+    }
+
+    /// Read the rendered framebuffer back as tightly-packed RGBA8 (top-down).
+    /// Used only by the CPU-readback fallback path.
+    pub fn read_rgba(&mut self) -> &[u8] {
+        let g = gpu::gpu();
+        let bpp = 4u32;
+        let unpadded = self.width * bpp;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded = ((unpadded + align - 1) / align) * align;
+
+        let readback = g.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("unterm-readback"),
+            size: (padded * self.height) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = g
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("unterm-readback-encoder"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &self.shared.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &readback,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(self.height),
+                },
+            },
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        g.queue.submit([encoder.finish()]);
+
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        g.device.poll(wgpu::Maintain::Wait);
+
+        let data = slice.get_mapped_range();
+        self.pixels.clear();
+        self.pixels.reserve((unpadded * self.height) as usize);
+        for row in 0..self.height {
+            let start = (row * padded) as usize;
+            let end = start + unpadded as usize;
+            self.pixels.extend_from_slice(&data[start..end]);
+        }
+        drop(data);
+        readback.unmap();
+        &self.pixels
+    }
+}
+
+/// Convert an sRGB byte color to linear floats for the sRGB-encoding target.
+fn linear(c: [u8; 3], a: f32) -> [f32; 4] {
+    fn ch(b: u8) -> f32 {
+        let s = b as f32 / 255.0;
+        if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    [ch(c[0]), ch(c[1]), ch(c[2]), a]
+}
+
+fn create_target(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (SharedSurface, wgpu::TextureView) {
+    let shared = crate::iosurface::create_shared_target(device, width, height, FORMAT);
+    let view = shared.texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (shared, view)
+}

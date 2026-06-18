@@ -1,0 +1,38 @@
+[package]
+name = "unterm"
+version = "0.1.0"
+edition = "2021"
+description = "Native wgpu-rendered terminal emulator for Unity (Unterm)"
+
+# Build a C-ABI dynamic library that Unity loads as a native plugin.
+# On macOS the .dylib is renamed to a .bundle when copied into Assets/Plugins.
+[lib]
+name = "unterm"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# GPU + text: pinned to what the previous panel verified so the IOSurface
+# zero-copy path (raw MTLDevice/MTLTexture handed to wgpu-hal) keeps matching.
+wgpu = "22"
+glyphon = "0.6"
+pollster = "0.3"
+bytemuck = "1"
+log = "0.4"
+env_logger = "0.11"
+
+# Terminal model + PTY.
+alacritty_terminal = "0.25"
+portable-pty = "0.8"
+
+# IOSurface zero-copy path (macOS). Versions pinned to what wgpu 22 resolves
+# (metal 0.29) so the raw MTLDevice/MTLTexture handed to wgpu-hal matches.
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.29"
+foreign-types = "0.5"
+objc = "0.2"
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
+
+[dev-dependencies]
+# Headless verification: dump the rendered terminal to a PNG without the Editor.
+image = { version = "0.25", default-features = false, features = ["png"] }
