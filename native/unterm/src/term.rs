@@ -331,6 +331,11 @@ impl Terminal {
     pub fn renderer(&self) -> &Renderer {
         &self.renderer
     }
+
+    /// Cursor rect (x, y, w, h) in physical px from the last render, if shown.
+    pub fn cursor_px(&self) -> Option<[f32; 4]> {
+        self.renderer.cursor_px()
+    }
 }
 
 /// Pump shell output through the parser into the shared grid until EOF.

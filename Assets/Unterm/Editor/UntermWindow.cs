@@ -33,6 +33,20 @@ namespace Unterm.Editor
         private string _status = "";
         private bool _alive = true;
 
+        // IME: a hidden, always-focused text field is the input sink so the OS
+        // IME engages. Plain typing + committed IME text land in `_imeBuffer`
+        // and are flushed to the PTY each frame; the in-progress composition is
+        // drawn at the cursor. `_composing` is snapshotted at Layout so key
+        // handling is stable within a frame.
+        private const string InputControl = "UntermInput";
+        private string _imeBuffer = "";
+        private bool _composing;
+        private bool _refocus;
+        private Color32 _bg = new Color32(24, 24, 24, 255);
+        private Color32 _fg = new Color32(208, 208, 212, 255);
+        private GUIStyle _imeStyle;
+        private Texture2D _imeBgTex;
+
         private static bool s_reloading;
 
         [MenuItem("Window/Unterm/New Terminal %#t")]
@@ -93,6 +107,7 @@ namespace Unterm.Editor
                 ApplyTheme();
                 _native.SetFocus(Tid, true);
                 RenderNow();
+                _refocus = true;
                 _status = "ready";
             }
             catch (Exception e)
@@ -129,6 +144,12 @@ namespace Unterm.Editor
                 DestroyImmediate(_tex);
                 _tex = null;
                 _externalTexPtr = IntPtr.Zero;
+            }
+            if (_imeBgTex != null)
+            {
+                DestroyImmediate(_imeBgTex);
+                _imeBgTex = null;
+                _imeStyle = null;
             }
 
             if (!keepTerminal)
@@ -200,6 +221,9 @@ namespace Unterm.Editor
                 fg = new Color32(28, 28, 30, 255);
                 cursor = new Color32(40, 40, 44, 255);
             }
+            _bg = bg;
+            _fg = fg;
+            _imeStyle = null; // rebuild against the new colors
             _native.SetColors(Tid, fg, bg, cursor);
         }
 
@@ -247,6 +271,7 @@ namespace Unterm.Editor
 
         private void OnFocus()
         {
+            _refocus = true;
             if (_native != null && Tid != 0) _native.SetFocus(Tid, true);
         }
 
@@ -257,6 +282,10 @@ namespace Unterm.Editor
 
         private void OnGUI()
         {
+            // Snapshot IME composition once per frame for stable key handling.
+            if (Event.current.type == EventType.Layout)
+                _composing = !string.IsNullOrEmpty(Input.compositionString);
+
             DrawToolbar();
 
             var rect = new Rect(0, ToolbarHeight, position.width, position.height - ToolbarHeight);
@@ -280,6 +309,100 @@ namespace Unterm.Editor
             {
                 EditorGUI.LabelField(rect, _status, EditorStyles.centeredGreyMiniLabel);
             }
+
+            // The IME sink is drawn on top at the cursor: invisible when idle,
+            // opaque while composing so the OS renders the composition inline.
+            DrawImeField(rect);
+            FlushIme();
+
+            if (_refocus && Event.current.type == EventType.Repaint)
+            {
+                EditorGUI.FocusTextInControl(InputControl);
+                _refocus = false;
+            }
+        }
+
+        // Pixel-cursor rect mapped to GUI points within `rect` (fallbacks to a
+        // bottom-left caret when the cursor is hidden).
+        private Rect CursorPointRect(Rect rect)
+        {
+            float ppp = EditorGUIUtility.pixelsPerPoint;
+            if (_native != null && Tid != 0 &&
+                _native.CursorPx(Tid, out float cx, out float cy, out float cw, out float chh))
+            {
+                return new Rect(rect.x + cx / ppp, rect.y + cy / ppp, cw / ppp, chh / ppp);
+            }
+            return new Rect(rect.x + 4, rect.yMax - 18, 8, 16);
+        }
+
+        // The focused text field that drives IME + plain input. It sits at the
+        // cursor: invisible (no style, empty) when idle, and opaque while the IME
+        // is composing so the OS draws the composition inline at the cursor.
+        private void DrawImeField(Rect rect)
+        {
+            if (_native == null || Tid == 0) return;
+            var cr = CursorPointRect(rect);
+            // Visible only while composing — plain typing is flushed the same
+            // frame, so it never needs to paint.
+            bool show = _composing || !string.IsNullOrEmpty(Input.compositionString);
+
+            GUI.SetNextControlName(InputControl);
+            if (show)
+            {
+                float w = Mathf.Max(60f, rect.xMax - cr.x);
+                _imeBuffer = GUI.TextField(new Rect(cr.x, cr.y, w, cr.height), _imeBuffer, ImeStyle());
+            }
+            else
+            {
+                _imeBuffer = GUI.TextField(new Rect(cr.x, cr.y, Mathf.Max(2f, cr.width), cr.height),
+                    _imeBuffer, GUIStyle.none);
+            }
+            // Place the OS IME/candidate window just below the caret.
+            Input.compositionCursorPos = GUIUtility.GUIToScreenPoint(new Vector2(cr.x, cr.yMax));
+        }
+
+        // An opaque, terminal-colored style so the inline composition is legible
+        // over the rendered grid. Rebuilt when the theme changes.
+        private GUIStyle ImeStyle()
+        {
+            if (_imeStyle != null) return _imeStyle;
+            if (_imeBgTex == null)
+            {
+                _imeBgTex = new Texture2D(1, 1) { hideFlags = HideFlags.HideAndDontSave };
+                _imeBgTex.SetPixel(0, 0, _bg);
+                _imeBgTex.Apply();
+            }
+            else
+            {
+                _imeBgTex.SetPixel(0, 0, _bg);
+                _imeBgTex.Apply();
+            }
+            _imeStyle = new GUIStyle(EditorStyles.label)
+            {
+                richText = false,
+                padding = new RectOffset(1, 1, 0, 0),
+                alignment = TextAnchor.MiddleLeft,
+            };
+            _imeStyle.normal.background = _imeBgTex;
+            _imeStyle.normal.textColor = _fg;
+            _imeStyle.focused.background = _imeBgTex;
+            _imeStyle.focused.textColor = _fg;
+            return _imeStyle;
+        }
+
+        // Send committed text (plain typing or a finished IME phrase) to the PTY
+        // once per frame, clearing the hidden field without dropping focus.
+        private void FlushIme()
+        {
+            if (Event.current.type != EventType.Repaint) return;
+            if (_composing || string.IsNullOrEmpty(_imeBuffer)) return;
+            if (_native == null || Tid == 0) { _imeBuffer = ""; return; }
+
+            _native.SendText(Tid, _imeBuffer);
+            _imeBuffer = "";
+            // Clear the focused editor's buffer in place (keeps IME engaged).
+            var te = (TextEditor)GUIUtility.GetStateObject(typeof(TextEditor), GUIUtility.keyboardControl);
+            if (te != null) { te.text = ""; te.cursorIndex = 0; te.selectIndex = 0; }
         }
 
         private void DrawToolbar()
@@ -345,16 +468,20 @@ namespace Unterm.Editor
                 return;
             }
 
-            // Take keyboard focus when clicked.
+            // Take keyboard focus when clicked (route it to the hidden IME sink).
             if (e.type == EventType.MouseDown && rect.Contains(e.mousePosition))
             {
-                GUIUtility.keyboardControl = 0;
                 Focus();
+                _refocus = true;
                 e.Use();
                 return;
             }
 
             if (e.type != EventType.KeyDown) return;
+
+            // While composing, let every key reach the IME field (Enter commits,
+            // arrows move the candidate, Backspace edits the composition).
+            if (_composing) return;
 
             // While the terminal is focused it claims the keyboard: handle the
             // emulator-level Cmd shortcuts and swallow every other Cmd combo so
@@ -411,13 +538,8 @@ namespace Unterm.Editor
                 return;
             }
 
-            // Plain printable input (incl. IME-committed characters).
-            char c = e.character;
-            if (c != '\0' && (c >= ' ' || c == '\t') && c != 0x7f)
-            {
-                _native.SendText(Tid, c.ToString());
-                e.Use();
-            }
+            // Plain printable input is left for the hidden IME field, which
+            // accumulates it (and any committed composition) for FlushIme().
         }
 
         private static string SpecialKeyName(KeyCode k)

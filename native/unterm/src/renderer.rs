@@ -35,7 +35,9 @@ struct CellVis {
     bg: [u8; 3],
     bold: bool,
     italic: bool,
-    /// The trailing half of a wide (CJK) glyph — drawn by its lead cell.
+    /// A double-width (CJK/emoji) lead cell — occupies two columns.
+    wide: bool,
+    /// The trailing half of a wide glyph — drawn by its lead cell.
     spacer: bool,
     /// Whether `bg` differs from the default and needs a fill quad.
     bg_fill: bool,
@@ -47,6 +49,10 @@ pub struct Renderer {
     shared: SharedSurface,
     view: wgpu::TextureView,
     pixels: Vec<u8>,
+
+    /// Cursor rect in physical px from the last render (x, y, w, h), if shown.
+    /// Exposed so the host can place the IME composition/candidate window.
+    cursor_px: Option<[f32; 4]>,
 
     scale: f32,
     font_pt: f32,
@@ -79,6 +85,7 @@ impl Renderer {
             shared,
             view,
             pixels: Vec::new(),
+            cursor_px: None,
             scale: 1.0,
             font_pt: DEFAULT_FONT_PT,
             font_family: None,
@@ -227,6 +234,11 @@ impl Renderer {
         self.shared.raw_texture()
     }
 
+    /// Cursor rect (x, y, w, h) in physical px from the last render, if shown.
+    pub fn cursor_px(&self) -> Option<[f32; 4]> {
+        self.cursor_px
+    }
+
     /// Render `term`'s visible grid into the IOSurface target.
     pub fn render(&mut self, term: &Term<EventProxy>, theme: &Theme, focused: bool) {
         self.ensure_metrics();
@@ -248,6 +260,7 @@ impl Renderer {
             bg: theme.bg,
             bold: false,
             italic: false,
+            wide: false,
             spacer: false,
             bg_fill: false,
         };
@@ -277,6 +290,7 @@ impl Renderer {
                 bg,
                 bold: flags.contains(Flags::BOLD),
                 italic: flags.contains(Flags::ITALIC),
+                wide: flags.contains(Flags::WIDE_CHAR),
                 spacer,
                 bg_fill: bg != theme.bg,
             };
@@ -311,23 +325,36 @@ impl Renderer {
                 }
             }
         }
+        // The cursor spans two columns when it sits on a wide (CJK) glyph.
+        let cursor_cells = |p: &alacritty_terminal::index::Point<usize>| -> f32 {
+            if cells[p.line * cols + p.column.0].wide { cell_w * 2.0 } else { cell_w }
+        };
         if show_cursor {
             if let Some(p) = cursor_vp {
                 let x = pad + p.column.0 as f32 * cell_w;
                 let y = pad + p.line as f32 * cell_h;
+                let cw = cursor_cells(&p);
                 let col = linear(theme.cursor, 1.0);
                 if focused {
-                    quads.push(Quad { x, y, w: cell_w, h: cell_h, color: col, radius: 0.0 });
+                    quads.push(Quad { x, y, w: cw, h: cell_h, color: col, radius: 0.0 });
                 } else {
                     // Hollow outline when the window isn't focused.
                     let t = (1.0 * self.scale).max(1.0);
-                    quads.push(Quad { x, y, w: cell_w, h: t, color: col, radius: 0.0 });
-                    quads.push(Quad { x, y: y + cell_h - t, w: cell_w, h: t, color: col, radius: 0.0 });
+                    quads.push(Quad { x, y, w: cw, h: t, color: col, radius: 0.0 });
+                    quads.push(Quad { x, y: y + cell_h - t, w: cw, h: t, color: col, radius: 0.0 });
                     quads.push(Quad { x, y, w: t, h: cell_h, color: col, radius: 0.0 });
-                    quads.push(Quad { x: x + cell_w - t, y, w: t, h: cell_h, color: col, radius: 0.0 });
+                    quads.push(Quad { x: x + cw - t, y, w: t, h: cell_h, color: col, radius: 0.0 });
                 }
             }
         }
+
+        // Remember the cursor rect (physical px) for the host's IME placement.
+        self.cursor_px = if show_cursor {
+            cursor_vp
+                .map(|p| [pad + p.column.0 as f32 * cell_w, pad + p.line as f32 * cell_h, cursor_cells(&p), cell_h])
+        } else {
+            None
+        };
 
         // --- One shaped buffer per non-empty row. ---
         let font_px = self.font_px();
@@ -338,59 +365,91 @@ impl Renderer {
             None => Family::Monospace,
         };
 
-        let mut row_buffers: Vec<(Buffer, f32)> = Vec::with_capacity(rows);
+        let attrs_of = |fg: [u8; 3], bold: bool, italic: bool| {
+            Attrs::new()
+                .family(family)
+                .color(Color::rgb(fg[0], fg[1], fg[2]))
+                .weight(if bold { Weight::BOLD } else { Weight::NORMAL })
+                .style(if italic { Style::Italic } else { Style::Normal })
+        };
+
+        // (buffer, left_px, top_px). Segments are anchored at their starting
+        // column rather than continuously shaped, so a wide (CJK) glyph whose
+        // advance differs from the cell width can't shift the rest of the row.
+        let mut row_buffers: Vec<(Buffer, f32, f32)> = Vec::new();
         {
             let mut fs = gpu::font_system().lock().unwrap();
             for row in 0..rows {
                 let base = row * cols;
-                // Build the row string + color/style runs, skipping wide spacers.
-                let mut text = String::with_capacity(cols);
-                let mut runs: Vec<(usize, usize, [u8; 3], bool, bool)> = Vec::new();
-                let mut cur: Option<(usize, [u8; 3], bool, bool)> = None;
-                for col in 0..cols {
+                let top = pad + row as f32 * cell_h;
+                let mut col = 0usize;
+                while col < cols {
                     let cv = cells[base + col];
                     if cv.spacer {
+                        col += 1;
                         continue;
                     }
-                    let key = (cv.fg, cv.bold, cv.italic);
-                    match cur {
-                        Some((_, fg, b, i)) if (fg, b, i) == key => {}
-                        _ => {
-                            if let Some((s, fg, b, i)) = cur.take() {
-                                runs.push((s, text.len(), fg, b, i));
-                            }
-                            cur = Some((text.len(), key.0, key.1, key.2));
+                    // A double-width glyph: its own buffer, anchored at its column.
+                    if cv.wide {
+                        if cv.ch != ' ' {
+                            let mut buf = Buffer::new(&mut fs, Metrics::new(font_px, line_h));
+                            buf.set_size(&mut fs, None, Some(line_h));
+                            buf.set_text(
+                                &mut fs,
+                                cv.ch.encode_utf8(&mut [0u8; 4]),
+                                attrs_of(cv.fg, cv.bold, cv.italic),
+                                Shaping::Advanced,
+                            );
+                            buf.shape_until_scroll(&mut fs, false);
+                            row_buffers.push((buf, pad + col as f32 * cell_w, top));
                         }
+                        col += 1; // the trailing spacer cell is skipped above
+                        continue;
                     }
-                    text.push(cv.ch);
-                }
-                if let Some((s, fg, b, i)) = cur.take() {
-                    runs.push((s, text.len(), fg, b, i));
-                }
-
-                // Trim trailing blanks (no ink) to keep the atlas small.
-                let keep = text.trim_end_matches(' ').len();
-                if keep == 0 {
-                    continue;
-                }
-
-                let mut buf = Buffer::new(&mut fs, Metrics::new(font_px, line_h));
-                buf.set_size(&mut fs, None, Some(line_h));
-                let spans = runs.iter().filter_map(|&(s, e, fg, bold, italic)| {
-                    let e = e.min(keep);
-                    if s >= e {
-                        return None;
+                    // A maximal run of single-width cells, anchored at its start.
+                    let seg_start = col;
+                    let mut text = String::new();
+                    let mut runs: Vec<(usize, usize, [u8; 3], bool, bool)> = Vec::new();
+                    let mut cur: Option<(usize, [u8; 3], bool, bool)> = None;
+                    while col < cols {
+                        let cv = cells[base + col];
+                        if cv.spacer || cv.wide {
+                            break;
+                        }
+                        let key = (cv.fg, cv.bold, cv.italic);
+                        match cur {
+                            Some((_, fg, b, i)) if (fg, b, i) == key => {}
+                            _ => {
+                                if let Some((s, fg, b, i)) = cur.take() {
+                                    runs.push((s, text.len(), fg, b, i));
+                                }
+                                cur = Some((text.len(), key.0, key.1, key.2));
+                            }
+                        }
+                        text.push(cv.ch);
+                        col += 1;
                     }
-                    let attrs = Attrs::new()
-                        .family(family)
-                        .color(Color::rgb(fg[0], fg[1], fg[2]))
-                        .weight(if bold { Weight::BOLD } else { Weight::NORMAL })
-                        .style(if italic { Style::Italic } else { Style::Normal });
-                    Some((&text[s..e], attrs))
-                });
-                buf.set_rich_text(&mut fs, spans, Attrs::new().family(family), Shaping::Advanced);
-                buf.shape_until_scroll(&mut fs, false);
-                row_buffers.push((buf, pad + row as f32 * cell_h));
+                    if let Some((s, fg, b, i)) = cur.take() {
+                        runs.push((s, text.len(), fg, b, i));
+                    }
+                    // Trim trailing blanks (no ink) to keep the atlas small.
+                    let keep = text.trim_end_matches(' ').len();
+                    if keep == 0 {
+                        continue;
+                    }
+                    let mut buf = Buffer::new(&mut fs, Metrics::new(font_px, line_h));
+                    buf.set_size(&mut fs, None, Some(line_h));
+                    let spans = runs.iter().filter_map(|&(s, e, fg, bold, italic)| {
+                        let e = e.min(keep);
+                        if s >= e {
+                            return None;
+                        }
+                        Some((&text[s..e], attrs_of(fg, bold, italic)))
+                    });
+                    buf.set_rich_text(&mut fs, spans, Attrs::new().family(family), Shaping::Advanced);
+                    buf.shape_until_scroll(&mut fs, false);
+                    row_buffers.push((buf, pad + seg_start as f32 * cell_w, top));
+                }
             }
 
             // --- Prepare GPU passes. ---
@@ -403,9 +462,9 @@ impl Renderer {
             let default_color = Color::rgb(theme.fg[0], theme.fg[1], theme.fg[2]);
             let areas: Vec<TextArea> = row_buffers
                 .iter()
-                .map(|(buf, top)| TextArea {
+                .map(|(buf, left, top)| TextArea {
                     buffer: buf,
-                    left: pad,
+                    left: *left,
                     top: *top,
                     scale: 1.0,
                     bounds,

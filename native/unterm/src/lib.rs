@@ -244,6 +244,42 @@ pub unsafe extern "C" fn unterm_size(id: u64, width: *mut u32, height: *mut u32)
     }
 }
 
+/// Write the cursor rect (physical px) into x/y/w/h; returns false if the
+/// cursor is hidden. Used to place the IME composition window.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_cursor_px(
+    id: u64,
+    x: *mut f32,
+    y: *mut f32,
+    w: *mut f32,
+    h: *mut f32,
+) -> bool {
+    let map = registry().lock().unwrap();
+    let Some(t) = map.get(&id) else {
+        return false;
+    };
+    match t.cursor_px() {
+        Some(r) => {
+            unsafe {
+                if !x.is_null() {
+                    *x = r[0];
+                }
+                if !y.is_null() {
+                    *y = r[1];
+                }
+                if !w.is_null() {
+                    *w = r[2];
+                }
+                if !h.is_null() {
+                    *h = r[3];
+                }
+            }
+            true
+        }
+        None => false,
+    }
+}
+
 /// Write the current grid size into `cols`/`rows` (either may be null).
 #[no_mangle]
 pub unsafe extern "C" fn unterm_grid_size(id: u64, cols: *mut u32, rows: *mut u32) {

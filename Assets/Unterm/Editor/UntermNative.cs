@@ -46,6 +46,7 @@ namespace Unterm.Editor
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr PtrFn(ulong id);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr PixelsFn(ulong id, out UIntPtr len);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void SizeFn(ulong id, out uint a, out uint b);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] [return: MarshalAs(UnmanagedType.I1)] private delegate bool CursorPxFn(ulong id, out float x, out float y, out float w, out float h);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr TitleFn(ulong id, out UIntPtr len);
 
         private IntPtr _handle;
@@ -58,7 +59,7 @@ namespace Unterm.Editor
         private SendKeyFn _sendKey; private SendTextFn _paste; private IdFn _clear;
         private ScrollFn _scroll; private IdFn _render; private BoolFn _dirty;
         private BoolFn _isAlive; private PtrFn _iosurface; private PtrFn _rawTexture; private PixelsFn _getPixels;
-        private SizeFn _size; private SizeFn _gridSize; private TitleFn _title;
+        private SizeFn _size; private SizeFn _gridSize; private CursorPxFn _cursorPx; private TitleFn _title;
 
         public bool IsLoaded => _handle != IntPtr.Zero;
 
@@ -110,6 +111,7 @@ namespace Unterm.Editor
             _getPixels = Sym<PixelsFn>("unterm_get_pixels");
             _size = Sym<SizeFn>("unterm_size");
             _gridSize = Sym<SizeFn>("unterm_grid_size");
+            _cursorPx = Sym<CursorPxFn>("unterm_cursor_px");
             _title = Sym<TitleFn>("unterm_title");
         }
 
@@ -158,6 +160,8 @@ namespace Unterm.Editor
         }
         public void Size(ulong id, out uint w, out uint h) => _size(id, out w, out h);
         public void GridSize(ulong id, out uint cols, out uint rows) => _gridSize(id, out cols, out rows);
+        public bool CursorPx(ulong id, out float x, out float y, out float w, out float h) =>
+            _cursorPx(id, out x, out y, out w, out h);
         public string Title(ulong id)
         {
             var p = _title(id, out UIntPtr len);
@@ -180,7 +184,8 @@ namespace Unterm.Editor
             _setFont = null; _setFontSize = null; _setColors = null; _setFocus = null;
             _sendText = null; _sendKey = null; _scroll = null; _render = null; _dirty = null;
             _isAlive = null; _iosurface = null; _rawTexture = null; _getPixels = null;
-            _size = null; _gridSize = null; _title = null;
+            _paste = null; _clear = null;
+            _size = null; _gridSize = null; _cursorPx = null; _title = null;
 
             if (!_stable && !string.IsNullOrEmpty(_shadowPath) && File.Exists(_shadowPath))
             {

@@ -42,6 +42,18 @@ pub fn spawn(
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
 
+    // Ensure a UTF-8 locale so the shell's line editor handles multibyte input
+    // (e.g. Japanese) instead of garbling it. GUI hosts like Unity often launch
+    // without LANG set, which leaves zsh/readline in a single-byte C locale.
+    let has_utf8 = ["LC_ALL", "LC_CTYPE", "LANG"].iter().any(|k| {
+        std::env::var(k)
+            .map(|v| v.to_ascii_uppercase().replace('-', "").contains("UTF8"))
+            .unwrap_or(false)
+    });
+    if !has_utf8 {
+        cmd.env("LANG", "en_US.UTF-8");
+    }
+
     let child = pair.slave.spawn_command(cmd)?;
     // Dropping the slave after spawn lets the child own the only slave fd, so
     // reads return EOF once it exits (otherwise the reader thread would hang).
