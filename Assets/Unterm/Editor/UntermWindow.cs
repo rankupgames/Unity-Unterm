@@ -58,6 +58,9 @@ namespace Unterm.Editor
 
         private static bool s_reloading;
 
+        // The native terminal is macOS-only (IOSurface/Metal zero-copy path), so
+        // only register the menu item when the Editor itself runs on macOS.
+#if UNITY_EDITOR_OSX
         [MenuItem("Window/Unterm/New Terminal %#t")]
         public static void OpenNew()
         {
@@ -67,6 +70,7 @@ namespace Unterm.Editor
             w.Show();
             w.Focus();
         }
+#endif
 
         private static string BundlePath =>
             Path.Combine(Application.dataPath, "Unterm/Plugins/macOS/unterm.bundle");
