@@ -331,6 +331,34 @@ pub unsafe extern "C" fn unterm_grid_size(id: u64, cols: *mut u32, rows: *mut u3
     }
 }
 
+/// Write the scrollback geometry for a scrollbar into `history` (scrollback
+/// lines above the screen), `offset` (lines the viewport is scrolled up from
+/// the live bottom; 0 = pinned to the bottom), and `screen` (visible rows).
+/// Any pointer may be null.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_scroll_state(
+    id: u64,
+    history: *mut u32,
+    offset: *mut u32,
+    screen: *mut u32,
+) {
+    let map = registry().lock().unwrap();
+    if let Some(t) = map.get(&id) {
+        let (h, o, s) = t.scroll_state();
+        unsafe {
+            if !history.is_null() {
+                *history = h as u32;
+            }
+            if !offset.is_null() {
+                *offset = o as u32;
+            }
+            if !screen.is_null() {
+                *screen = s as u32;
+            }
+        }
+    }
+}
+
 /// The window title set by the shell (OSC 0/2), as a stable NUL-terminated
 /// UTF-8 string valid until the next call on this terminal. Writes the length.
 #[no_mangle]

@@ -48,6 +48,7 @@ namespace Unterm.Editor
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr PtrFn(ulong id);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr PixelsFn(ulong id, out UIntPtr len);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void SizeFn(ulong id, out uint a, out uint b);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void ScrollStateFn(ulong id, out uint history, out uint offset, out uint screen);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] [return: MarshalAs(UnmanagedType.I1)] private delegate bool CursorPxFn(ulong id, out float x, out float y, out float w, out float h);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr TitleFn(ulong id, out UIntPtr len);
 
@@ -62,7 +63,7 @@ namespace Unterm.Editor
         private ScrollFn _scroll; private IdFn _render; private BoolFn _dirty;
         private SelStartFn _selStart; private SelUpdateFn _selUpdate; private IdFn _selClear; private TitleFn _selText;
         private BoolFn _isAlive; private PtrFn _iosurface; private PtrFn _rawTexture; private PixelsFn _getPixels;
-        private SizeFn _size; private SizeFn _gridSize; private CursorPxFn _cursorPx; private TitleFn _title;
+        private SizeFn _size; private SizeFn _gridSize; private ScrollStateFn _scrollState; private CursorPxFn _cursorPx; private TitleFn _title;
 
         public bool IsLoaded => _handle != IntPtr.Zero;
 
@@ -118,6 +119,7 @@ namespace Unterm.Editor
             _getPixels = Sym<PixelsFn>("unterm_get_pixels");
             _size = Sym<SizeFn>("unterm_size");
             _gridSize = Sym<SizeFn>("unterm_grid_size");
+            _scrollState = Sym<ScrollStateFn>("unterm_scroll_state");
             _cursorPx = Sym<CursorPxFn>("unterm_cursor_px");
             _title = Sym<TitleFn>("unterm_title");
         }
@@ -176,6 +178,10 @@ namespace Unterm.Editor
         }
         public void Size(ulong id, out uint w, out uint h) => _size(id, out w, out h);
         public void GridSize(ulong id, out uint cols, out uint rows) => _gridSize(id, out cols, out rows);
+        // history = scrollback lines above the screen; offset = lines scrolled up
+        // from the live bottom (0 = pinned); screen = visible row count.
+        public void ScrollState(ulong id, out uint history, out uint offset, out uint screen) =>
+            _scrollState(id, out history, out offset, out screen);
         public bool CursorPx(ulong id, out float x, out float y, out float w, out float h) =>
             _cursorPx(id, out x, out y, out w, out h);
         public string Title(ulong id)
@@ -202,7 +208,7 @@ namespace Unterm.Editor
             _selStart = null; _selUpdate = null; _selClear = null; _selText = null;
             _isAlive = null; _iosurface = null; _rawTexture = null; _getPixels = null;
             _paste = null; _clear = null;
-            _size = null; _gridSize = null; _cursorPx = null; _title = null;
+            _size = null; _gridSize = null; _scrollState = null; _cursorPx = null; _title = null;
 
             if (!_stable && !string.IsNullOrEmpty(_shadowPath) && File.Exists(_shadowPath))
             {

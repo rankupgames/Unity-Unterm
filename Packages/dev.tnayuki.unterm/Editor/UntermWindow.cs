@@ -20,6 +20,10 @@ namespace Unterm.Editor
     {
         private const float ToolbarHeight = 20f;
         private const float DefaultFontPt = 13f;
+        // Overlay scrollbar on the grid's right edge: it stays hidden while the
+        // viewport is pinned to the live bottom and appears once you scroll back.
+        private const float ScrollbarWidth = 9f;
+        private const float ScrollbarMinThumb = 24f;
 
         private UntermNative _native;
         // The terminal lives in the native registry; we hold its id and re-adopt
@@ -55,6 +59,10 @@ namespace Unterm.Editor
         // The selection mode set at MouseDown (0 = char, 1 = word, 2 = line).
         // MouseUp can't read clickCount reliably, so we keep it here.
         private byte _selectMode;
+        // Scrollbar thumb drag: live between MouseDown on the thumb and MouseUp;
+        // `_dragGrabY` is where within the thumb the pointer grabbed it.
+        private bool _draggingScroll;
+        private float _dragGrabY;
         private Color32 _bg = new Color32(24, 24, 24, 255);
         private Color32 _fg = new Color32(208, 208, 212, 255);
         private GUIStyle _imeStyle;
@@ -363,6 +371,8 @@ namespace Unterm.Editor
                 EditorGUI.LabelField(rect, _status, EditorStyles.centeredGreyMiniLabel);
             }
 
+            DrawScrollbar(rect);
+
             // The IME sink is drawn on top at the cursor: invisible when idle,
             // opaque while composing so the OS renders the composition inline.
             DrawImeField(rect);
@@ -504,10 +514,106 @@ namespace Unterm.Editor
             Repaint();
         }
 
+        // Overlay-scrollbar geometry within the grid `rect`. Returns false (and
+        // draws nothing) while pinned to the live bottom with no active drag, so
+        // the bar stays out of the way until you scroll back. `offset` is lines
+        // up from the bottom, `history` the total scrollback above the screen.
+        private bool ScrollbarGeometry(Rect rect, out Rect track, out Rect thumb,
+            out uint history, out uint offset, out uint screen)
+        {
+            track = thumb = default;
+            history = offset = screen = 0;
+            if (_native == null || Tid == 0) return false;
+            _native.ScrollState(Tid, out history, out offset, out screen);
+            if (history == 0 || screen == 0) return false;
+            // Hidden at the bottom; revealed once scrolled, or while dragging.
+            if (offset == 0 && !_draggingScroll) return false;
+
+            float total = history + screen;
+            track = new Rect(rect.xMax - ScrollbarWidth, rect.y, ScrollbarWidth, rect.height);
+            float thumbH = Mathf.Clamp(track.height * (screen / total), ScrollbarMinThumb, track.height);
+            // p = 0 at the top of history (offset == history), 1 at the live
+            // bottom (offset == 0); the thumb travels over the leftover track.
+            float p = history > 0 ? (history - offset) / (float)history : 1f;
+            float y = track.y + p * (track.height - thumbH);
+            thumb = new Rect(track.x, y, track.width, thumbH);
+            return true;
+        }
+
+        // Drive the scrollbar from a mouse event. Returns true when the event was
+        // consumed (so HandleInput stops before selection sees it).
+        private bool HandleScrollbarInput(Rect rect, Event e)
+        {
+            bool visible = ScrollbarGeometry(rect, out var track, out var thumb,
+                out uint history, out uint offset, out uint screen);
+
+            if (e.type == EventType.MouseDown && e.button == 0 && visible &&
+                track.Contains(e.mousePosition))
+            {
+                if (thumb.Contains(e.mousePosition))
+                {
+                    _draggingScroll = true;
+                    _dragGrabY = e.mousePosition.y - thumb.y;
+                }
+                else
+                {
+                    // Page toward the click (a screen's worth of lines).
+                    _native.Scroll(Tid, e.mousePosition.y < thumb.y ? (int)screen : -(int)screen);
+                    RenderNow();
+                }
+                Repaint();
+                e.Use();
+                return true;
+            }
+
+            if (e.type == EventType.MouseDrag && e.button == 0 && _draggingScroll)
+            {
+                float travel = track.height - thumb.height;
+                float p = travel > 0
+                    ? Mathf.Clamp01((e.mousePosition.y - _dragGrabY - track.y) / travel)
+                    : 0f;
+                int desired = Mathf.RoundToInt(history * (1f - p));
+                _native.Scroll(Tid, desired - (int)offset);
+                RenderNow();
+                Repaint();
+                e.Use();
+                return true;
+            }
+
+            if (e.type == EventType.MouseUp && e.button == 0 && _draggingScroll)
+            {
+                _draggingScroll = false;
+                Repaint();
+                e.Use();
+                return true;
+            }
+
+            return false;
+        }
+
+        private void DrawScrollbar(Rect rect)
+        {
+            if (Event.current.type != EventType.Repaint) return;
+            if (!ScrollbarGeometry(rect, out _, out var thumb, out _, out _, out _)) return;
+
+            // A bare overlay thumb (no track), tuned to read over either theme.
+            Color thumbCol = EditorGUIUtility.isProSkin
+                ? new Color(1f, 1f, 1f, _draggingScroll ? 0.42f : 0.28f)
+                : new Color(0f, 0f, 0f, _draggingScroll ? 0.38f : 0.24f);
+            // Inset a touch so the thumb floats off the very edge.
+            var t = new Rect(thumb.x + 1f, thumb.y + 1f, thumb.width - 2f, thumb.height - 2f);
+            EditorGUI.DrawRect(t, thumbCol);
+        }
+
         private void HandleInput(Rect rect)
         {
             if (_native == null || Tid == 0) return;
             var e = Event.current;
+
+            // Scrollbar drag takes priority over selection: grabbing the thumb
+            // scrolls to an absolute position, clicking the track pages, and a
+            // live drag keeps following the pointer even off the thumb.
+            if (HandleScrollbarInput(rect, e)) return;
 
             // Mouse-wheel scroll through scrollback (in lines).
             if (e.type == EventType.ScrollWheel && rect.Contains(e.mousePosition))

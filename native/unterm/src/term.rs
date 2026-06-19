@@ -405,6 +405,19 @@ impl Terminal {
     pub fn cursor_px(&self) -> Option<[f32; 4]> {
         self.renderer.cursor_px()
     }
+
+    /// Scrollback geometry for a scrollbar: total scrollback lines above the
+    /// screen (`history`), how far up from the live bottom the viewport
+    /// currently sits (`offset`, 0 = pinned to the bottom), and the visible
+    /// row count (`screen`).
+    pub fn scroll_state(&self) -> (usize, usize, usize) {
+        let (history, offset) = self
+            .term
+            .lock()
+            .map(|t| (t.grid().history_size(), t.grid().display_offset()))
+            .unwrap_or((0, 0));
+        (history, offset, self.rows)
+    }
 }
 
 /// Pump shell output through the parser into the shared grid until EOF.
