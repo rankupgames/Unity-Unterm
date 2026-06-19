@@ -1,0 +1,23 @@
+# Config for `cargo about` — generates the third-party license notices bundled
+# with unterm.bundle. The bundle is macOS-only, so we filter to that target and
+# drop build/dev-only crates that never end up in the shipped cdylib.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "0BSD",
+    "MPL-2.0",
+]
+
+# Only the macOS aarch64/x86_64 targets matter; this prunes Windows/Linux-only deps.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]

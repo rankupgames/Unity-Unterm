@@ -1,0 +1,26 @@
+# Third-Party Notices
+
+`unterm.bundle` is a compiled Rust binary that statically links the open-source
+crates listed below. Each is distributed under a permissive license whose terms
+require preserving the copyright notice and license text reproduced here.
+
+This file is generated with [`cargo about`](https://github.com/EmbarkStudios/cargo-about);
+run `cargo about generate about.hbs -o ../Packages/dev.tnayuki.unterm/Editor/Plugins/macOS/THIRD-PARTY-NOTICES.md`
+from the `native/` directory to regenerate it.
+
+{{#each overview}}
+- {{name}} ({{count}})
+{{/each}}
+
+{{#each licenses}}
+## {{name}}
+
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} — {{crate.repository}}{{/if}}
+{{/each}}
+
+```
+{{{text}}}
+```
+
+{{/each}}
