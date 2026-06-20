@@ -45,9 +45,9 @@ start in the project root.
 
 ## Platform
 
-macOS only. The renderer uses the IOSurface/Metal zero-copy path, so the
-menu item is only registered when the Editor itself runs on macOS. On other
-platforms the package contributes nothing.
+macOS only, Unity 6.3 (6000.3) or newer. The renderer uses the IOSurface/Metal
+zero-copy path, so the menu item is only registered when the Editor itself runs
+on macOS. On other platforms the package contributes nothing.
 
 ## Repository layout
 

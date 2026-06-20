@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.2] - 2026-06-20
+
+### Changed
+
+- Lowered the minimum supported Unity version to 6.3 (6000.3).
+
 ## [0.2.1] - 2026-06-20
 
 ### Added
