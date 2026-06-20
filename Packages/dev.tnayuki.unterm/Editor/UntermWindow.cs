@@ -18,7 +18,6 @@ namespace Unterm.Editor
     /// </summary>
     public sealed class UntermWindow : EditorWindow
     {
-        private const float ToolbarHeight = 20f;
         private const float DefaultFontPt = 13f;
         // Overlay scrollbar on the grid's right edge: it stays hidden while the
         // viewport is pinned to the live bottom and appears once you scroll back.
@@ -235,23 +234,27 @@ namespace Unterm.Editor
                 _imeStyle = null;
             }
 
+            // Drop the field before disposing so a re-entrant EditorApplication
+            // update tick bails on the `_native == null` guard rather than calling
+            // through a wrapper whose native delegates Dispose() has already nulled.
+            var native = _native;
+            _native = null;
             if (!keepTerminal)
             {
-                if (_native != null && Tid != 0)
-                    _native.Destroy(Tid);
+                if (native != null && Tid != 0)
+                    native.Destroy(Tid);
                 _termIdRaw = 0;
-                _native?.Dispose(); // dlclose on real teardown
+                native?.Dispose(); // dlclose on real teardown
             }
             // On reload: drop the managed wrapper WITHOUT dlclose so the native
             // image (and the terminal registry) stay mapped for re-adoption.
-            _native = null;
         }
 
         private (uint, uint) CurrentPixelSize()
         {
             float ppp = EditorGUIUtility.pixelsPerPoint;
             uint w = (uint)Mathf.Max(1, Mathf.RoundToInt(position.width * ppp));
-            uint h = (uint)Mathf.Max(1, Mathf.RoundToInt((position.height - ToolbarHeight) * ppp));
+            uint h = (uint)Mathf.Max(1, Mathf.RoundToInt(position.height * ppp));
             return (w, h);
         }
 
@@ -377,9 +380,7 @@ namespace Unterm.Editor
                 _composing = now;
             }
 
-            DrawToolbar();
-
-            var rect = new Rect(0, ToolbarHeight, position.width, position.height - ToolbarHeight);
+            var rect = new Rect(0, 0, position.width, position.height);
 
             // Re-render when the draw area no longer matches the texture (resize).
             var (cw, ch) = CurrentPixelSize();
@@ -498,25 +499,7 @@ namespace Unterm.Editor
             if (te != null) { te.text = ""; te.cursorIndex = 0; te.selectIndex = 0; }
         }
 
-        private void DrawToolbar()
-        {
-            using (new GUILayout.HorizontalScope(EditorStyles.toolbar))
-            {
-                if (!_alive && GUILayout.Button("Restart", EditorStyles.toolbarButton, GUILayout.Width(60)))
-                    Restart();
-
-                GUILayout.FlexibleSpace();
-
-                // Font size controls, pinned to the right edge.
-                if (GUILayout.Button("-", EditorStyles.toolbarButton, GUILayout.Width(24)))
-                    ChangeFont(-1f);
-                if (GUILayout.Button("+", EditorStyles.toolbarButton, GUILayout.Width(24)))
-                    ChangeFont(+1f);
-            }
-        }
-
         private void ChangeFont(float delta) => SetFont(_fontPt + delta);
-        private void ResetFont() => SetFont(DefaultFontPt);
 
         private void SetFont(float points)
         {
@@ -527,21 +510,6 @@ namespace Unterm.Editor
                 RenderNow();
                 Repaint();
             }
-        }
-
-        private void Restart()
-        {
-            if (_native == null) return;
-            if (Tid != 0) _native.Destroy(Tid);
-            _termIdRaw = 0;
-            var (w, h) = CurrentPixelSize();
-            _termIdRaw = (long)_native.Create(w, h, EditorGUIUtility.pixelsPerPoint, ProjectRoot);
-            ApplyFont();
-            _native.SetFontSize(Tid, _fontPt);
-            ApplyTheme();
-            _native.SetFocus(Tid, true);
-            RenderNow();
-            Repaint();
         }
 
         // Overlay-scrollbar geometry within the grid `rect`. Returns false (and
@@ -739,19 +707,6 @@ namespace Unterm.Editor
                     case KeyCode.K:
                         _native.Clear(Tid);
                         break;
-                    case KeyCode.Equals:      // Cmd-= and Cmd-+ (shifted '=')
-                    case KeyCode.Plus:
-                    case KeyCode.KeypadPlus:
-                        ChangeFont(+1f);
-                        break;
-                    case KeyCode.Minus:
-                    case KeyCode.KeypadMinus:
-                        ChangeFont(-1f);
-                        break;
-                    case KeyCode.Alpha0:
-                    case KeyCode.Keypad0:
-                        ResetFont();
-                        break;
                 }
                 e.Use();
                 return;
@@ -794,7 +749,8 @@ namespace Unterm.Editor
         }
 
         // Right-click context menu: Copy the current selection (disabled when
-        // nothing is selected) and Paste the system clipboard into the shell.
+        // nothing is selected), Paste the system clipboard into the shell, and
+        // increase/decrease the font size.
         private void ShowContextMenu()
         {
             if (_native == null || Tid == 0) return;
@@ -812,6 +768,10 @@ namespace Unterm.Editor
                 if (_native != null && Tid != 0)
                     _native.Paste(Tid, EditorGUIUtility.systemCopyBuffer);
             });
+
+            menu.AddSeparator("");
+            menu.AddItem(new GUIContent("Increase Font Size"), false, () => ChangeFont(+1f));
+            menu.AddItem(new GUIContent("Decrease Font Size"), false, () => ChangeFont(-1f));
 
             menu.ShowAsContext();
         }

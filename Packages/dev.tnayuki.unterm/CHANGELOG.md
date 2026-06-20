@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- The terminal grid now fills the whole window: the toolbar has been removed, and font size +/- moved into the right-click menu.
+
 ## [0.2.2] - 2026-06-20
 
 ### Changed
