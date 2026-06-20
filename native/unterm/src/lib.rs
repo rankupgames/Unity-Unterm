@@ -14,6 +14,7 @@
 //! const void* unterm_raw_texture(uint64_t id); // id<MTLTexture> for zero-copy
 //! ```
 
+mod control;
 mod gpu;
 #[cfg(target_os = "macos")]
 mod iosurface;
@@ -22,6 +23,7 @@ mod palette;
 mod pty;
 mod quads;
 mod renderer;
+mod session;
 mod shell;
 mod surface;
 mod term;
@@ -30,8 +32,10 @@ mod unity;
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use session::AgentSession;
 use term::Terminal;
 
 /// Initialize logging once. Safe to call repeatedly.
@@ -523,6 +527,177 @@ pub unsafe extern "C" fn unterm_title(id: u64, out_len: *mut usize) -> *const c_
     c.as_ptr()
 }
 
-// Keep `c_void` referenced so a header generator records the opaque handle type.
-#[doc(hidden)]
-pub type _UntermHandle = *mut c_void;
+// ===========================================================================
+// Agent sessions: each spawns the native `claude` binary in stream-json mode and
+// speaks Claude Code's control protocol (see `control`), accumulating a
+// role-tagged transcript the host polls. Sessions live in native globals keyed
+// by a stable u64 id so they survive C# domain reloads (the host serializes the
+// id and re-adopts).
+// ===========================================================================
+
+type SessionMap = HashMap<u64, Box<AgentSession>>;
+
+fn sessions() -> &'static Mutex<SessionMap> {
+    static S: OnceLock<Mutex<SessionMap>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Create a session rooted at `cwd`, wired to the shared MCP server.
+/// Returns a stable id the host should persist (to re-adopt across reloads).
+#[no_mangle]
+pub unsafe extern "C" fn unterm_session_create(
+    cwd: *const c_char,
+    claude_cmd: *const c_char,
+) -> u64 {
+    init_log();
+    let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+    let session = AgentSession::new(cstr(cwd), None, cstr(claude_cmd));
+    sessions().lock().unwrap().insert(id, Box::new(session));
+    id
+}
+
+/// Like `unterm_session_create`, but resumes the prior conversation `session_id`
+/// (the agent replays its history) when the agent supports it; falls back to a
+/// fresh session otherwise. Used to restore a conversation after editor restart.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_session_load(
+    cwd: *const c_char,
+    session_id: *const c_char,
+    claude_cmd: *const c_char,
+) -> u64 {
+    init_log();
+    let resume = {
+        let s = cstr(session_id);
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    };
+    let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+    let session = AgentSession::new(cstr(cwd), resume, cstr(claude_cmd));
+    sessions().lock().unwrap().insert(id, Box::new(session));
+    id
+}
+
+/// Whether a session id is still live (used to re-adopt after a reload).
+#[no_mangle]
+pub extern "C" fn unterm_session_exists(id: u64) -> bool {
+    sessions().lock().unwrap().contains_key(&id)
+}
+
+/// Destroy a session (ends its worker and detaches the subprocess).
+#[no_mangle]
+pub extern "C" fn unterm_session_destroy(id: u64) {
+    sessions().lock().unwrap().remove(&id);
+}
+
+/// Queue a user prompt to a session.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_session_send(id: u64, text: *const c_char) {
+    if text.is_null() {
+        return;
+    }
+    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned();
+    if let Some(s) = sessions().lock().unwrap().get(&id) {
+        s.send(&text);
+    }
+}
+
+/// Return the session transcript as NUL-terminated UTF-8 (valid until the next
+/// call on the same session). Writes the byte length.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_session_transcript(id: u64, out_len: *mut usize) -> *const c_char {
+    let mut map = sessions().lock().unwrap();
+    let Some(s) = map.get_mut(&id) else {
+        return std::ptr::null();
+    };
+    let c = s.transcript_snapshot();
+    if !out_len.is_null() {
+        unsafe { *out_len = c.as_bytes().len() };
+    }
+    let ptr = c.as_ptr();
+    drop(map);
+    ptr
+}
+
+/// Pending permission for a session as `title{RS}id{US}name{US}kind{RS}...`,
+/// or empty if none. Writes the byte length.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_session_pending(id: u64, out_len: *mut usize) -> *const c_char {
+    let mut map = sessions().lock().unwrap();
+    let Some(s) = map.get_mut(&id) else {
+        return std::ptr::null();
+    };
+    let c = s.pending_snapshot();
+    if !out_len.is_null() {
+        unsafe { *out_len = c.as_bytes().len() };
+    }
+    let ptr = c.as_ptr();
+    drop(map);
+    ptr
+}
+
+/// Answer the pending permission for a session with the chosen option id.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_session_respond(id: u64, option_id: *const c_char) {
+    if option_id.is_null() {
+        return;
+    }
+    let opt = unsafe { CStr::from_ptr(option_id) }.to_string_lossy().into_owned();
+    if let Some(s) = sessions().lock().unwrap().get(&id) {
+        s.respond(&opt);
+    }
+}
+
+/// Return the session worker status ("starting"/"initializing"/"ready"/"thinking").
+#[no_mangle]
+pub unsafe extern "C" fn unterm_session_status(id: u64, out_len: *mut usize) -> *const c_char {
+    let mut map = sessions().lock().unwrap();
+    let Some(s) = map.get_mut(&id) else {
+        return std::ptr::null();
+    };
+    let c = s.status_snapshot();
+    if !out_len.is_null() {
+        unsafe { *out_len = c.as_bytes().len() };
+    }
+    let ptr = c.as_ptr();
+    drop(map);
+    ptr
+}
+
+/// Return the session agent's display name (empty until initialized).
+#[no_mangle]
+pub unsafe extern "C" fn unterm_session_agent_name(id: u64, out_len: *mut usize) -> *const c_char {
+    let mut map = sessions().lock().unwrap();
+    let Some(s) = map.get_mut(&id) else {
+        return std::ptr::null();
+    };
+    let c = s.agent_snapshot();
+    if !out_len.is_null() {
+        unsafe { *out_len = c.as_bytes().len() };
+    }
+    let ptr = c.as_ptr();
+    drop(map);
+    ptr
+}
+
+/// Return the live session id (empty until established). The host persists
+/// this and passes it to `unterm_session_load` to resume after a restart.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_session_id(id: u64, out_len: *mut usize) -> *const c_char {
+    let mut map = sessions().lock().unwrap();
+    let Some(s) = map.get_mut(&id) else {
+        return std::ptr::null();
+    };
+    let c = s.session_id_snapshot();
+    if !out_len.is_null() {
+        unsafe { *out_len = c.as_bytes().len() };
+    }
+    let ptr = c.as_ptr();
+    drop(map);
+    ptr
+}
+
