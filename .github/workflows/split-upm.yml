@@ -40,7 +40,7 @@ jobs:
         working-directory: native
         run: |
           cargo about generate about.hbs \
-            -o ../Packages/dev.tnayuki.unterm/Editor/Plugins/macOS/THIRD-PARTY-NOTICES.md
+            -o "../Packages/dev.tnayuki.unterm/Third Party Notices.md"
 
       - name: Publish package to upm branch
         env:
