@@ -1,0 +1,31 @@
+# Changelog
+
+## [Unreleased]
+
+### Added
+
+- **Claude Code launcher** — a menu item that opens a terminal already running
+  `claude` in the PTY, so you can start a Claude Code session in one step.
+
+## [0.2.0] - 2026-06-19
+
+### Added
+
+- **Scrollback** — scroll the wheel to page back through history, with an
+  overlay scrollbar on the right edge that appears while scrolled back and can
+  be dragged to any position.
+
+### Fixed
+
+- The Enter key that commits an IME composition is no longer also sent to the
+  shell, so confirming a conversion no longer runs a stray command.
+
+## [0.1.0] - 2026-06-19
+
+### Added
+
+- Native Rust/wgpu terminal window for the Unity Editor, backed by a real PTY
+  shell, that survives C# domain reloads.
+- IME composition input with wide-character alignment and a UTF-8 shell locale.
+- Mouse selection with a right-click Copy/Paste menu.
+- Terminal shortcuts: focused-terminal key priority, clear, and bracketed paste.
