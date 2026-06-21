@@ -407,63 +407,45 @@ use unity_native_plugin::metal::{UnityGraphicsMetalV1, UnityGraphicsMetalV1Inter
 use unity_native_plugin::metal::{UnityGraphicsMetalV2, UnityGraphicsMetalV2Interface};
 
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLDevice, MTLCommandQueue};
 
-// ---- Original auto-loaded DLL: store Retained smart pointers ----
-// Retained holds a +1 refcount; dropping it calls release automatically.
+// ---- Original auto-loaded DLL ----
 
 static UNITY_INTERFACES: OnceLock<&'static UnityInterfaces> = OnceLock::new();
-
-static UNITY_METAL_DEVICE: Mutex<Option<Retained<ProtocolObject<dyn MTLDevice>>>> =
-    Mutex::new(None);
-static UNITY_METAL_QUEUE: Mutex<Option<Retained<ProtocolObject<dyn MTLCommandQueue>>>> =
-    Mutex::new(None);
 
 unity_native_plugin::unity_native_plugin_entry_point! {
     fn unity_plugin_load(interfaces: &'static UnityInterfaces) {
         let _ = UNITY_INTERFACES.set(interfaces);
     }
-    fn unity_plugin_unload() {
-        // Setting to None drops the Retained, calling release via Drop trait
-        *UNITY_METAL_DEVICE.lock().unwrap() = None;
-        *UNITY_METAL_QUEUE.lock().unwrap() = None;
-    }
+    fn unity_plugin_unload() {}
 }
 
 // Expose raw pointers for the C# bridge to read
 #[no_mangle]
 pub extern "C" fn unterm_get_unity_device() -> *mut c_void {
-    let mut device_lock = UNITY_METAL_DEVICE.lock().unwrap();
-    if device_lock.is_none() {
-        if let Some(interfaces) = UNITY_INTERFACES.get() {
-            if let Some(metal_v2) = interfaces.interface::<UnityGraphicsMetalV2>() {
-                *device_lock = metal_v2.metal_device();
-            } else if let Some(metal_v1) = interfaces.interface::<UnityGraphicsMetalV1>() {
-                *device_lock = metal_v1.metal_device();
+    if let Some(interfaces) = UNITY_INTERFACES.get() {
+        if let Some(metal_v2) = interfaces.interface::<UnityGraphicsMetalV2>() {
+            if let Some(device) = metal_v2.metal_device() {
+                return Retained::as_ptr(&device) as *const _ as *mut c_void;
+            }
+        } else if let Some(metal_v1) = interfaces.interface::<UnityGraphicsMetalV1>() {
+            if let Some(device) = metal_v1.metal_device() {
+                return Retained::as_ptr(&device) as *const _ as *mut c_void;
             }
         }
     }
-    device_lock
-        .as_ref()
-        .map(|r| Retained::as_ptr(r) as *const _ as *mut c_void)
-        .unwrap_or(std::ptr::null_mut())
+    std::ptr::null_mut()
 }
 
 #[no_mangle]
 pub extern "C" fn unterm_get_unity_queue() -> *mut c_void {
-    let mut queue_lock = UNITY_METAL_QUEUE.lock().unwrap();
-    if queue_lock.is_none() {
-        if let Some(interfaces) = UNITY_INTERFACES.get() {
-            if let Some(metal_v2) = interfaces.interface::<UnityGraphicsMetalV2>() {
-                *queue_lock = metal_v2.command_queue();
+    if let Some(interfaces) = UNITY_INTERFACES.get() {
+        if let Some(metal_v2) = interfaces.interface::<UnityGraphicsMetalV2>() {
+            if let Some(queue) = metal_v2.command_queue() {
+                return Retained::as_ptr(&queue) as *const _ as *mut c_void;
             }
         }
     }
-    queue_lock
-        .as_ref()
-        .map(|r| Retained::as_ptr(r) as *const _ as *mut c_void)
-        .unwrap_or(std::ptr::null_mut())
+    std::ptr::null_mut()
 }
 
 // ---- Shadow-copied DLL: receive raw pointers from C# bridge ----
