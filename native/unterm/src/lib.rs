@@ -14,16 +14,18 @@
 //! const void* unterm_raw_texture(uint64_t id); // id<MTLTexture> for zero-copy
 //! ```
 
+mod agentview;
 mod control;
 mod gpu;
+mod input;
 #[cfg(target_os = "macos")]
 mod iosurface;
 mod keys;
 mod palette;
+mod panel;
 mod pty;
 mod quads;
 mod renderer;
-mod session;
 mod shell;
 mod surface;
 mod term;
@@ -31,11 +33,11 @@ mod term;
 mod unity;
 
 use std::collections::HashMap;
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use session::AgentSession;
+use agentview::AgentView;
 use term::Terminal;
 
 /// Initialize logging once. Safe to call repeatedly.
@@ -527,94 +529,437 @@ pub unsafe extern "C" fn unterm_title(id: u64, out_len: *mut usize) -> *const c_
     c.as_ptr()
 }
 
-// ===========================================================================
-// Agent sessions: each spawns the native `claude` binary in stream-json mode and
-// speaks Claude Code's control protocol (see `control`), accumulating a
-// role-tagged transcript the host polls. Sessions live in native globals keyed
-// by a stable u64 id so they survive C# domain reloads (the host serializes the
-// id and re-adopts).
-// ===========================================================================
-
-type SessionMap = HashMap<u64, Box<AgentSession>>;
-
-fn sessions() -> &'static Mutex<SessionMap> {
-    static S: OnceLock<Mutex<SessionMap>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Create a session rooted at `cwd`, wired to the shared MCP server.
-/// Returns a stable id the host should persist (to re-adopt across reloads).
+
+
+
+
+
+
+
+
+
+
+
+
+// ===========================================================================
+// Agent view: a single id-handled object owning the conversation, the transcript
+// renderer, and the composer. It composes the transcript (history + pending +
+// indicator), renders both surfaces, draws/resolves all buttons, and routes
+// input — so the host knows nothing about the agent. It lives in a process-global
+// registry keyed by a stable id, so it survives C# domain reloads (the host
+// re-adopts it by id and re-applies size/theme/fonts).
+// ===========================================================================
+
+type ViewMap = HashMap<u64, Box<AgentView>>;
+
+fn views() -> &'static Mutex<ViewMap> {
+    static V: OnceLock<Mutex<ViewMap>> = OnceLock::new();
+    V.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Create a fresh agent view rooted at `cwd`, wired to the shared MCP server.
+/// `pw/ph` and `iw/ih` are the transcript and composer surface sizes (physical
+/// px). Returns a stable id the host persists to re-adopt across reloads.
+///
+/// # Safety
+/// `cwd`/`claude_cmd` must be valid C strings or null.
 #[no_mangle]
-pub unsafe extern "C" fn unterm_session_create(
+pub unsafe extern "C" fn unterm_agentview_create(
     cwd: *const c_char,
+    pw: u32,
+    ph: u32,
+    iw: u32,
+    ih: u32,
     claude_cmd: *const c_char,
 ) -> u64 {
     init_log();
     let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
-    let session = AgentSession::new(cstr(cwd), None, cstr(claude_cmd));
-    sessions().lock().unwrap().insert(id, Box::new(session));
+    let v = AgentView::new(cstr(cwd), None, pw.max(1), ph.max(1), iw.max(1), ih.max(1), cstr(claude_cmd));
+    views().lock().unwrap().insert(id, Box::new(v));
     id
 }
 
-/// Like `unterm_session_create`, but resumes the prior conversation `session_id`
-/// (the agent replays its history) when the agent supports it; falls back to a
-/// fresh session otherwise. Used to restore a conversation after editor restart.
+/// Like `unterm_agentview_create`, but resumes the prior conversation `resume`.
+///
+/// # Safety
+/// `cwd`/`resume`/`claude_cmd` must be valid C strings or null.
 #[no_mangle]
-pub unsafe extern "C" fn unterm_session_load(
+pub unsafe extern "C" fn unterm_agentview_load(
     cwd: *const c_char,
-    session_id: *const c_char,
+    resume: *const c_char,
+    pw: u32,
+    ph: u32,
+    iw: u32,
+    ih: u32,
     claude_cmd: *const c_char,
 ) -> u64 {
     init_log();
     let resume = {
-        let s = cstr(session_id);
-        if s.is_empty() {
-            None
-        } else {
-            Some(s)
-        }
+        let s = cstr(resume);
+        (!s.is_empty()).then_some(s)
     };
     let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
-    let session = AgentSession::new(cstr(cwd), resume, cstr(claude_cmd));
-    sessions().lock().unwrap().insert(id, Box::new(session));
+    let v = AgentView::new(cstr(cwd), resume, pw.max(1), ph.max(1), iw.max(1), ih.max(1), cstr(claude_cmd));
+    views().lock().unwrap().insert(id, Box::new(v));
     id
 }
 
-/// Whether a session id is still live (used to re-adopt after a reload).
+/// Whether a view id is still live (to re-adopt after a reload).
 #[no_mangle]
-pub extern "C" fn unterm_session_exists(id: u64) -> bool {
-    sessions().lock().unwrap().contains_key(&id)
+pub extern "C" fn unterm_agentview_exists(id: u64) -> bool {
+    views().lock().unwrap().contains_key(&id)
 }
 
-/// Destroy a session (ends its worker and detaches the subprocess).
+/// Destroy a view (ends its worker, detaches the subprocess, frees surfaces).
 #[no_mangle]
-pub extern "C" fn unterm_session_destroy(id: u64) {
-    sessions().lock().unwrap().remove(&id);
+pub extern "C" fn unterm_agentview_destroy(id: u64) {
+    views().lock().unwrap().remove(&id);
 }
 
-/// Queue a user prompt to a session.
+/// Pull driver state and report what changed: bit0 = dirty (render+repaint),
+/// bit1 = animating (keep repainting).
 #[no_mangle]
-pub unsafe extern "C" fn unterm_session_send(id: u64, text: *const c_char) {
-    if text.is_null() {
-        return;
-    }
-    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned();
-    if let Some(s) = sessions().lock().unwrap().get(&id) {
-        s.send(&text);
+pub extern "C" fn unterm_agentview_poll(id: u64) -> u32 {
+    match views().lock().unwrap().get_mut(&id) {
+        Some(v) => v.poll(),
+        None => 0,
     }
 }
 
-/// Return the session transcript as NUL-terminated UTF-8 (valid until the next
-/// call on the same session). Writes the byte length.
+/// Compose + render both surfaces.
 #[no_mangle]
-pub unsafe extern "C" fn unterm_session_transcript(id: u64, out_len: *mut usize) -> *const c_char {
-    let mut map = sessions().lock().unwrap();
-    let Some(s) = map.get_mut(&id) else {
+pub extern "C" fn unterm_agentview_render(id: u64) {
+    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+        v.render();
+    }
+}
+
+/// Resize both surfaces and set the HiDPI scale.
+#[no_mangle]
+pub extern "C" fn unterm_agentview_resize(id: u64, pw: u32, ph: u32, iw: u32, ih: u32, scale: f32) {
+    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+        v.resize(pw.max(1), ph.max(1), iw.max(1), ih.max(1), scale);
+    }
+}
+
+/// Apply the editor theme (background rgba + foreground rgb) to both surfaces.
+#[no_mangle]
+pub extern "C" fn unterm_agentview_set_theme(
+    id: u64,
+    br: f64,
+    bg: f64,
+    bb: f64,
+    ba: f64,
+    fr: u8,
+    fg: u8,
+    fb: u8,
+) {
+    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+        v.set_theme(br, bg, bb, ba, fr, fg, fb);
+    }
+}
+
+/// Load the Regular/Bold/Italic/BoldItalic faces (empty = skip).
+///
+/// # Safety
+/// Each path must be a valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_set_fonts(
+    id: u64,
+    regular: *const c_char,
+    bold: *const c_char,
+    italic: *const c_char,
+    bold_italic: *const c_char,
+) {
+    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+        v.set_fonts(&cstr(regular), &cstr(bold), &cstr(italic), &cstr(bold_italic));
+    }
+}
+
+/// Raw `id<MTLTexture>` of the transcript surface (for Unity zero-copy).
+#[no_mangle]
+pub extern "C" fn unterm_agentview_panel_texture(id: u64) -> *mut c_void {
+    match views().lock().unwrap().get(&id) {
+        Some(v) => v.panel_texture(),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Raw `id<MTLTexture>` of the composer surface.
+#[no_mangle]
+pub extern "C" fn unterm_agentview_input_texture(id: u64) -> *mut c_void {
+    match views().lock().unwrap().get(&id) {
+        Some(v) => v.input_texture(),
+        None => std::ptr::null_mut(),
+    }
+}
+
+
+/// Transcript content height in physical px (for the host scrollbar).
+#[no_mangle]
+pub extern "C" fn unterm_agentview_content_height(id: u64) -> f32 {
+    views().lock().unwrap().get(&id).map_or(0.0, |v| v.content_height())
+}
+
+/// Composer content height in physical px (for host auto-grow).
+#[no_mangle]
+pub extern "C" fn unterm_agentview_input_height(id: u64) -> f32 {
+    views().lock().unwrap().get(&id).map_or(0.0, |v| v.input_height())
+}
+
+/// Set the vertical transcript scroll (physical px, 0 = latest).
+#[no_mangle]
+pub extern "C" fn unterm_agentview_set_scroll(id: u64, scroll: f32) {
+    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+        v.set_scroll(scroll);
+    }
+}
+
+/// Composer caret rect in physical px (for host IME positioning).
+///
+/// # Safety
+/// Out pointers must be writable or null.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_caret(
+    id: u64,
+    x: *mut f32,
+    y: *mut f32,
+    w: *mut f32,
+    h: *mut f32,
+) {
+    if let Some(v) = views().lock().unwrap().get(&id) {
+        let r = v.caret_rect();
+        unsafe {
+            if !x.is_null() {
+                *x = r[0];
+            }
+            if !y.is_null() {
+                *y = r[1];
+            }
+            if !w.is_null() {
+                *w = r[2];
+            }
+            if !h.is_null() {
+                *h = r[3];
+            }
+        }
+    }
+}
+
+/// Interrupt the in-flight turn (no-op if idle).
+#[no_mangle]
+pub extern "C" fn unterm_agentview_interrupt(id: u64) {
+    if let Some(v) = views().lock().unwrap().get(&id) {
+        v.interrupt();
+    }
+}
+
+/// The live Claude session id (empty until established). Writes the byte length.
+///
+/// # Safety
+/// `out_len` writable or null. Pointer valid until the next call on this view.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_session_id(id: u64, out_len: *mut usize) -> *const c_char {
+    view_string(id, out_len, |v| v.session_id())
+}
+
+/// The session's title (first user line). Writes the byte length.
+///
+/// # Safety
+/// `out_len` writable or null. Pointer valid until the next call on this view.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_title(id: u64, out_len: *mut usize) -> *const c_char {
+    view_string(id, out_len, |v| v.title())
+}
+
+// --- transcript (panel) input ---
+
+/// Mouse-down in the transcript. Returns 1 if consumed.
+#[no_mangle]
+pub extern "C" fn unterm_agentview_panel_down(id: u64, x: f32, y: f32) -> u8 {
+    match views().lock().unwrap().get_mut(&id) {
+        Some(v) => v.panel_down(x, y) as u8,
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn unterm_agentview_panel_drag(id: u64, x: f32, y: f32) {
+    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+        v.panel_drag(x, y);
+    }
+}
+
+/// Horizontal scroll of the code block under (x, y). Returns 1 if consumed.
+#[no_mangle]
+pub extern "C" fn unterm_agentview_panel_scroll_h(id: u64, x: f32, y: f32, dx: f32) -> u8 {
+    match views().lock().unwrap().get_mut(&id) {
+        Some(v) => v.panel_scroll_h(x, y, dx) as u8,
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn unterm_agentview_panel_select_all(id: u64) {
+    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+        v.panel_select_all();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn unterm_agentview_panel_select_clear(id: u64) {
+    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+        v.panel_select_clear();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn unterm_agentview_panel_has_selection(id: u64) -> bool {
+    matches!(views().lock().unwrap().get(&id), Some(v) if v.panel_has_selection())
+}
+
+/// Whether a turn is actively running (sent a prompt, agent thinking/replying) —
+/// not idle, initializing, or just resumed. Lets the host record real conversation
+/// activity (vs merely opening/switching a session).
+#[no_mangle]
+pub extern "C" fn unterm_agentview_thinking(id: u64) -> bool {
+    matches!(views().lock().unwrap().get(&id), Some(v) if v.is_thinking())
+}
+
+/// Selected transcript text. Writes the byte length.
+///
+/// # Safety
+/// `out_len` writable or null. Pointer valid until the next call on this view.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_panel_selected_text(
+    id: u64,
+    out_len: *mut usize,
+) -> *const c_char {
+    view_string(id, out_len, |v| v.panel_selected_text())
+}
+
+// --- composer (input) input ---
+
+/// Mouse-down in the composer. `kind`: 0 click, 2 double, 3 triple. Returns 1
+/// if the Send/Stop button was hit (action performed; host should not drag).
+#[no_mangle]
+pub extern "C" fn unterm_agentview_input_down(id: u64, x: f32, y: f32, kind: u8) -> u8 {
+    match views().lock().unwrap().get_mut(&id) {
+        Some(v) => v.input_down(x, y, kind) as u8,
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn unterm_agentview_input_drag(id: u64, x: f32, y: f32) {
+    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+        v.input_drag(x, y);
+    }
+}
+
+/// A composer key (Enter sends, Shift+Enter newlines, rest edits).
+///
+/// # Safety
+/// `name` must be a valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_input_key(
+    id: u64,
+    name: *const c_char,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+) {
+    let name = cstr(name);
+    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+        v.input_key(&name, ctrl, alt, shift);
+    }
+}
+
+/// Insert text into the composer (paste / IME commit).
+///
+/// # Safety
+/// `text` must be a valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_input_insert(id: u64, text: *const c_char) {
+    let text = cstr(text);
+    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+        v.input_insert(&text);
+    }
+}
+
+/// Set the live IME composition shown inline as marked text (empty clears it).
+///
+/// # Safety
+/// `text` must be a valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_input_set_preedit(id: u64, text: *const c_char) {
+    let text = cstr(text);
+    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+        v.input_set_preedit(&text);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn unterm_agentview_input_undo(id: u64) {
+    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+        v.input_undo();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn unterm_agentview_input_redo(id: u64) {
+    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+        v.input_redo();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn unterm_agentview_input_select_all(id: u64) {
+    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+        v.input_select_all();
+    }
+}
+
+/// Copy the composer selection to a snapshot (host writes the OS clipboard).
+///
+/// # Safety
+/// `out_len` writable or null. Pointer valid until the next call on this view.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_input_copy(id: u64, out_len: *mut usize) -> *const c_char {
+    view_string(id, out_len, |v| v.input_copy())
+}
+
+/// Cut the composer selection to a snapshot (host writes the OS clipboard).
+///
+/// # Safety
+/// `out_len` writable or null. Pointer valid until the next call on this view.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_input_cut(id: u64, out_len: *mut usize) -> *const c_char {
+    view_string(id, out_len, |v| v.input_cut())
+}
+
+/// The composer's current text. Writes the byte length.
+///
+/// # Safety
+/// `out_len` writable or null. Pointer valid until the next call on this view.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_input_text(id: u64, out_len: *mut usize) -> *const c_char {
+    view_string(id, out_len, |v| v.input_text())
+}
+
+/// Shared helper for the cached-CString accessors.
+unsafe fn view_string(
+    id: u64,
+    out_len: *mut usize,
+    f: impl FnOnce(&mut AgentView) -> &CString,
+) -> *const c_char {
+    let mut map = views().lock().unwrap();
+    let Some(v) = map.get_mut(&id) else {
         return std::ptr::null();
     };
-    let c = s.transcript_snapshot();
+    let c = f(v);
     if !out_len.is_null() {
         unsafe { *out_len = c.as_bytes().len() };
     }
@@ -623,81 +968,58 @@ pub unsafe extern "C" fn unterm_session_transcript(id: u64, out_len: *mut usize)
     ptr
 }
 
-/// Pending permission for a session as `title{RS}id{US}name{US}kind{RS}...`,
-/// or empty if none. Writes the byte length.
-#[no_mangle]
-pub unsafe extern "C" fn unterm_session_pending(id: u64, out_len: *mut usize) -> *const c_char {
-    let mut map = sessions().lock().unwrap();
-    let Some(s) = map.get_mut(&id) else {
-        return std::ptr::null();
-    };
-    let c = s.pending_snapshot();
-    if !out_len.is_null() {
-        unsafe { *out_len = c.as_bytes().len() };
-    }
-    let ptr = c.as_ptr();
-    drop(map);
-    ptr
-}
 
-/// Answer the pending permission for a session with the chosen option id.
-#[no_mangle]
-pub unsafe extern "C" fn unterm_session_respond(id: u64, option_id: *const c_char) {
-    if option_id.is_null() {
-        return;
-    }
-    let opt = unsafe { CStr::from_ptr(option_id) }.to_string_lossy().into_owned();
-    if let Some(s) = sessions().lock().unwrap().get(&id) {
-        s.respond(&opt);
-    }
-}
 
-/// Return the session worker status ("starting"/"initializing"/"ready"/"thinking").
-#[no_mangle]
-pub unsafe extern "C" fn unterm_session_status(id: u64, out_len: *mut usize) -> *const c_char {
-    let mut map = sessions().lock().unwrap();
-    let Some(s) = map.get_mut(&id) else {
-        return std::ptr::null();
-    };
-    let c = s.status_snapshot();
-    if !out_len.is_null() {
-        unsafe { *out_len = c.as_bytes().len() };
-    }
-    let ptr = c.as_ptr();
-    drop(map);
-    ptr
-}
 
-/// Return the session agent's display name (empty until initialized).
-#[no_mangle]
-pub unsafe extern "C" fn unterm_session_agent_name(id: u64, out_len: *mut usize) -> *const c_char {
-    let mut map = sessions().lock().unwrap();
-    let Some(s) = map.get_mut(&id) else {
-        return std::ptr::null();
-    };
-    let c = s.agent_snapshot();
-    if !out_len.is_null() {
-        unsafe { *out_len = c.as_bytes().len() };
-    }
-    let ptr = c.as_ptr();
-    drop(map);
-    ptr
-}
 
-/// Return the live session id (empty until established). The host persists
-/// this and passes it to `unterm_session_load` to resume after a restart.
-#[no_mangle]
-pub unsafe extern "C" fn unterm_session_id(id: u64, out_len: *mut usize) -> *const c_char {
-    let mut map = sessions().lock().unwrap();
-    let Some(s) = map.get_mut(&id) else {
-        return std::ptr::null();
-    };
-    let c = s.session_id_snapshot();
-    if !out_len.is_null() {
-        unsafe { *out_len = c.as_bytes().len() };
-    }
-    let ptr = c.as_ptr();
-    drop(map);
-    ptr
-}
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Keep `c_void` referenced so a header generator records the opaque handle type.
+#[doc(hidden)]
+pub type _UntermHandle = *mut c_void;

@@ -89,6 +89,32 @@ namespace Unterm.Editor
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] [return: MarshalAs(UnmanagedType.I1)] private delegate bool CursorPxFn(ulong id, out float x, out float y, out float w, out float h);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr TitleFn(ulong id, out UIntPtr len);
 
+        // --- shared MCP server bridge (editor-global; no terminal id) ---
+
+        // --- agent view (id-based; owns session + transcript panel + input box;
+        // survives reload via a process-global registry). All symbols prefixed
+        // `unterm_agentview_`. ---
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate ulong AvCreateFn([MarshalAs(UnmanagedType.LPUTF8Str)] string cwd, uint pw, uint ph, uint iw, uint ih, [MarshalAs(UnmanagedType.LPUTF8Str)] string claudeCmd);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate ulong AvLoadFn([MarshalAs(UnmanagedType.LPUTF8Str)] string cwd, [MarshalAs(UnmanagedType.LPUTF8Str)] string resume, uint pw, uint ph, uint iw, uint ih, [MarshalAs(UnmanagedType.LPUTF8Str)] string claudeCmd);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] [return: MarshalAs(UnmanagedType.I1)] private delegate bool AvExistsFn(ulong id);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void AvVoidFn(ulong id);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate uint AvPollFn(ulong id);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void AvResizeFn(ulong id, uint pw, uint ph, uint iw, uint ih, float scale);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void AvThemeFn(ulong id, double br, double bg, double bb, double ba, byte fr, byte fg, byte fb);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void AvFontsFn(ulong id, [MarshalAs(UnmanagedType.LPUTF8Str)] string regular, [MarshalAs(UnmanagedType.LPUTF8Str)] string bold, [MarshalAs(UnmanagedType.LPUTF8Str)] string italic, [MarshalAs(UnmanagedType.LPUTF8Str)] string boldItalic);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr AvPtrFn(ulong id);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr AvBufFn(ulong id, out UIntPtr len);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate float AvFloatFn(ulong id);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void AvF1Fn(ulong id, float v);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void AvCaretFn(ulong id, out float x, out float y, out float w, out float h);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate byte AvDownFn(ulong id, float x, float y);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void AvDragFn(ulong id, float x, float y);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate byte AvScrollHFn(ulong id, float x, float y, float dx);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] [return: MarshalAs(UnmanagedType.I1)] private delegate bool AvBoolFn(ulong id);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate byte AvInputDownFn(ulong id, float x, float y, byte kind);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void AvInputKeyFn(ulong id, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, [MarshalAs(UnmanagedType.I1)] bool ctrl, [MarshalAs(UnmanagedType.I1)] bool alt, [MarshalAs(UnmanagedType.I1)] bool shift);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void AvStrFn(ulong id, [MarshalAs(UnmanagedType.LPUTF8Str)] string text);
+
         private IntPtr _handle;
         private string _shadowPath;
         private bool _stable;
@@ -104,6 +130,17 @@ namespace Unterm.Editor
         private SelStartFn _selStart; private SelUpdateFn _selUpdate; private IdFn _selClear; private TitleFn _selText;
         private BoolFn _isAlive; private PtrFn _iosurface; private PtrFn _rawTexture;
         private SizeFn _size; private SizeFn _gridSize; private ScrollStateFn _scrollState; private CursorPxFn _cursorPx; private TitleFn _title;
+        private AvCreateFn _avCreate; private AvLoadFn _avLoad; private AvExistsFn _avExists; private AvVoidFn _avDestroy;
+        private AvPollFn _avPoll; private AvVoidFn _avRender; private AvResizeFn _avResize; private AvThemeFn _avSetTheme; private AvFontsFn _avSetFonts;
+        private AvPtrFn _avPanelTexture; private AvPtrFn _avInputTexture;
+        private AvFloatFn _avContentHeight; private AvFloatFn _avInputHeight; private AvF1Fn _avSetScroll; private AvCaretFn _avCaret;
+        private AvVoidFn _avInterrupt; private AvBufFn _avSessionId; private AvBufFn _avTitle;
+        private AvDownFn _avPanelDown; private AvDragFn _avPanelDrag; private AvScrollHFn _avPanelScrollH;
+        private AvVoidFn _avPanelSelectAll; private AvVoidFn _avPanelSelectClear; private AvBoolFn _avPanelHasSelection; private AvBufFn _avPanelSelectedText;
+        private AvBoolFn _avThinking;
+        private AvInputDownFn _avInputDown; private AvDragFn _avInputDrag; private AvInputKeyFn _avInputKey;
+        private AvStrFn _avInputInsert; private AvStrFn _avInputSetPreedit; private AvVoidFn _avInputUndo; private AvVoidFn _avInputRedo; private AvVoidFn _avInputSelectAll;
+        private AvBufFn _avInputCopy; private AvBufFn _avInputCut; private AvBufFn _avInputText;
 
         public bool IsLoaded => _handle != IntPtr.Zero;
 
@@ -183,6 +220,45 @@ namespace Unterm.Editor
             _scrollState = Sym<ScrollStateFn>("unterm_scroll_state");
             _cursorPx = Sym<CursorPxFn>("unterm_cursor_px");
             _title = Sym<TitleFn>("unterm_title");
+
+
+            _avCreate = Sym<AvCreateFn>("unterm_agentview_create");
+            _avLoad = Sym<AvLoadFn>("unterm_agentview_load");
+            _avExists = Sym<AvExistsFn>("unterm_agentview_exists");
+            _avDestroy = Sym<AvVoidFn>("unterm_agentview_destroy");
+            _avPoll = Sym<AvPollFn>("unterm_agentview_poll");
+            _avRender = Sym<AvVoidFn>("unterm_agentview_render");
+            _avResize = Sym<AvResizeFn>("unterm_agentview_resize");
+            _avSetTheme = Sym<AvThemeFn>("unterm_agentview_set_theme");
+            _avSetFonts = Sym<AvFontsFn>("unterm_agentview_set_fonts");
+            _avPanelTexture = Sym<AvPtrFn>("unterm_agentview_panel_texture");
+            _avInputTexture = Sym<AvPtrFn>("unterm_agentview_input_texture");
+            _avContentHeight = Sym<AvFloatFn>("unterm_agentview_content_height");
+            _avInputHeight = Sym<AvFloatFn>("unterm_agentview_input_height");
+            _avSetScroll = Sym<AvF1Fn>("unterm_agentview_set_scroll");
+            _avCaret = Sym<AvCaretFn>("unterm_agentview_caret");
+            _avInterrupt = Sym<AvVoidFn>("unterm_agentview_interrupt");
+            _avSessionId = Sym<AvBufFn>("unterm_agentview_session_id");
+            _avTitle = Sym<AvBufFn>("unterm_agentview_title");
+            _avPanelDown = Sym<AvDownFn>("unterm_agentview_panel_down");
+            _avPanelDrag = Sym<AvDragFn>("unterm_agentview_panel_drag");
+            _avPanelScrollH = Sym<AvScrollHFn>("unterm_agentview_panel_scroll_h");
+            _avPanelSelectAll = Sym<AvVoidFn>("unterm_agentview_panel_select_all");
+            _avPanelSelectClear = Sym<AvVoidFn>("unterm_agentview_panel_select_clear");
+            _avPanelHasSelection = Sym<AvBoolFn>("unterm_agentview_panel_has_selection");
+            _avThinking = Sym<AvBoolFn>("unterm_agentview_thinking");
+            _avPanelSelectedText = Sym<AvBufFn>("unterm_agentview_panel_selected_text");
+            _avInputDown = Sym<AvInputDownFn>("unterm_agentview_input_down");
+            _avInputDrag = Sym<AvDragFn>("unterm_agentview_input_drag");
+            _avInputKey = Sym<AvInputKeyFn>("unterm_agentview_input_key");
+            _avInputInsert = Sym<AvStrFn>("unterm_agentview_input_insert");
+            _avInputSetPreedit = Sym<AvStrFn>("unterm_agentview_input_set_preedit");
+            _avInputUndo = Sym<AvVoidFn>("unterm_agentview_input_undo");
+            _avInputRedo = Sym<AvVoidFn>("unterm_agentview_input_redo");
+            _avInputSelectAll = Sym<AvVoidFn>("unterm_agentview_input_select_all");
+            _avInputCopy = Sym<AvBufFn>("unterm_agentview_input_copy");
+            _avInputCut = Sym<AvBufFn>("unterm_agentview_input_cut");
+            _avInputText = Sym<AvBufFn>("unterm_agentview_input_text");
         }
 
         private T Sym<T>(string name) where T : Delegate
@@ -264,6 +340,64 @@ namespace Unterm.Editor
             return Utf8(p, len);
         }
 
+
+        // --- agent view (id-based; owns session + transcript panel + input box) ---
+        /// Start a new conversation rooted at `cwd`; returns the view id. Sizes are
+        /// physical px: (panel w/h, input w/h).
+        public ulong AgentviewCreate(string cwd, uint pw, uint ph, uint iw, uint ih, string claudeCmd) =>
+            _avCreate(cwd ?? string.Empty, pw, ph, iw, ih, claudeCmd ?? string.Empty);
+        /// Resume a prior conversation `resume` (empty -> fresh); returns the view id.
+        /// `claudeCmd` is the resolved absolute path to the `claude` CLI ("" -> bare `claude`).
+        public ulong AgentviewLoad(string cwd, string resume, uint pw, uint ph, uint iw, uint ih, string claudeCmd) =>
+            _avLoad(cwd ?? string.Empty, resume ?? string.Empty, pw, ph, iw, ih, claudeCmd ?? string.Empty);
+        public bool AgentviewExists(ulong id) => id != 0 && _avExists(id);
+        public void AgentviewDestroy(ulong id) { if (id != 0) _avDestroy(id); }
+        /// bit0 = dirty (re-render + repaint), bit1 = animating (repaint only).
+        public uint AgentviewPoll(ulong id) => _avPoll(id);
+        public void AgentviewRender(ulong id) => _avRender(id);
+        public void AgentviewResize(ulong id, uint pw, uint ph, uint iw, uint ih, float scale) =>
+            _avResize(id, pw, ph, iw, ih, scale);
+        public void AgentviewSetTheme(ulong id, Color bg, Color32 fg) =>
+            _avSetTheme(id, bg.r, bg.g, bg.b, bg.a, fg.r, fg.g, fg.b);
+        public void AgentviewSetFonts(ulong id, string regular, string bold, string italic, string boldItalic) =>
+            _avSetFonts(id, regular ?? string.Empty, bold ?? string.Empty, italic ?? string.Empty, boldItalic ?? string.Empty);
+        public IntPtr AgentviewPanelTexture(ulong id) => _avPanelTexture(id);
+        public IntPtr AgentviewInputTexture(ulong id) => _avInputTexture(id);
+        public float AgentviewContentHeight(ulong id) => _avContentHeight(id);
+        public float AgentviewInputHeight(ulong id) => _avInputHeight(id);
+        public void AgentviewSetScroll(ulong id, float scroll) => _avSetScroll(id, scroll);
+        public void AgentviewCaret(ulong id, out float x, out float y, out float w, out float h) =>
+            _avCaret(id, out x, out y, out w, out h);
+        public void AgentviewInterrupt(ulong id) { if (id != 0) _avInterrupt(id); }
+        public string AgentviewSessionId(ulong id) { var p = _avSessionId(id, out UIntPtr len); return Utf8(p, len); }
+        public string AgentviewTitle(ulong id) { var p = _avTitle(id, out UIntPtr len); return Utf8(p, len); }
+        /// Transcript mouse-down: resolves permission buttons AND begins selection
+        /// internally. Returns 1 if consumed.
+        public byte AgentviewPanelDown(ulong id, float x, float y) => _avPanelDown(id, x, y);
+        public void AgentviewPanelDrag(ulong id, float x, float y) => _avPanelDrag(id, x, y);
+        /// Horizontal scroll over a code block; returns 1 if consumed.
+        public byte AgentviewPanelScrollH(ulong id, float x, float y, float dx) => _avPanelScrollH(id, x, y, dx);
+        public void AgentviewPanelSelectAll(ulong id) => _avPanelSelectAll(id);
+        public void AgentviewPanelSelectClear(ulong id) => _avPanelSelectClear(id);
+        public bool AgentviewPanelHasSelection(ulong id) => _avPanelHasSelection(id);
+        public bool AgentviewThinking(ulong id) => _avThinking != null && _avThinking(id);
+        public string AgentviewPanelSelectedText(ulong id) { var s = _avPanelSelectedText(id, out UIntPtr len); return Utf8(s, len); }
+        /// Input mouse-down. kind: 0 click, 2 double, 3 triple. Returns 1 if the
+        /// Send/Stop button was hit (action done; do NOT start a drag).
+        public byte AgentviewInputDown(ulong id, float x, float y, byte kind) => _avInputDown(id, x, y, kind);
+        public void AgentviewInputDrag(ulong id, float x, float y) => _avInputDrag(id, x, y);
+        /// Enter sends, Shift+Enter newlines, the rest edits — all handled in Rust.
+        public void AgentviewInputKey(ulong id, string name, bool ctrl, bool alt, bool shift) =>
+            _avInputKey(id, name ?? string.Empty, ctrl, alt, shift);
+        public void AgentviewInputInsert(ulong id, string text) { if (!string.IsNullOrEmpty(text)) _avInputInsert(id, text); }
+        public void AgentviewInputSetPreedit(ulong id, string text) => _avInputSetPreedit(id, text ?? "");
+        public void AgentviewInputUndo(ulong id) => _avInputUndo(id);
+        public void AgentviewInputRedo(ulong id) => _avInputRedo(id);
+        public void AgentviewInputSelectAll(ulong id) => _avInputSelectAll(id);
+        public string AgentviewInputCopy(ulong id) { var s = _avInputCopy(id, out UIntPtr len); return Utf8(s, len); }
+        public string AgentviewInputCut(ulong id) { var s = _avInputCut(id, out UIntPtr len); return Utf8(s, len); }
+        public string AgentviewInputText(ulong id) { var s = _avInputText(id, out UIntPtr len); return Utf8(s, len); }
+
         private static uint Pack(Color32 c) => (uint)((c.r << 16) | (c.g << 8) | c.b);
 
         public void Dispose()
@@ -284,6 +418,17 @@ namespace Unterm.Editor
             _isAlive = null; _iosurface = null; _rawTexture = null;
             _paste = null; _clear = null;
             _size = null; _gridSize = null; _scrollState = null; _cursorPx = null; _title = null;
+            _avCreate = null; _avLoad = null; _avExists = null; _avDestroy = null;
+            _avPoll = null; _avRender = null; _avResize = null; _avSetTheme = null; _avSetFonts = null;
+            _avPanelTexture = null; _avInputTexture = null;
+            _avContentHeight = null; _avInputHeight = null; _avSetScroll = null; _avCaret = null;
+            _avInterrupt = null; _avSessionId = null; _avTitle = null;
+            _avPanelDown = null; _avPanelDrag = null; _avPanelScrollH = null;
+            _avPanelSelectAll = null; _avPanelSelectClear = null; _avPanelHasSelection = null; _avPanelSelectedText = null;
+            _avThinking = null;
+            _avInputDown = null; _avInputDrag = null; _avInputKey = null;
+            _avInputInsert = null; _avInputSetPreedit = null; _avInputUndo = null; _avInputRedo = null; _avInputSelectAll = null;
+            _avInputCopy = null; _avInputCut = null; _avInputText = null;
 
             if (!_stable && !string.IsNullOrEmpty(_shadowPath) && File.Exists(_shadowPath))
             {

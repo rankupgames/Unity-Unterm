@@ -199,7 +199,19 @@ namespace Unterm.Editor
         private const string PluginFallback = "Unterm/Plugins/macOS/unterm.bundle";
 #endif
 
-        private static string PluginPath
+        // Ensure Unity has mapped the native plugin — running UnityPluginLoad,
+        // which captures the editor's D3D device on Windows — before a non-terminal
+        // host (the agent window, the MCP server) binds to that same image in its
+        // own Load(). No-op on macOS, where the IOSurface path needs no
+        // Unity-owned device.
+        internal static void EnsureNativeImageLoaded()
+        {
+#if UNITY_EDITOR_WIN
+            unterm_unity_gfx(out int _);
+#endif
+        }
+
+        internal static string PluginPath
         {
             get
             {

@@ -29,7 +29,7 @@
 //! (`mcp_message` → Unity tool call) is handed to short-lived helper threads, and
 //! permission prompts are published for the UI and answered later via [`Driver::respond`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -37,6 +37,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
+
 
 /// Transcript field separators, mirrored by the C# parser: role-tagged blocks
 /// `role{US}body` joined by `{RS}`. (ASCII record/unit separators.)
@@ -57,6 +58,9 @@ static NEXT_REQ: AtomicU64 = AtomicU64::new(1);
 pub struct Conv {
     blocks: Vec<(char, String)>,
     tools: HashMap<String, (usize, String)>, // toolUseId -> (block index, title)
+    // tool_use ids we surface through custom UI (e.g. AskUserQuestion), so their
+    // raw "▸ ToolName" line is suppressed in the transcript (incl. their tool_result).
+    hidden_tools: HashSet<String>,
 }
 
 impl Conv {
@@ -64,6 +68,7 @@ impl Conv {
         Self {
             blocks: Vec::new(),
             tools: HashMap::new(),
+            hidden_tools: HashSet::new(),
         }
     }
 
@@ -154,13 +159,24 @@ impl Conv {
                 }
             }
             Some("thinking") => self.append_role('t', b["thinking"].as_str().unwrap_or("")),
-            Some("tool_use") => self.tool(
-                b["id"].as_str().unwrap_or(""),
-                b["name"].as_str().unwrap_or(""),
-                "in_progress",
-            ),
+            Some("tool_use") => {
+                let id = b["id"].as_str().unwrap_or("");
+                let name = b["name"].as_str().unwrap_or("");
+                // Tools we surface through custom UI (the question prompt) shouldn't
+                // also show a raw "▸ ToolName" line.
+                if name == "AskUserQuestion" {
+                    if !id.is_empty() {
+                        self.hidden_tools.insert(id.to_string());
+                    }
+                } else {
+                    self.tool(id, name, "in_progress");
+                }
+            }
             Some("tool_result") => {
                 let id = b["tool_use_id"].as_str().unwrap_or("");
+                if self.hidden_tools.contains(id) {
+                    return;
+                }
                 let status = if b["is_error"].as_bool().unwrap_or(false) {
                     "failed"
                 } else {
@@ -231,14 +247,40 @@ pub fn reconstruct_transcript(session_id: &str, _cwd: &str) -> Conv {
 // Pending permission, shared driver state, and the driver itself.
 // ===========================================================================
 
-/// A `can_use_tool` request awaiting the user's decision. We synthesize the
-/// allow/deny option list (the control protocol gives none) so the existing C#
-/// permission UI and the session-scoped "always" memory keep working.
-struct Pending {
-    request_id: String,
-    tool_name: String,
-    input: Value,
-    title: String,
+/// Something awaiting the user, surfaced through the same C# button UI: either a
+/// tool-permission prompt (allow/deny) or an `AskUserQuestion` (the agent's own
+/// question with its options). Both render as a title + a row of option buttons;
+/// [`Driver::respond`] routes the click back appropriately.
+enum Pending {
+    /// A `can_use_tool` permission request (synthesized allow/deny options).
+    Permission {
+        request_id: String,
+        tool_name: String,
+        input: Value,
+        title: String,
+        detail: String,
+    },
+    /// An `AskUserQuestion` tool call: the questions are presented one at a time,
+    /// answers accumulate, and the whole set is returned at once. stdio mode never
+    /// emits the real `request_user_dialog`, so we answer via the `can_use_tool`
+    /// result — `deny` carrying the user's choices as a message the model reads.
+    Question {
+        request_id: String,
+        questions: Vec<Question>,
+        answers: Vec<(String, String)>, // (header, chosen label)
+        index: usize,
+    },
+}
+
+struct Question {
+    header: String,
+    question: String,
+    options: Vec<QOption>,
+}
+
+struct QOption {
+    label: String,
+    description: String,
 }
 
 /// State shared between the reader thread, the MCP helper threads, and the host
@@ -249,7 +291,6 @@ struct State {
     transcript: Mutex<String>,
     status: Mutex<String>,
     pending: Mutex<Option<Pending>>,
-    agent: Mutex<String>,
     session_id: Mutex<String>,
     conv: Mutex<Conv>,
     remembered: Mutex<HashMap<String, bool>>, // tool_name -> allow (session "always")
@@ -389,7 +430,6 @@ impl Driver {
             transcript: Mutex::new(transcript),
             status: Mutex::new("initializing".to_string()),
             pending: Mutex::new(None),
-            agent: Mutex::new(String::new()),
             session_id: Mutex::new(String::new()),
             conv: Mutex::new(seed),
             remembered: Mutex::new(HashMap::new()),
@@ -431,21 +471,89 @@ impl Driver {
         }
     }
 
-    /// Answer the pending permission with a synthesized option id
-    /// (`allow_once`/`allow_always`/`reject_once`/`reject_always`).
+    /// Answer the pending prompt with the clicked option id. For a permission
+    /// prompt that's `allow_once`/`allow_always`/`reject_once`/`reject_always`;
+    /// for a question it's the chosen option label (or `__skip__`).
     pub fn respond(&self, option_id: &str) {
         let Some(p) = self.state.pending.lock().unwrap().take() else {
             return;
         };
-        let allow = option_id.starts_with("allow");
-        if option_id.ends_with("always") {
-            self.state
-                .remembered
-                .lock()
-                .unwrap()
-                .insert(p.tool_name.clone(), allow);
+        match p {
+            Pending::Permission {
+                request_id,
+                tool_name,
+                input,
+                ..
+            } => {
+                let allow = option_id.starts_with("allow");
+                if option_id.ends_with("always") {
+                    self.state.remembered.lock().unwrap().insert(tool_name, allow);
+                }
+                self.state.write_permission(&request_id, allow, &input);
+            }
+            Pending::Question {
+                request_id,
+                questions,
+                mut answers,
+                index,
+            } => {
+                let header = questions
+                    .get(index)
+                    .map(|q| q.header.clone())
+                    .unwrap_or_default();
+                let label = if option_id == "__skip__" {
+                    "(skipped)".to_string()
+                } else {
+                    option_id.to_string()
+                };
+                answers.push((header, label));
+                let next = index + 1;
+                if next < questions.len() {
+                    // More questions: re-arm the prompt with the next one.
+                    *self.state.pending.lock().unwrap() = Some(Pending::Question {
+                        request_id,
+                        questions,
+                        answers,
+                        index: next,
+                    });
+                } else {
+                    // All answered: return the choices to the model. stdio gives no
+                    // dialog channel, so we deny the tool with the answers as the
+                    // message the model reads and acts on.
+                    let mut msg = String::from("The user answered your question(s):\n");
+                    for (h, a) in &answers {
+                        if h.is_empty() {
+                            msg.push_str(&format!("- {a}\n"));
+                        } else {
+                            msg.push_str(&format!("- {h}: {a}\n"));
+                        }
+                    }
+                    msg.push_str("Proceed with these answers.");
+                    self.state.write_value(&json!({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": { "behavior": "deny", "message": msg }
+                        }
+                    }));
+                }
+            }
         }
-        self.state.write_permission(&p.request_id, allow, &p.input);
+    }
+
+    /// Interrupt the in-flight turn (control_request `interrupt`). Fire-and-forget:
+    /// the engine aborts and emits a `result`, which flips status back to ready.
+    pub fn interrupt(&self) {
+        if !self.state.ready.load(Ordering::Relaxed) {
+            return;
+        }
+        let id = format!("unterm-int-{}", NEXT_REQ.fetch_add(1, Ordering::Relaxed));
+        self.state.write_value(&json!({
+            "type": "control_request",
+            "request_id": id,
+            "request": { "subtype": "interrupt" }
+        }));
     }
 
     pub fn transcript(&self) -> String {
@@ -456,17 +564,64 @@ impl Driver {
         self.state.status.lock().unwrap().clone()
     }
 
-    pub fn agent(&self) -> String {
-        self.state.agent.lock().unwrap().clone()
-    }
-
     pub fn session_id(&self) -> String {
         self.state.session_id.lock().unwrap().clone()
     }
 
-    /// The pending permission's title, if any (the option list is fixed).
-    pub fn pending_title(&self) -> Option<String> {
-        self.state.pending.lock().unwrap().as_ref().map(|p| p.title.clone())
+    /// The pending prompt as `(title, options)` where each option is
+    /// `(id, name, kind)`, or None. The C# UI renders the title as a note and the
+    /// options as buttons; a click calls back into [`Driver::respond`] with the id.
+    pub fn pending_view(&self) -> Option<(String, Vec<(String, String, String)>)> {
+        let guard = self.state.pending.lock().unwrap();
+        match guard.as_ref()? {
+            Pending::Permission { title, detail, .. } => {
+                let body = if detail.is_empty() {
+                    format!("Permission requested: {title}")
+                } else {
+                    format!("Permission requested: {title}\n{detail}")
+                };
+                let opts = [
+                    ("allow_once", "Allow"),
+                    ("allow_always", "Always allow"),
+                    ("reject_once", "Deny"),
+                    ("reject_always", "Always deny"),
+                ]
+                .iter()
+                .map(|(id, name)| (id.to_string(), name.to_string(), id.to_string()))
+                .collect();
+                Some((body, opts))
+            }
+            Pending::Question {
+                questions, index, ..
+            } => {
+                let q = &questions[*index];
+                let mut title = String::new();
+                if questions.len() > 1 {
+                    title.push_str(&format!("Question {}/{}", index + 1, questions.len()));
+                    if !q.header.is_empty() {
+                        title.push_str(&format!(" — {}", q.header));
+                    }
+                    title.push('\n');
+                } else if !q.header.is_empty() {
+                    title.push_str(&format!("{}\n", q.header));
+                }
+                title.push_str(&q.question);
+                for o in &q.options {
+                    if o.description.is_empty() {
+                        title.push_str(&format!("\n• {}", o.label));
+                    } else {
+                        title.push_str(&format!("\n• {} — {}", o.label, o.description));
+                    }
+                }
+                let mut opts: Vec<(String, String, String)> = q
+                    .options
+                    .iter()
+                    .map(|o| (o.label.clone(), o.label.clone(), "answer".to_string()))
+                    .collect();
+                opts.push(("__skip__".to_string(), "Skip".to_string(), "skip".to_string()));
+                Some((title, opts))
+            }
+        }
     }
 
     /// Drop a pending permission without answering (used on teardown so a waiting
@@ -488,6 +643,60 @@ impl Drop for Driver {
             });
         }
     }
+}
+
+/// A short, human-readable description of what a tool call will do, for the
+/// permission prompt — the salient argument (Bash command, edited/read path,
+/// fetched URL, …), falling back to the compact JSON of the input.
+fn describe_tool(input: &Value) -> String {
+    for key in ["command", "file_path", "path", "url", "pattern", "query"] {
+        if let Some(s) = input[key].as_str() {
+            if !s.is_empty() {
+                return truncate(s, 400);
+            }
+        }
+    }
+    match input {
+        Value::Null | Value::Object(_) if input.as_object().map(|m| m.is_empty()).unwrap_or(true) => {
+            String::new()
+        }
+        _ => truncate(&input.to_string(), 400),
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max).collect();
+        format!("{head}…")
+    }
+}
+
+/// Parse an `AskUserQuestion` tool input into its questions.
+fn parse_questions(input: &Value) -> Vec<Question> {
+    input["questions"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|q| Question {
+                    header: q["header"].as_str().unwrap_or("").to_string(),
+                    question: q["question"].as_str().unwrap_or("").to_string(),
+                    options: q["options"]
+                        .as_array()
+                        .map(|os| {
+                            os.iter()
+                                .map(|o| QOption {
+                                    label: o["label"].as_str().unwrap_or("").to_string(),
+                                    description: o["description"].as_str().unwrap_or("").to_string(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The stream-json input line for a user prompt.
@@ -551,10 +760,6 @@ fn handle_message(state: &Arc<State>, v: Value) {
                         *state.session_id.lock().unwrap() = sid.to_string();
                     }
                 }
-                let mut agent = state.agent.lock().unwrap();
-                if agent.is_empty() {
-                    *agent = v["model"].as_str().unwrap_or("Claude Code").to_string();
-                }
             }
         }
         Some("assistant") => {
@@ -584,6 +789,24 @@ fn handle_control_request(state: &Arc<State>, v: &Value) {
         Some("can_use_tool") => {
             let tool_name = req["tool_name"].as_str().unwrap_or("").to_string();
             let input = req["input"].clone();
+
+            // AskUserQuestion is the agent asking *us*: present the questions and
+            // answer via the result, rather than a yes/no permission.
+            if tool_name == "AskUserQuestion" {
+                let questions = parse_questions(&input);
+                if questions.is_empty() {
+                    state.write_permission(&request_id, true, &input);
+                } else {
+                    *state.pending.lock().unwrap() = Some(Pending::Question {
+                        request_id,
+                        questions,
+                        answers: Vec::new(),
+                        index: 0,
+                    });
+                }
+                return;
+            }
+
             let title = req["title"]
                 .as_str()
                 .or_else(|| req["display_name"].as_str())
@@ -595,17 +818,31 @@ fn handle_control_request(state: &Arc<State>, v: &Value) {
             if let Some(allow) = remembered {
                 state.write_permission(&request_id, allow, &input);
             } else {
-                *state.pending.lock().unwrap() = Some(Pending {
+                let detail = describe_tool(&input);
+                *state.pending.lock().unwrap() = Some(Pending::Permission {
                     request_id,
                     tool_name,
                     input,
                     title,
+                    detail,
                 });
             }
         }
         Some("mcp_message") => {
-            // No in-process MCP server is wired in yet (added later); decline.
+            // No in-process MCP server yet; decline so the engine doesn't hang.
             state.write_control_error(&request_id, "MCP unavailable");
+        }
+        Some("request_user_dialog") => {
+            // We answer AskUserQuestion via the `can_use_tool` result, and stdio
+            // mode doesn't emit other dialogs; decline cleanly so nothing hangs.
+            state.write_value(&json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request_id,
+                    "response": { "behavior": "cancelled" }
+                }
+            }));
         }
         _ => state.write_control_error(&request_id, "unsupported control request"),
     }

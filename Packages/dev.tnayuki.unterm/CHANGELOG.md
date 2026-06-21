@@ -4,6 +4,7 @@
 
 ### Added
 
+- **Claude Code agent panel** — a native in-Editor chat view (transcript + composer) that drives the `claude` CLI in-process over its stream-json control protocol (no Node), with the in-editor MCP server wired in. Renders Markdown (code & diff fences with syntax highlighting, tables), resumes past conversations via a session picker, queues follow-up prompts, and exposes permission-mode / model / thinking-level controls, plan approval, and collapsible tool calls.
 - **Windows support** — the terminal now runs in the Windows Editor too (PowerShell/cmd over a ConPTY), rendered zero-copy via a shared D3D12 texture handed to Unity's own device.
 - **Session restore** — terminals restore their scrollback across a full editor restart (not just a C# domain reload); a window whose shell had already exited is restored read-only.
 - **Working-directory restore** — a resumed terminal reopens in the shell's last working directory, falling back to the project root if that directory is gone.
