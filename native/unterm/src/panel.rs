@@ -21,6 +21,11 @@ use glyphon::{
 use crate::markdown;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Theme, ThemeSet};
+use syntect::parsing::SyntaxSet;
+use syntect::util::LinesWithEndings;
 
 use crate::gpu::{self, FORMAT};
 use crate::surface::{self, SharedSurface};
@@ -498,6 +503,7 @@ impl PanelRenderer {
                 for mb in markdown::parse(&b.text) {
                     if let Some(m) = build_md(
                         &mut fs, &mb, content_w, font_size, line_height, card_pad, faces, text_color,
+                        lum < 0.5,
                     ) {
                         measured.push(m);
                     }
@@ -766,6 +772,37 @@ fn hash_str(s: &str) -> u64 {
     h.finish()
 }
 
+/// The bundled syntax definitions (loaded once; ~360KB embedded, all languages).
+fn syntax_set() -> &'static SyntaxSet {
+    static S: OnceLock<SyntaxSet> = OnceLock::new();
+    S.get_or_init(SyntaxSet::load_defaults_newlines)
+}
+
+/// A bundled theme matching the panel's light/dark background.
+fn theme(dark: bool) -> &'static Theme {
+    static T: OnceLock<ThemeSet> = OnceLock::new();
+    let ts = T.get_or_init(ThemeSet::load_defaults);
+    let name = if dark { "base16-ocean.dark" } else { "InspiredGitHub" };
+    &ts.themes[name]
+}
+
+/// Syntax-highlight a code block into colored pieces, or None for an unknown
+/// language (caller falls back to plain monospace).
+fn highlight_code(text: &str, lang: &str, dark: bool) -> Option<Vec<(String, Color)>> {
+    let ss = syntax_set();
+    let syntax = ss.find_syntax_by_token(lang)?;
+    let mut h = HighlightLines::new(syntax, theme(dark));
+    let mut out = Vec::new();
+    for line in LinesWithEndings::from(text) {
+        let ranges = h.highlight_line(line, ss).ok()?;
+        for (st, piece) in ranges {
+            let c = st.foreground;
+            out.push((piece.to_string(), Color::rgb(c.r, c.g, c.b)));
+        }
+    }
+    Some(out)
+}
+
 /// Load a font file and return its first family name (None on failure).
 fn load_face(fs: &mut FontSystem, path: &str) -> Option<String> {
     let db = fs.db_mut();
@@ -908,6 +945,7 @@ fn build_md(
     card_pad: f32,
     faces: Faces,
     text_color: Color,
+    dark: bool,
 ) -> Option<Measured> {
     use markdown::Block as MB;
     match mb {
@@ -937,12 +975,17 @@ fn build_md(
             let height = measure_height(&buffer);
             Some(Measured { buffer, text, height, card_alpha: 0.0, indent: 0.0, code: false, natural_w: 0.0 })
         }
-        MB::Code { text, diff } => {
+        MB::Code { text, lang, diff } => {
             // Code is rendered unwrapped and clipped to the card; the panel
             // scrolls it horizontally, so lay it out at its natural width.
             let mut buf = Buffer::new(fs, Metrics::new(font_size, line_height));
             buf.set_size(fs, None, None);
             buf.set_wrap(fs, Wrap::None);
+            let highlighted = if *diff {
+                None
+            } else {
+                lang.as_deref().and_then(|l| highlight_code(text, l, dark))
+            };
             if *diff {
                 // Color +/- lines like a diff (kept whole, including newlines).
                 let lines: Vec<String> = text.split_inclusive('\n').map(|l| l.to_string()).collect();
@@ -958,6 +1001,18 @@ fn build_md(
                         };
                         (l.as_str(), Attrs::new().family(Family::Monospace).color(c))
                     })
+                    .collect();
+                buf.set_rich_text(
+                    fs,
+                    parts,
+                    Attrs::new().family(Family::Monospace).color(text_color),
+                    Shaping::Advanced,
+                );
+            } else if let Some(pieces) = &highlighted {
+                // Syntax-highlighted: one colored span per token.
+                let parts: Vec<(&str, Attrs)> = pieces
+                    .iter()
+                    .map(|(t, c)| (t.as_str(), Attrs::new().family(Family::Monospace).color(*c)))
                     .collect();
                 buf.set_rich_text(
                     fs,

@@ -22,7 +22,11 @@ pub struct Span {
 pub enum Block {
     Paragraph(Vec<Span>),
     Heading { level: u8, spans: Vec<Span> },
-    Code { text: String, diff: bool },
+    Code {
+        text: String,
+        lang: Option<String>,
+        diff: bool,
+    },
     ListItem { depth: u8, marker: String, spans: Vec<Span> },
     Quote(Vec<Span>),
     Rule,
@@ -47,6 +51,7 @@ pub fn parse(md: &str) -> Vec<Block> {
 
     let mut in_code = false;
     let mut code_text = String::new();
+    let mut code_lang: Option<String> = None;
     let mut code_diff = false;
 
     let push_span = |spans: &mut Vec<Span>, text: String, b: u32, i: u32, c: bool, l: u32| {
@@ -75,7 +80,14 @@ pub fn parse(md: &str) -> Vec<Block> {
                 Tag::CodeBlock(kind) => {
                     in_code = true;
                     code_text.clear();
-                    code_diff = matches!(&kind, CodeBlockKind::Fenced(l) if l.as_ref().starts_with("diff"));
+                    code_lang = match &kind {
+                        CodeBlockKind::Fenced(l) => {
+                            let t = l.split_whitespace().next().unwrap_or("").to_lowercase();
+                            (!t.is_empty()).then_some(t)
+                        }
+                        CodeBlockKind::Indented => None,
+                    };
+                    code_diff = matches!(&code_lang, Some(l) if l == "diff");
                 }
                 Tag::List(start) => lists.push((start.is_some(), start.unwrap_or(1))),
                 Tag::Item => {
@@ -108,6 +120,7 @@ pub fn parse(md: &str) -> Vec<Block> {
                     let text = code_text.trim_end_matches('\n').to_string();
                     out.push(Block::Code {
                         text,
+                        lang: code_lang.take(),
                         diff: code_diff,
                     });
                     code_text.clear();
