@@ -27,6 +27,9 @@ unicode-width = "0.1"
 alacritty_terminal = "0.25"
 portable-pty = "0.8"
 
+# Markdown parsing for the agent panel (rendering is done by the panel itself).
+pulldown-cmark = { version = "0.12", default-features = false }
+
 # In-process MCP server hosted in the plugin so it survives Unity C# domain
 # reloads. No transport/port: the control-protocol driver dispatches the agent's
 # `mcp_message` requests straight in. Tool defs + execution come from the C# side.

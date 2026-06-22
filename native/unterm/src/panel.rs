@@ -18,6 +18,7 @@ use glyphon::{
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
 };
 
+use crate::markdown;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
@@ -73,6 +74,7 @@ struct Measured {
     code: bool,      // a code block: rendered unwrapped + horizontally scrollable
     natural_w: f32,  // unwrapped content width (code blocks only)
 }
+
 /// A laid-out block kept after render() so mouse hit-testing/selection works
 /// between frames. `tx/ty` is the text top-left in physical px.
 struct LaidBlock {
@@ -472,15 +474,39 @@ impl PanelRenderer {
             .as_deref()
             .map(Family::Name)
             .unwrap_or(Family::SansSerif);
+        let bold = self.font_bold.as_deref().map(Family::Name).unwrap_or(regular);
+        let italic = self.font_italic.as_deref().map(Family::Name).unwrap_or(regular);
+        let bold_italic = self
+            .font_bold_italic
+            .as_deref()
+            .map(Family::Name)
+            .unwrap_or(bold);
+        let faces = Faces {
+            regular,
+            bold,
+            italic,
+            bold_italic,
+        };
 
         let blocks = parse_blocks(text);
 
-        // First pass: shape + measure each block as plain text.
+        // First pass: shape + measure each block. Non-agent blocks render plain;
+        // agent blocks are parsed as Markdown and expanded into styled items.
         let mut measured: Vec<Measured> = Vec::new();
         for b in &blocks {
-            measured.push(build_plain(
-                &mut fs, b, content_w, font_size, line_height, card_pad, regular, text_color,
-            ));
+            if b.role == Role::Agent && !b.text.is_empty() {
+                for mb in markdown::parse(&b.text) {
+                    if let Some(m) = build_md(
+                        &mut fs, &mb, content_w, font_size, line_height, card_pad, faces, text_color,
+                    ) {
+                        measured.push(m);
+                    }
+                }
+            } else {
+                measured.push(build_plain(
+                    &mut fs, b, content_w, font_size, line_height, card_pad, faces.regular, text_color,
+                ));
+            }
         }
 
         // Measure the action-button labels and pack them into rows that fit the
@@ -498,7 +524,7 @@ impl PanelRenderer {
             buf.set_text(
                 &mut fs,
                 label,
-                Attrs::new().family(regular).color(text_color),
+                Attrs::new().family(faces.regular).color(text_color),
                 Shaping::Advanced,
             );
             buf.shape_until_scroll(&mut fs, false);
@@ -740,9 +766,6 @@ fn hash_str(s: &str) -> u64 {
     h.finish()
 }
 
-
-
-
 /// Load a font file and return its first family name (None on failure).
 fn load_face(fs: &mut FontSystem, path: &str) -> Option<String> {
     let db = fs.db_mut();
@@ -755,6 +778,28 @@ fn load_face(fs: &mut FontSystem, path: &str) -> Option<String> {
         .and_then(|f| f.families.first())
         .map(|(name, _)| name.clone())
 }
+
+/// The font families to use per inline style (each may be a distinct face, e.g.
+/// "Inter SemiBold" for bold). Missing variants fall back toward Regular.
+#[derive(Clone, Copy)]
+struct Faces<'a> {
+    regular: Family<'a>,
+    bold: Family<'a>,
+    italic: Family<'a>,
+    bold_italic: Family<'a>,
+}
+
+impl<'a> Faces<'a> {
+    fn pick(&self, bold: bool, italic: bool) -> Family<'a> {
+        match (bold, italic) {
+            (true, true) => self.bold_italic,
+            (true, false) => self.bold,
+            (false, true) => self.italic,
+            (false, false) => self.regular,
+        }
+    }
+}
+
 /// Build one plain (non-Markdown) block: user prompts, thoughts, tool lines.
 fn build_plain(
     fs: &mut FontSystem,
@@ -801,8 +846,185 @@ fn build_plain(
     }
 }
 
+/// Shape a run of inline spans into one buffer (bold/italic/inline-code/link),
+/// returning the buffer and its concatenated visible text (for selection).
+fn shape_spans(
+    fs: &mut FontSystem,
+    spans: &[markdown::Span],
+    width: f32,
+    font_size: f32,
+    line_height: f32,
+    force_bold: bool,
+    base_color: Color,
+    faces: Faces,
+) -> (Buffer, String) {
+    let mut buf = Buffer::new(fs, Metrics::new(font_size, line_height));
+    buf.set_size(fs, Some(width.max(1.0)), None);
+    buf.set_wrap(fs, Wrap::WordOrGlyph);
+    let parts: Vec<(&str, Attrs)> = spans
+        .iter()
+        .map(|sp| {
+            let bold = sp.bold || force_bold;
+            let fam = if sp.code {
+                Family::Monospace
+            } else {
+                faces.pick(bold, sp.italic)
+            };
+            let col = if sp.link {
+                Color::rgb(90, 160, 250)
+            } else if sp.code {
+                dim(base_color, 235)
+            } else {
+                base_color
+            };
+            let mut a = Attrs::new().family(fam).color(col);
+            if bold {
+                a = a.weight(Weight::BOLD);
+            }
+            if sp.italic {
+                a = a.style(Style::Italic);
+            }
+            (sp.text.as_str(), a)
+        })
+        .collect();
+    let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+    buf.set_rich_text(
+        fs,
+        parts,
+        Attrs::new().family(faces.regular).color(base_color),
+        Shaping::Advanced,
+    );
+    buf.shape_until_scroll(fs, false);
+    (buf, text)
+}
 
-
+/// Build one Markdown block into a measured render item (None for a rule).
+fn build_md(
+    fs: &mut FontSystem,
+    mb: &markdown::Block,
+    content_w: f32,
+    font_size: f32,
+    line_height: f32,
+    card_pad: f32,
+    faces: Faces,
+    text_color: Color,
+) -> Option<Measured> {
+    use markdown::Block as MB;
+    match mb {
+        MB::Paragraph(spans) => {
+            let (buffer, text) =
+                shape_spans(fs, spans, content_w, font_size, line_height, false, text_color, faces);
+            let height = measure_height(&buffer);
+            Some(Measured { buffer, text, height, card_alpha: 0.0, indent: 0.0, code: false, natural_w: 0.0 })
+        }
+        MB::Heading { level, spans } => {
+            let scale = match level {
+                1 => 1.5,
+                2 => 1.3,
+                3 => 1.15,
+                _ => 1.05,
+            };
+            let (buffer, text) = shape_spans(
+                fs,
+                spans,
+                content_w,
+                font_size * scale,
+                line_height * scale,
+                true,
+                text_color,
+                faces,
+            );
+            let height = measure_height(&buffer);
+            Some(Measured { buffer, text, height, card_alpha: 0.0, indent: 0.0, code: false, natural_w: 0.0 })
+        }
+        MB::Code { text, diff } => {
+            // Code is rendered unwrapped and clipped to the card; the panel
+            // scrolls it horizontally, so lay it out at its natural width.
+            let mut buf = Buffer::new(fs, Metrics::new(font_size, line_height));
+            buf.set_size(fs, None, None);
+            buf.set_wrap(fs, Wrap::None);
+            if *diff {
+                // Color +/- lines like a diff (kept whole, including newlines).
+                let lines: Vec<String> = text.split_inclusive('\n').map(|l| l.to_string()).collect();
+                let parts: Vec<(&str, Attrs)> = lines
+                    .iter()
+                    .map(|l| {
+                        let c = if l.starts_with('+') {
+                            Color::rgb(120, 200, 120)
+                        } else if l.starts_with('-') {
+                            Color::rgb(220, 120, 120)
+                        } else {
+                            text_color
+                        };
+                        (l.as_str(), Attrs::new().family(Family::Monospace).color(c))
+                    })
+                    .collect();
+                buf.set_rich_text(
+                    fs,
+                    parts,
+                    Attrs::new().family(Family::Monospace).color(text_color),
+                    Shaping::Advanced,
+                );
+            } else {
+                buf.set_text(
+                    fs,
+                    text,
+                    Attrs::new().family(Family::Monospace).color(text_color),
+                    Shaping::Advanced,
+                );
+            }
+            buf.shape_until_scroll(fs, false);
+            let height = measure_height(&buf) + card_pad * 2.0;
+            let natural_w = measure_width(&buf);
+            Some(Measured {
+                buffer: buf,
+                text: text.clone(),
+                height,
+                card_alpha: 0.08,
+                indent: 0.0,
+                code: true,
+                natural_w,
+            })
+        }
+        MB::ListItem { depth, marker, spans } => {
+            let indent = (*depth as f32) * (font_size * 1.2);
+            let mut all: Vec<markdown::Span> = Vec::with_capacity(spans.len() + 1);
+            all.push(markdown::Span {
+                text: format!("{marker} "),
+                ..Default::default()
+            });
+            all.extend(spans.iter().cloned());
+            let (buffer, text) = shape_spans(
+                fs,
+                &all,
+                content_w - indent,
+                font_size,
+                line_height,
+                false,
+                text_color,
+                faces,
+            );
+            let height = measure_height(&buffer);
+            Some(Measured { buffer, text, height, card_alpha: 0.0, indent, code: false, natural_w: 0.0 })
+        }
+        MB::Quote(spans) => {
+            let indent = font_size;
+            let (buffer, text) = shape_spans(
+                fs,
+                spans,
+                content_w - indent,
+                font_size,
+                line_height,
+                false,
+                dim(text_color, 180),
+                faces,
+            );
+            let height = measure_height(&buffer);
+            Some(Measured { buffer, text, height, card_alpha: 0.0, indent, code: false, natural_w: 0.0 })
+        }
+        MB::Rule => None,
+    }
+}
 
 /// Scale a color's alpha (for dimmed thoughts / tool text).
 fn dim(c: Color, alpha: u8) -> Color {

@@ -21,6 +21,7 @@ mod input;
 #[cfg(target_os = "macos")]
 mod iosurface;
 mod keys;
+mod markdown;
 mod mcp;
 mod palette;
 mod panel;
