@@ -6,17 +6,42 @@ using UnityEngine;
 namespace Unterm.Editor
 {
     /// <summary>
-    /// dlopen loader for the Unterm native terminal plugin (macOS).
+    /// Dynamic-library loader for the Unterm native terminal plugin (macOS +
+    /// Windows).
     ///
     /// Terminals live in process globals on the native side (the registry keyed
     /// by a stable u64 id), so they survive Unity C# domain reloads. To keep
-    /// them mapped we load the bundle via a *stable* shadow copy and never
-    /// dlclose on reload. Every editor window loads the same shadow path, so
+    /// them mapped we load the library via a *stable* shadow copy and never
+    /// unload it on reload. Every editor window loads the same shadow path, so
     /// they all share one native image and one registry; each window owns one
     /// terminal id it serializes and re-adopts after a reload.
+    ///
+    /// The OS dynamic loader is used directly (dlopen on macOS, LoadLibrary on
+    /// Windows) rather than Unity's native-plugin import system, so we control
+    /// when the image loads/unloads across reloads.
     /// </summary>
     internal sealed class UntermNative : IDisposable
     {
+        // --- platform dynamic-loader shim -------------------------------------
+#if UNITY_EDITOR_WIN
+        [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr LoadLibrary(string path);
+        // GetProcAddress takes an ANSI symbol name regardless of the wide module API.
+        [DllImport("kernel32", SetLastError = true)]
+        private static extern IntPtr GetProcAddress(IntPtr handle, [MarshalAs(UnmanagedType.LPStr)] string symbol);
+        [DllImport("kernel32", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool FreeLibrary(IntPtr handle);
+
+        private static IntPtr NativeOpen(string path) => LoadLibrary(path);
+        private static IntPtr NativeSym(IntPtr handle, string symbol) => GetProcAddress(handle, symbol);
+        private static void NativeClose(IntPtr handle) => FreeLibrary(handle);
+        private static string NativeError() =>
+            new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()).Message;
+#else
+        // Shadow copies keep a .dylib extension on macOS.
+        private const string ShadowExt = ".dylib";
+
         private const int RTLD_NOW = 2;
         private const int RTLD_LOCAL = 4;
 
@@ -28,6 +53,16 @@ namespace Unterm.Editor
         private static extern int dlclose(IntPtr handle);
         [DllImport("/usr/lib/libSystem.B.dylib")]
         private static extern IntPtr dlerror();
+
+        private static IntPtr NativeOpen(string path) => dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        private static IntPtr NativeSym(IntPtr handle, string symbol) => dlsym(handle, symbol);
+        private static void NativeClose(IntPtr handle) => dlclose(handle);
+        private static string NativeError()
+        {
+            var p = dlerror();
+            return p == IntPtr.Zero ? "(no error)" : Marshal.PtrToStringAnsi(p);
+        }
+#endif
 
         // --- terminal registry C ABI (id-based; survives reload) ---
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate ulong CreateSeededFn(ulong id, uint w, uint h, float scale, [MarshalAs(UnmanagedType.LPUTF8Str)] string cwd, [MarshalAs(UnmanagedType.LPUTF8Str)] string seed);
@@ -49,7 +84,6 @@ namespace Unterm.Editor
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void SelUpdateFn(ulong id, float x, float y);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] [return: MarshalAs(UnmanagedType.I1)] private delegate bool BoolFn(ulong id);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr PtrFn(ulong id);
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr PixelsFn(ulong id, out UIntPtr len);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void SizeFn(ulong id, out uint a, out uint b);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void ScrollStateFn(ulong id, out uint history, out uint offset, out uint screen);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] [return: MarshalAs(UnmanagedType.I1)] private delegate bool CursorPxFn(ulong id, out float x, out float y, out float w, out float h);
@@ -65,9 +99,9 @@ namespace Unterm.Editor
         private SetScaleFn _setScale; private SetFontFn _setFont; private SetFontSizeFn _setFontSize;
         private SetColorsFn _setColors; private SetFocusFn _setFocus; private SendTextFn _sendText;
         private SendKeyFn _sendKey; private SendTextFn _paste; private IdFn _clear;
-        private ScrollFn _scroll; private IdFn _render; private BoolFn _dirty;
+        private ScrollFn _scroll; private IdFn _render; private BoolFn _dirty; private BoolFn _present;
         private SelStartFn _selStart; private SelUpdateFn _selUpdate; private IdFn _selClear; private TitleFn _selText;
-        private BoolFn _isAlive; private PtrFn _iosurface; private PtrFn _rawTexture; private PixelsFn _getPixels;
+        private BoolFn _isAlive; private PtrFn _iosurface; private PtrFn _rawTexture;
         private SizeFn _size; private SizeFn _gridSize; private ScrollStateFn _scrollState; private CursorPxFn _cursorPx; private TitleFn _title;
 
         public bool IsLoaded => _handle != IntPtr.Zero;
@@ -82,21 +116,36 @@ namespace Unterm.Editor
         public void Load(string bundlePath, bool freshInstance = false)
         {
             if (IsLoaded) return;
+#if UNITY_EDITOR_WIN
+            // Bind to the SAME image Unity already loaded as an Editor/Windows
+            // native plugin: a bare-name LoadLibrary resolves to the in-process
+            // module by base name, so UnityPluginLoad — which captured the editor's
+            // D3D device — ran in this very image, and the zero-copy surface uses
+            // that device directly (no shadow copy, no cross-image device bridge).
+            // Unity keeps editor plugins mapped across domain reloads, so the
+            // terminal registry survives without our own shadow-copy trick.
+            _stable = true; // not a temp file we own, so never delete on Dispose
+            _handle = NativeOpen("unterm");
+            if (_handle == IntPtr.Zero)
+                throw new Exception(
+                    $"native load failed — is unterm.dll imported as an Editor/Windows plugin? {NativeError()}");
+#else
             if (!File.Exists(bundlePath))
                 throw new FileNotFoundException($"Unterm native bundle not found: {bundlePath}");
 
             _stable = !freshInstance;
             var info = new FileInfo(bundlePath);
             _shadowPath = freshInstance
-                ? Path.Combine(Path.GetTempPath(), $"unterm_{Guid.NewGuid():N}.dylib")
-                : Path.Combine(Path.GetTempPath(), $"unterm_{info.Length}_{info.LastWriteTimeUtc.Ticks}.dylib");
+                ? Path.Combine(Path.GetTempPath(), $"unterm_{Guid.NewGuid():N}{ShadowExt}")
+                : Path.Combine(Path.GetTempPath(), $"unterm_{info.Length}_{info.LastWriteTimeUtc.Ticks}{ShadowExt}");
 
             if (freshInstance || !File.Exists(_shadowPath))
                 File.Copy(bundlePath, _shadowPath, overwrite: freshInstance);
 
-            _handle = dlopen(_shadowPath, RTLD_NOW | RTLD_LOCAL);
+            _handle = NativeOpen(_shadowPath);
             if (_handle == IntPtr.Zero)
-                throw new Exception($"dlopen failed: {ReadDlError()}");
+                throw new Exception($"native load failed: {NativeError()}");
+#endif
 
             _create = Sym<CreateFn>("unterm_create");
             _createCommand = Sym<CreateCommandFn>("unterm_create_command");
@@ -123,10 +172,10 @@ namespace Unterm.Editor
             _selText = Sym<TitleFn>("unterm_selection_text");
             _render = Sym<IdFn>("unterm_render");
             _dirty = Sym<BoolFn>("unterm_dirty");
+            _present = Sym<BoolFn>("unterm_present");
             _isAlive = Sym<BoolFn>("unterm_is_alive");
             _iosurface = Sym<PtrFn>("unterm_iosurface");
             _rawTexture = Sym<PtrFn>("unterm_raw_texture");
-            _getPixels = Sym<PixelsFn>("unterm_get_pixels");
             _size = Sym<SizeFn>("unterm_size");
             _gridSize = Sym<SizeFn>("unterm_grid_size");
             _scrollState = Sym<ScrollStateFn>("unterm_scroll_state");
@@ -136,16 +185,10 @@ namespace Unterm.Editor
 
         private T Sym<T>(string name) where T : Delegate
         {
-            var addr = dlsym(_handle, name);
+            var addr = NativeSym(_handle, name);
             if (addr == IntPtr.Zero)
-                throw new Exception($"dlsym('{name}') failed: {ReadDlError()}");
+                throw new Exception($"symbol '{name}' not found: {NativeError()}");
             return Marshal.GetDelegateForFunctionPointer<T>(addr);
-        }
-
-        private static string ReadDlError()
-        {
-            var p = dlerror();
-            return p == IntPtr.Zero ? "(no error)" : Marshal.PtrToStringAnsi(p);
         }
 
         private static string Utf8(IntPtr p, UIntPtr len) =>
@@ -198,15 +241,11 @@ namespace Unterm.Editor
         }
         public void Render(ulong id) => _render(id);
         public bool Dirty(ulong id) => _dirty(id);
+        // Advance the render-target swapchain; true if the displayed frame changed.
+        public bool Present(ulong id) => _present(id);
         public bool IsAlive(ulong id) => _isAlive(id);
         public IntPtr IOSurface(ulong id) => _iosurface(id);
         public IntPtr RawTexture(ulong id) => _rawTexture(id);
-        public IntPtr GetPixels(ulong id, out int length)
-        {
-            var ptr = _getPixels(id, out UIntPtr len);
-            length = (int)len.ToUInt64();
-            return ptr;
-        }
         public void Size(ulong id, out uint w, out uint h) => _size(id, out w, out h);
         public void GridSize(ulong id, out uint cols, out uint rows) => _gridSize(id, out cols, out rows);
         // history = scrollback lines above the screen; offset = lines scrolled up
@@ -230,15 +269,15 @@ namespace Unterm.Editor
                 // Best-effort: the OS keeps the image mapped while other (leaked)
                 // refs from prior reloads or sibling windows remain — intended,
                 // the native globals must outlive any single managed wrapper.
-                dlclose(_handle);
+                NativeClose(_handle);
                 _handle = IntPtr.Zero;
             }
             _create = null; _createCommand = null; _createSeeded = null; _createDead = null; _dump = null; _cwd = null;
             _exists = null; _destroy = null; _resize = null; _setScale = null;
             _setFont = null; _setFontSize = null; _setColors = null; _setFocus = null;
-            _sendText = null; _sendKey = null; _scroll = null; _render = null; _dirty = null;
+            _sendText = null; _sendKey = null; _scroll = null; _render = null; _dirty = null; _present = null;
             _selStart = null; _selUpdate = null; _selClear = null; _selText = null;
-            _isAlive = null; _iosurface = null; _rawTexture = null; _getPixels = null;
+            _isAlive = null; _iosurface = null; _rawTexture = null;
             _paste = null; _clear = null;
             _size = null; _gridSize = null; _scrollState = null; _cursorPx = null; _title = null;
 

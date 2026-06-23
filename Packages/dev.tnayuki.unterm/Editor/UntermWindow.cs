@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using UnityEditor;
 using UnityEngine;
 
@@ -73,6 +74,12 @@ namespace Unterm.Editor
 
         private Texture2D _tex;
         private IntPtr _externalTexPtr;
+        // Zero-copy is double-buffered, so RawTexture alternates between two shared
+        // textures. Cache the external-texture wrappers by native pointer to avoid
+        // recreating them every frame; cleared on resize and teardown.
+        private readonly System.Collections.Generic.Dictionary<IntPtr, Texture2D> _extTex =
+            new System.Collections.Generic.Dictionary<IntPtr, Texture2D>();
+        private int _extW, _extH;
         private string _status = "";
         private bool _alive = true;
 
@@ -112,9 +119,9 @@ namespace Unterm.Editor
         // for a plain interactive shell. Consumed in LoadNative on fresh create.
         private static string s_pendingCommand;
 
-        // The native terminal is macOS-only (IOSurface/Metal zero-copy path), so
-        // only register the menu item when the Editor itself runs on macOS.
-#if UNITY_EDITOR_OSX
+        // The native terminal ships for macOS (IOSurface/Metal zero-copy) and
+        // Windows (CPU readback), so register the menu item only on those editors.
+#if UNITY_EDITOR_OSX || UNITY_EDITOR_WIN
         [MenuItem("Window/Unterm/New Terminal %#t")]
         public static void OpenNew()
         {
@@ -167,20 +174,35 @@ namespace Unterm.Editor
         }
 #endif
 
-        // GUID of unterm.bundle.meta. Resolving by GUID makes the loader agnostic
-        // to where the plugin lives: embedded under Assets/, an embedded package
-        // under Packages/, or a git/registry package cached in Library/PackageCache.
-        private const string BundleGuid = "54ea61c3e6ad54b688596fae0846fc88";
+#if UNITY_EDITOR_WIN
+        // Calling this [DllImport] export makes Unity map unterm.dll as a native
+        // plugin — running UnityPluginLoad, which captures the editor's D3D device —
+        // so Load() can bind to that same image (see LoadNative). Return value unused.
+        [DllImport("unterm")]
+        private static extern IntPtr unterm_unity_gfx(out int kind);
+#endif
 
-        private static string BundlePath
+        // GUID of the native plugin's .meta. Resolving by GUID makes the loader
+        // agnostic to where the plugin lives: embedded under Assets/, an embedded
+        // package under Packages/, or a git/registry package cached in
+        // Library/PackageCache.
+#if UNITY_EDITOR_WIN
+        private const string PluginGuid = "3c18e287bcb84b3ba7fc203c80c79bf3";
+        private const string PluginFallback = "Unterm/Plugins/Windows/x86_64/unterm.dll";
+#else
+        private const string PluginGuid = "54ea61c3e6ad54b688596fae0846fc88";
+        private const string PluginFallback = "Unterm/Plugins/macOS/unterm.bundle";
+#endif
+
+        private static string PluginPath
         {
             get
             {
-                var assetPath = AssetDatabase.GUIDToAssetPath(BundleGuid);
+                var assetPath = AssetDatabase.GUIDToAssetPath(PluginGuid);
                 if (string.IsNullOrEmpty(assetPath))
                 {
                     // Fallback to the in-repo source layout.
-                    return Path.Combine(Application.dataPath, "Unterm/Plugins/macOS/unterm.bundle");
+                    return Path.Combine(Application.dataPath, PluginFallback);
                 }
 
                 // Map the virtual asset path to a physical one. For packages cached
@@ -301,8 +323,13 @@ namespace Unterm.Editor
         {
             try
             {
+#if UNITY_EDITOR_WIN
+                // Make Unity map the plugin (and run UnityPluginLoad to capture its
+                // D3D device) before we bind to that same image in Load() below.
+                unterm_unity_gfx(out int _);
+#endif
                 _native = new UntermNative();
-                _native.Load(BundlePath, freshInstance);
+                _native.Load(PluginPath, freshInstance);
 
                 float ppp = EditorGUIUtility.pixelsPerPoint;
                 var (w, h) = CurrentPixelSize();
@@ -391,9 +418,14 @@ namespace Unterm.Editor
 
         private void Teardown(bool keepTerminal)
         {
+            // Cached external textures are owned by _extTex; the readback texture is
+            // owned via _tex. Destroy each exactly once.
+            ClearExtCache();
+            _extW = 0;
+            _extH = 0;
             if (_tex != null)
             {
-                DestroyImmediate(_tex);
+                if (_externalTexPtr == IntPtr.Zero) DestroyImmediate(_tex);
                 _tex = null;
                 _externalTexPtr = IntPtr.Zero;
             }
@@ -420,9 +452,9 @@ namespace Unterm.Editor
                 if (native != null && tid != 0 && !AnyOtherWindowOwns(tid))
                     native.Destroy(tid);
                 _termIdRaw = 0;
-                native?.Dispose(); // dlclose on real teardown
+                native?.Dispose(); // unload the native image on real teardown
             }
-            // On reload: drop the managed wrapper WITHOUT dlclose so the native
+            // On reload: drop the managed wrapper WITHOUT unloading so the native
             // image (and the terminal registry) stay mapped for re-adoption.
         }
 
@@ -462,9 +494,22 @@ namespace Unterm.Editor
                 repaint = true;
             }
 
-            if (_native.Dirty(Tid))
+            if (_native.Dirty(Tid) || _tex == null)
             {
+                // _tex == null means the shared texture isn't ready yet (Windows:
+                // Unity's D3D device wasn't captured when this terminal was built,
+                // e.g. a window restored at editor startup). Keep re-rendering so
+                // the surface self-heals once the device appears. Cheap; stops as
+                // soon as _tex is set. Also covers an exited terminal's first frame.
                 RenderNow();
+                repaint = true;
+            }
+            else if (_native.Present(Tid))
+            {
+                // No new output, but a finished frame was just promoted to the
+                // front (double-buffered zero-copy); point _tex at it and repaint.
+                var (w, h) = CurrentPixelSize();
+                UploadZeroCopy((int)w, (int)h);
                 repaint = true;
             }
             if (repaint) Repaint();
@@ -500,56 +545,71 @@ namespace Unterm.Editor
             _native.SetColors(Tid, fg, bg, cursor);
         }
 
-        // Wrap the native IOSurface-backed MTLTexture directly — no CPU copy.
-        // Falls back to readback only if the texture is somehow unavailable.
+        // Wrap the native shared texture directly — no CPU copy. The native side
+        // double-buffers (Windows), so RawTexture alternates between two pointers;
+        // we keep an external-texture wrapper per pointer (created once each) and
+        // point _tex at the current one. A null pointer means the zero-copy target
+        // isn't ready (Windows: Unity's D3D device not captured yet); there is no
+        // readback fallback, so we show a status and retry as renders/resizes run.
         private void UploadZeroCopy(int iw, int ih)
         {
             IntPtr texPtr = _native.RawTexture(Tid);
             if (texPtr == IntPtr.Zero)
             {
-                UploadReadback(iw, ih);
+                _tex = null;
+                _status = "GPU not ready";
                 return;
             }
-            if (_tex == null || _tex.width != iw || _tex.height != ih || _externalTexPtr != texPtr)
+            // On resize the native textures are recreated, so drop stale wrappers.
+            if (_extW != iw || _extH != ih)
             {
-                if (_tex != null) DestroyImmediate(_tex);
-                _tex = Texture2D.CreateExternalTexture(iw, ih, TextureFormat.RGBA32, false, false, texPtr);
-                _tex.filterMode = FilterMode.Bilinear;
-                _tex.hideFlags = HideFlags.HideAndDontSave;
-                _externalTexPtr = texPtr;
+                ClearExtCache();
+                _extW = iw;
+                _extH = ih;
+            }
+            if (!_extTex.TryGetValue(texPtr, out var tex) || tex == null)
+            {
+                tex = Texture2D.CreateExternalTexture(iw, ih, TextureFormat.RGBA32, false, false, texPtr);
+                tex.filterMode = FilterMode.Bilinear;
+                tex.hideFlags = HideFlags.HideAndDontSave;
+                _extTex[texPtr] = tex;
             }
             else
             {
-                _tex.UpdateExternalTexture(texPtr);
+                tex.UpdateExternalTexture(texPtr);
             }
+            _tex = tex;
+            _externalTexPtr = texPtr;
         }
 
-        private void UploadReadback(int iw, int ih)
+        // Destroy all cached external-texture wrappers (the native textures they
+        // alias are owned and freed by the Rust side).
+        private void ClearExtCache()
         {
-            IntPtr px = _native.GetPixels(Tid, out int len);
-            if (px == IntPtr.Zero || len <= 0) { _status = "no pixels"; return; }
-            if (_tex == null || _tex.width != iw || _tex.height != ih || _externalTexPtr != IntPtr.Zero)
+            foreach (var t in _extTex.Values)
             {
-                if (_tex != null) DestroyImmediate(_tex);
-                _tex = new Texture2D(iw, ih, TextureFormat.RGBA32, false)
-                {
-                    filterMode = FilterMode.Bilinear,
-                    hideFlags = HideFlags.HideAndDontSave,
-                };
-                _externalTexPtr = IntPtr.Zero;
+                if (t != null) DestroyImmediate(t);
             }
-            _tex.LoadRawTextureData(px, len);
-            _tex.Apply(false);
+            _extTex.Clear();
         }
 
         private void OnFocus()
         {
             _refocus = true;
+#if UNITY_EDITOR_WIN
+            // The Windows editor doesn't auto-engage the OS IME for a custom IMGUI
+            // window (Auto leaves it off here), so Japanese/CJK composition never
+            // starts. Force it on while we're focused; restored on blur.
+            Input.imeCompositionMode = IMECompositionMode.On;
+#endif
             if (_native != null && Tid != 0) _native.SetFocus(Tid, true);
         }
 
         private void OnLostFocus()
         {
+#if UNITY_EDITOR_WIN
+            Input.imeCompositionMode = IMECompositionMode.Auto;
+#endif
             if (_native != null && Tid != 0) _native.SetFocus(Tid, false);
         }
 

@@ -12,11 +12,13 @@ namespace Unterm.Editor
     /// the "Window/Unterm/Claude Code" entry on it: the item is enabled only when
     /// the CLI is found, and selecting it opens a terminal already running it.
     ///
-    /// Unity launched from the GUI inherits a minimal PATH, so <c>claude</c>
-    /// (usually installed through a node version manager that's sourced from the
-    /// shell rc) isn't on the bare PATH. Detection therefore asks the user's
-    /// login + interactive shell — the same environment Unterm's PTY shell runs
-    /// in — to resolve it, so "detected" matches "would actually run".
+    /// On macOS, Unity launched from the GUI inherits a minimal PATH, so
+    /// <c>claude</c> (usually installed through a node version manager that's
+    /// sourced from the shell rc) isn't on the bare PATH; detection asks the
+    /// user's login + interactive shell — the same environment Unterm's PTY shell
+    /// runs in — to resolve it, so "detected" matches "would actually run". On
+    /// Windows GUI processes inherit the full user PATH, so a plain <c>where</c>
+    /// resolves it.
     ///
     /// Unity has no supported API to add/remove a menu item at runtime, so the
     /// entry is a static <c>[MenuItem]</c> whose validate callback greys it out
@@ -30,7 +32,7 @@ namespace Unterm.Editor
         // (the value survives domain reloads). -1 unknown, 0 absent, 1 present.
         private const string SessionKey = "Unterm.ClaudeCodeAvailable";
 
-#if UNITY_EDITOR_OSX
+#if UNITY_EDITOR_OSX || UNITY_EDITOR_WIN
         // Probe ahead of time so the menu is usually already resolved (enabled or
         // not) by the first time the user opens it, instead of greyed on first
         // look and only enabled on the next.
@@ -85,28 +87,13 @@ namespace Unterm.Editor
             thread.Start();
         }
 
-        // Resolve `claude` through `$SHELL -lic 'command -v claude'`: -l (login) and
-        // -i (interactive) source both profile and rc so PATH matches a real
-        // terminal; -c runs the probe. Returns true only on a clean exit with a
-        // non-empty path.
+        // Run the platform probe and return true only on a clean exit with a
+        // non-empty resolved path.
         private static bool ResolveClaude()
         {
             try
             {
-                string shell = Environment.GetEnvironmentVariable("SHELL");
-                if (string.IsNullOrEmpty(shell)) shell = "/bin/zsh";
-
-                var psi = new ProcessStartInfo
-                {
-                    FileName = shell,
-                    Arguments = "-lic \"command -v claude\"",
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-
-                using var p = Process.Start(psi);
+                using var p = Process.Start(BuildProbe());
                 if (p == null) return false;
 
                 string outp = p.StandardOutput.ReadToEnd();
@@ -125,5 +112,39 @@ namespace Unterm.Editor
                 return false;
             }
         }
+
+#if UNITY_EDITOR_WIN
+        // Windows GUI processes inherit the full user PATH, so `where` resolves a
+        // CLI installed via npm/winget without sourcing a shell rc. `where.exe`
+        // exits 0 and prints the path when found, 1 when not.
+        private static ProcessStartInfo BuildProbe() => new ProcessStartInfo
+        {
+            FileName = "where.exe",
+            Arguments = "claude",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+#else
+        // Resolve `claude` through `$SHELL -lic 'command -v claude'`: -l (login)
+        // and -i (interactive) source both profile and rc so PATH matches a real
+        // terminal; -c runs the probe.
+        private static ProcessStartInfo BuildProbe()
+        {
+            string shell = Environment.GetEnvironmentVariable("SHELL");
+            if (string.IsNullOrEmpty(shell)) shell = "/bin/zsh";
+
+            return new ProcessStartInfo
+            {
+                FileName = shell,
+                Arguments = "-lic \"command -v claude\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+        }
+#endif
     }
 }
