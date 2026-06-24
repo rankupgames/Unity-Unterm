@@ -118,11 +118,28 @@ namespace Unterm.Editor
         [MenuItem("Window/Unterm/New Terminal %#t")]
         public static void OpenNew()
         {
+            // The terminal we're spawning from (captured before CreateWindow steals
+            // focus) so the new window cascades off it instead of stacking on top.
+            var from = focusedWindow as UntermWindow;
             var w = CreateWindow<UntermWindow>();
             w.titleContent = new GUIContent("Terminal");
             w.minSize = new Vector2(240, 120);
+            PlaceCascaded(w, from);
             w.Show();
             w.Focus();
+        }
+
+        // Offset a freshly created window from the terminal it was spawned from (or
+        // a default spot), so new windows cascade down-right rather than landing
+        // exactly on the previous one. Wraps back near the origin after a while.
+        private static void PlaceCascaded(UntermWindow w, UntermWindow from)
+        {
+            Vector2 size = from != null ? from.position.size : new Vector2(760f, 460f);
+            Vector2 origin = from != null
+                ? from.position.position + new Vector2(30f, 30f)
+                : new Vector2(120f, 120f);
+            if (origin.x > 900f || origin.y > 600f) origin = new Vector2(120f, 120f);
+            w.position = new Rect(origin, size);
         }
 
         // Open a terminal that launches `command` directly in the PTY (not typed
@@ -134,9 +151,11 @@ namespace Unterm.Editor
             s_pendingCommand = command;
             try
             {
+                var from = focusedWindow as UntermWindow;
                 var w = CreateWindow<UntermWindow>();
                 w.titleContent = new GUIContent(title);
                 w.minSize = new Vector2(240, 120);
+                PlaceCascaded(w, from);
                 w.Show();
                 w.Focus();
                 return w;

@@ -10,6 +10,7 @@
 ### Changed
 
 - The terminal grid now fills the whole window: the toolbar has been removed, and font size +/- moved into the right-click menu.
+- A new terminal window opens offset from the active one instead of stacking exactly on top of it.
 
 ### Fixed
 
