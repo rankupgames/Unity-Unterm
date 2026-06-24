@@ -72,6 +72,12 @@ pub struct Renderer {
 impl Renderer {
     pub fn new(width: u32, height: u32) -> Self {
         let g = gpu::gpu();
+        // Clamp to the device's max texture size so an oversized window can't fail
+        // target creation (which used to panic the whole terminal create — restored
+        // windows are built straight at their saved size, so a wide one died there).
+        let max = g.device.limits().max_texture_dimension_2d;
+        let width = width.clamp(1, max);
+        let height = height.clamp(1, max);
         let (shared, view) = create_target(&g.device, width, height);
         let viewport = Viewport::new(&g.device, &g.cache);
         let mut atlas = TextAtlas::new(&g.device, &g.queue, &g.cache, FORMAT);
@@ -157,14 +163,15 @@ impl Renderer {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        let width = width.max(1);
-        let height = height.max(1);
+        let g = gpu::gpu();
+        let max = g.device.limits().max_texture_dimension_2d;
+        let width = width.clamp(1, max);
+        let height = height.clamp(1, max);
         if width == self.width && height == self.height {
             return;
         }
         self.width = width;
         self.height = height;
-        let g = gpu::gpu();
         let (shared, view) = create_target(&g.device, width, height);
         self.shared = shared;
         self.view = view;

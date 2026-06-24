@@ -37,7 +37,11 @@ fn init_gpu() -> Gpu {
         &wgpu::DeviceDescriptor {
             label: Some("unterm-device"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
+            // Use the adapter's real limits, not downlevel defaults — the latter cap
+            // max_texture_dimension_2d at 2048, so a window wider/taller than that
+            // failed to build its render target (panicking the create, which left the
+            // terminal showing only "ready").
+            required_limits: adapter.limits(),
             memory_hints: wgpu::MemoryHints::default(),
         },
         None,
