@@ -314,6 +314,13 @@ impl AgentView {
                 return true;
             }
         }
+        // A click on a tool's header line folds/unfolds its content instead of
+        // starting a selection.
+        if let Some(key) = self.panel.hit_tool(x, y) {
+            self.panel.toggle_tool(key);
+            self.panel.selection_clear();
+            return true;
+        }
         self.panel.selection_begin(x, y);
         self.input.clear_selection();
         true

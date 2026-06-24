@@ -58,10 +58,22 @@ static NEXT_REQ: AtomicU64 = AtomicU64::new(1);
 
 pub struct Conv {
     blocks: Vec<(char, String)>,
-    tools: HashMap<String, (usize, String)>, // toolUseId -> (block index, title)
+    tools: HashMap<String, ToolEntry>, // toolUseId -> rendered tool block
     // tool_use ids we render via custom UI (ExitPlanMode / AskUserQuestion), so their
     // raw "▸ ToolName" line is suppressed in the transcript (incl. their tool_result).
     hidden_tools: HashSet<String>,
+}
+
+/// A tool call's rendered state. `idx` is the block it owns; `title` is the tool
+/// name; `input`/`output` are the (sanitized) call arguments and result text, kept
+/// so the panel can fold/unfold the tool's content. Serialized into the block body
+/// as `<id>{US}<header>{US}<detail>` (see [`Conv::rebuild_tool`]).
+struct ToolEntry {
+    idx: usize,
+    title: String,
+    glyph: &'static str,
+    input: String,
+    output: String,
 }
 
 impl Conv {
@@ -123,9 +135,9 @@ impl Conv {
             return;
         }
         self.blocks.remove(i);
-        for (idx, _) in self.tools.values_mut() {
-            if *idx > i {
-                *idx -= 1;
+        for e in self.tools.values_mut() {
+            if e.idx > i {
+                e.idx -= 1;
             }
         }
     }
@@ -143,26 +155,68 @@ impl Conv {
         self.blocks.push((role, s.to_string()));
     }
 
-    fn tool(&mut self, id: &str, title: &str, status: &str) {
-        let glyph = match status {
-            "completed" => "✓",
-            "failed" => "✗",
-            "in_progress" => "▸",
-            _ => "·",
-        };
-        if let Some(entry) = self.tools.get_mut(id) {
-            if !title.is_empty() {
-                entry.1 = title.to_string();
+    /// Record a `tool_use`: set/refresh the title + input summary and mark the call
+    /// in-progress (`▸`). Creates the block on first sight, else updates in place.
+    fn tool_begin(&mut self, id: &str, name: &str, input: &str) {
+        let input = sanitize(input);
+        if let Some(e) = self.tools.get_mut(id) {
+            if !name.is_empty() {
+                e.title = name.to_string();
             }
-            let i = entry.0;
-            let text = format!("{glyph} {}", entry.1);
-            self.blocks[i].1 = text;
+            e.input = input;
+            e.glyph = "▸";
         } else {
-            let label = if title.is_empty() { "(tool)" } else { title };
-            let i = self.blocks.len();
-            self.blocks.push(('x', format!("{glyph} {label}")));
-            self.tools.insert(id.to_string(), (i, label.to_string()));
+            let idx = self.blocks.len();
+            self.blocks.push(('x', String::new()));
+            let title = if name.is_empty() { "(tool)".to_string() } else { name.to_string() };
+            self.tools.insert(
+                id.to_string(),
+                ToolEntry { idx, title, glyph: "▸", input, output: String::new() },
+            );
         }
+        self.rebuild_tool(id);
+    }
+
+    /// Record a `tool_result`: flip the status glyph (`✓`/`✗`) and store the output.
+    fn tool_end(&mut self, id: &str, status: &str, output: &str) {
+        let output = sanitize(output);
+        let glyph = glyph_for(status);
+        if let Some(e) = self.tools.get_mut(id) {
+            e.glyph = glyph;
+            e.output = output;
+        } else {
+            // A result with no preceding tool_use (shouldn't happen): stub a block.
+            let idx = self.blocks.len();
+            self.blocks.push(('x', String::new()));
+            self.tools.insert(
+                id.to_string(),
+                ToolEntry { idx, title: "(tool)".to_string(), glyph, input: String::new(), output },
+            );
+        }
+        self.rebuild_tool(id);
+    }
+
+    /// Re-encode a tool's block body as `<id>{US}<header>{US}<preview>{US}<detail>`,
+    /// where the header is `<glyph> <title>`, the preview is a short one-line input
+    /// summary shown next to the header, and the detail (unfolded view) is the full
+    /// input followed by the result output. The panel renders the preview/detail in
+    /// a smaller font, so they're kept as separate fields.
+    fn rebuild_tool(&mut self, id: &str) {
+        let Some(e) = self.tools.get(id) else { return };
+        let header = format!("{} {}", e.glyph, e.title);
+        let preview = truncate(e.input.lines().next().unwrap_or(""), 60);
+        let mut detail = String::new();
+        if !e.input.is_empty() {
+            detail.push_str(&e.input);
+        }
+        if !e.output.is_empty() {
+            if !detail.is_empty() {
+                detail.push('\n');
+            }
+            detail.push_str(&e.output);
+        }
+        let i = e.idx;
+        self.blocks[i].1 = format!("{id}{US}{header}{US}{preview}{US}{detail}");
     }
 
     fn note_closed(&mut self) {
@@ -223,7 +277,7 @@ impl Conv {
                         self.hidden_tools.insert(id.to_string());
                     }
                 } else {
-                    self.tool(id, name, "in_progress");
+                    self.tool_begin(id, name, &describe_tool(&b["input"]));
                 }
             }
             Some("tool_result") => {
@@ -236,7 +290,7 @@ impl Conv {
                 } else {
                     "completed"
                 };
-                self.tool(id, "", status);
+                self.tool_end(id, status, &tool_result_text(&b["content"]));
             }
             _ => {}
         }
@@ -856,6 +910,44 @@ fn describe_tool(input: &Value) -> String {
         }
         _ => truncate(&input.to_string(), 400),
     }
+}
+
+/// The status glyph shown at the head of a tool block.
+fn glyph_for(status: &str) -> &'static str {
+    match status {
+        "completed" => "✓",
+        "failed" => "✗",
+        "in_progress" => "▸",
+        _ => "·",
+    }
+}
+
+/// Collapse the transcript's block/field separators (which would corrupt the
+/// encoding) to spaces. Newlines are kept — the panel splits only on RS/US.
+fn sanitize(s: &str) -> String {
+    s.replace([RS, US], " ")
+}
+
+/// Concatenate the text of a `tool_result` `content` (a string, or an array of
+/// content blocks), ignoring non-text parts (images, etc.), capped so a huge
+/// result can't bloat the transcript.
+fn tool_result_text(content: &Value) -> String {
+    let mut out = String::new();
+    match content {
+        Value::String(s) => out.push_str(s),
+        Value::Array(parts) => {
+            for p in parts {
+                if let Some(t) = p["text"].as_str() {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(t);
+                }
+            }
+        }
+        _ => {}
+    }
+    truncate(&out, 6000)
 }
 
 fn truncate(s: &str, max: usize) -> String {

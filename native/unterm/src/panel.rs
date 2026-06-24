@@ -71,7 +71,14 @@ impl Role {
 
 struct Block {
     role: Role,
+    /// Header text (the folded view for a tool; the whole body otherwise).
     text: String,
+    /// Tool blocks only: the toolUseId (stable fold-state key), a short one-line
+    /// input preview shown next to the header, and the unfolded detail (full input +
+    /// result output). Empty/None for every other role.
+    tool_id: Option<String>,
+    tool_preview: String,
+    tool_detail: String,
 }
 
 /// A shaped, measured render item: one card-able, optionally-indented buffer.
@@ -86,6 +93,8 @@ struct Measured {
     code: bool,      // a code block: rendered unwrapped + horizontally scrollable
     natural_w: f32,  // unwrapped content width (code blocks only)
     table: Option<TableMeasured>, // a drawn grid of cells (overrides `buffer`)
+    tool_key: Option<u64>, // tool blocks: fold-state key (click-to-toggle target)
+    header_h: f32,         // tool blocks: height of the header line(s), for the hit rect
 }
 
 /// A measured table: positioned cell buffers plus the grid-line/header rects to
@@ -142,6 +151,9 @@ fn parse_blocks(text: &str) -> Vec<Block> {
         return vec![Block {
             role: Role::Agent,
             text: text.to_string(),
+            tool_id: None,
+            tool_preview: String::new(),
+            tool_detail: String::new(),
         }];
     }
     text.split(RS)
@@ -150,9 +162,29 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             let mut it = chunk.splitn(2, US);
             let tag = it.next().unwrap_or("a").chars().next().unwrap_or('a');
             let body = it.next().unwrap_or("");
+            let role = Role::from_tag(tag);
+            // A tool body is `<id>{US}<header>{US}<preview>{US}<detail>` (see
+            // control::Conv); other roles carry their text verbatim.
+            if role == Role::Tool {
+                let mut f = body.splitn(4, US);
+                let id = f.next().unwrap_or("");
+                let header = f.next().unwrap_or("");
+                let preview = f.next().unwrap_or("");
+                let detail = f.next().unwrap_or("");
+                return Block {
+                    role,
+                    text: header.to_string(),
+                    tool_id: (!id.is_empty()).then(|| id.to_string()),
+                    tool_preview: preview.to_string(),
+                    tool_detail: detail.to_string(),
+                };
+            }
             Block {
-                role: Role::from_tag(tag),
+                role,
                 text: body.to_string(),
+                tool_id: None,
+                tool_preview: String::new(),
+                tool_detail: String::new(),
             }
         })
         .collect()
@@ -192,6 +224,13 @@ pub struct PanelRenderer {
     /// Per-code-block horizontal scroll, keyed by the block's content hash so it
     /// survives re-layout as the transcript grows.
     hscroll: HashMap<u64, f32>,
+    /// Unfolded tool blocks, keyed by the hash of their toolUseId (so the state
+    /// survives the transcript growing / a tool flipping in_progress→completed).
+    expanded: HashMap<u64, bool>,
+    /// Hit rects (physical px) of each tool's header line + its fold key, for
+    /// click-to-toggle. Computed each render (header line only, so the unfolded
+    /// detail stays drag-selectable).
+    tool_rects: Vec<(u64, [f32; 4])>,
     /// Internal vertical scroll of the capped ExitPlanMode plan box (physical px).
     plan_scroll: f32,
     /// Max plan_scroll (content height beyond the capped box; 0 = no scroll).
@@ -248,6 +287,8 @@ impl PanelRenderer {
             laid: Vec::new(),
             sel: None,
             hscroll: HashMap::new(),
+            expanded: HashMap::new(),
+            tool_rects: Vec::new(),
             swash_cache,
             viewport,
             atlas,
@@ -472,6 +513,24 @@ impl PanelRenderer {
         false
     }
 
+    /// The fold key of the tool whose header line is at physical-px (x, y), or None.
+    /// Only the header line is hit-tested, so an unfolded tool's detail text stays
+    /// selectable.
+    pub fn hit_tool(&self, x: f32, y: f32) -> Option<u64> {
+        for (key, r) in &self.tool_rects {
+            if x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3] {
+                return Some(*key);
+            }
+        }
+        None
+    }
+
+    /// Toggle a tool block's folded/unfolded state.
+    pub fn toggle_tool(&mut self, key: u64) {
+        let e = self.expanded.entry(key).or_insert(false);
+        *e = !*e;
+    }
+
     /// Index of the button at physical-px point (x, y), or -1.
     pub fn hit_button(&self, x: f32, y: f32) -> i32 {
         for (i, r) in self.button_rects.iter().enumerate() {
@@ -546,6 +605,9 @@ impl PanelRenderer {
         // First pass: shape + measure each block. Non-agent blocks render plain;
         // agent blocks are parsed as Markdown and expanded into styled items.
         let mut measured: Vec<Measured> = Vec::new();
+        // Tool fold keys seen this frame, to GC `expanded` for tools that scrolled
+        // out of the (capped) transcript reconstruction.
+        let mut live_tool_keys: Vec<u64> = Vec::new();
         // The contiguous run of measured items produced by the plan block, if any.
         let mut plan_range: Option<(usize, usize)> = None;
         // The plan box reserves `card_pad` of inner padding on each side, so its
@@ -566,12 +628,47 @@ impl PanelRenderer {
                 if b.role == Role::Plan {
                     plan_range = Some((start, measured.len()));
                 }
+            } else if b.role == Role::Tool {
+                // A tool block folds: the header line always shows; the detail (full
+                // input + result output) shows only when unfolded. The whole thing is
+                // one card that grows, keyed for click-to-toggle by the toolUseId.
+                let has_detail = !b.tool_detail.is_empty();
+                // Only a tool with content to reveal is foldable/clickable.
+                let key = b.tool_id.as_deref().filter(|_| has_detail).map(hash_str);
+                if let Some(k) = key {
+                    live_tool_keys.push(k);
+                }
+                let unfolded = key
+                    .map(|k| self.expanded.get(&k).copied().unwrap_or(false))
+                    .unwrap_or(false);
+                // The fold state shows as a disclosure triangle pinned to the header's
+                // right edge (drawn in the placement pass), so reserve space for it and
+                // keep it out of the flowed text.
+                let reserve = if has_detail { font_size * 1.6 } else { 0.0 };
+                // The header renders at the base size; the input preview and (when
+                // unfolded) the detail render smaller. Build the folded form first for
+                // the click-target height, then re-build with the detail if open.
+                let mut m = build_tool(
+                    &mut fs, &b.text, &b.tool_preview, None, content_w, reserve, font_size,
+                    line_height, card_pad, faces.regular, text_color,
+                );
+                let header_h = (m.height - card_pad * 2.0).max(0.0);
+                if unfolded {
+                    m = build_tool(
+                        &mut fs, &b.text, &b.tool_preview, Some(&b.tool_detail), content_w, reserve,
+                        font_size, line_height, card_pad, faces.regular, text_color,
+                    );
+                }
+                m.tool_key = key;
+                m.header_h = header_h;
+                measured.push(m);
             } else {
                 measured.push(build_plain(
                     &mut fs, b, content_w, font_size, line_height, card_pad, faces.regular, text_color,
                 ));
             }
         }
+        self.expanded.retain(|k, _| live_tool_keys.contains(k));
 
         // Measure the action-button labels and pack them into rows that fit the
         // width, so a narrow panel wraps the buttons instead of overflowing; the
@@ -668,7 +765,11 @@ impl PanelRenderer {
             bottom: self.height as i32,
         };
         let mut quads: Vec<Quad> = Vec::new();
+        // Disclosure triangles (tool fold markers) drawn at the header's right edge,
+        // outside the selectable text. Shaped here, blitted after the laid blocks.
+        let mut deco: Vec<(Buffer, f32, f32)> = Vec::new();
         self.laid.clear();
+        self.tool_rects.clear();
         let mut live_keys: Vec<u64> = Vec::new();
         self.plan_rect = None;
         let mut plan_box_top = 0.0_f32; // y of the plan box's top (set at its first item)
@@ -784,6 +885,30 @@ impl PanelRenderer {
             } else {
                 (x0, y)
             };
+            // A tool's header line is the click-to-toggle target (only the header, so
+            // an unfolded tool's detail below stays drag-selectable). A disclosure
+            // triangle (▶ folded / ▼ open) is pinned to the header's right edge.
+            if let Some(key) = m.tool_key {
+                let hit_h = (card_pad * 2.0 + m.header_h).min(m.height);
+                self.tool_rects.push((key, [x0, y, (content_w - m.indent).max(1.0), hit_h]));
+                let glyph = if self.expanded.get(&key).copied().unwrap_or(false) {
+                    "▼"
+                } else {
+                    "▶"
+                };
+                let mut gb = Buffer::new(&mut fs, Metrics::new(font_size, line_height));
+                gb.set_size(&mut fs, None, None);
+                gb.set_text(
+                    &mut fs,
+                    glyph,
+                    Attrs::new().family(faces.regular).color(dim(text_color, 150)),
+                    Shaping::Advanced,
+                );
+                gb.shape_until_scroll(&mut fs, false);
+                let gw = measure_width(&gb);
+                let gx = x0 + (content_w - m.indent).max(1.0) - card_pad - gw;
+                deco.push((gb, gx, y + card_pad));
+            }
             // Code blocks: render unwrapped, clipped to the card, with a per-block
             // horizontal scroll (clamped to how far the longest line overflows).
             let (hscroll, clip, code_key, max_hscroll) = if m.code {
@@ -875,6 +1000,17 @@ impl PanelRenderer {
                 buffer: buf,
                 left: lx,
                 top: ty,
+                scale: 1.0,
+                bounds,
+                default_color: text_color,
+                custom_glyphs: &[],
+            });
+        }
+        for (buf, gx, gy) in &deco {
+            areas.push(TextArea {
+                buffer: buf,
+                left: *gx,
+                top: *gy,
                 scale: 1.0,
                 bounds,
                 default_color: text_color,
@@ -1057,6 +1193,70 @@ fn build_plain(
         code: false,
         natural_w: 0.0,
         table: None,
+        tool_key: None,
+        header_h: 0.0,
+    }
+}
+
+/// Build a tool block into one card: the `header` (disclosure + status + name) at
+/// the base font size, then the input `preview` and (when unfolded) the `detail`
+/// at a smaller, dimmer size — all in a single buffer via per-span metrics, so the
+/// whole tool stays one growable card. `detail = None` is the folded form.
+#[allow(clippy::too_many_arguments)]
+fn build_tool(
+    fs: &mut FontSystem,
+    header: &str,
+    preview: &str,
+    detail: Option<&str>,
+    content_w: f32,
+    reserve_right: f32,
+    font_size: f32,
+    line_height: f32,
+    card_pad: f32,
+    family: Family<'_>,
+    text_color: Color,
+) -> Measured {
+    let inner_w = content_w - card_pad * 2.0 - reserve_right;
+    let small = Metrics::new(font_size * 0.84, line_height * 0.84);
+    let head_attrs = Attrs::new().family(family).color(dim(text_color, 205));
+    let small_attrs = Attrs::new().family(family).color(dim(text_color, 165)).metrics(small);
+
+    // Owned span texts (kept alive for the borrowed slices set_rich_text takes).
+    let mut texts: Vec<String> = vec![header.to_string()];
+    let mut attrs: Vec<Attrs> = vec![head_attrs];
+    if !preview.is_empty() {
+        texts.push(format!("  {preview}"));
+        attrs.push(small_attrs);
+    }
+    if let Some(d) = detail {
+        texts.push(format!("\n{d}"));
+        attrs.push(small_attrs);
+    }
+
+    let mut buffer = Buffer::new(fs, Metrics::new(font_size, line_height));
+    buffer.set_size(fs, Some(inner_w.max(1.0)), None);
+    buffer.set_wrap(fs, Wrap::WordOrGlyph);
+    let spans: Vec<(&str, Attrs)> = texts
+        .iter()
+        .map(|s| s.as_str())
+        .zip(attrs.iter().copied())
+        .collect();
+    buffer.set_rich_text(fs, spans, head_attrs, Shaping::Advanced);
+    buffer.shape_until_scroll(fs, false);
+
+    let text: String = texts.concat();
+    let height = measure_height(&buffer) + card_pad * 2.0;
+    Measured {
+        buffer,
+        text,
+        height,
+        card_alpha: 0.06,
+        indent: 0.0,
+        code: false,
+        natural_w: 0.0,
+        table: None,
+        tool_key: None,
+        header_h: 0.0,
     }
 }
 
@@ -1130,7 +1330,7 @@ fn build_md(
             let (buffer, text) =
                 shape_spans(fs, spans, content_w, font_size, line_height, false, text_color, faces);
             let height = measure_height(&buffer);
-            Some(Measured { buffer, text, height, card_alpha: 0.0, indent: 0.0, code: false, natural_w: 0.0, table: None })
+            Some(Measured { buffer, text, height, card_alpha: 0.0, indent: 0.0, code: false, natural_w: 0.0, table: None, tool_key: None, header_h: 0.0 })
         }
         MB::Heading { level, spans } => {
             let scale = match level {
@@ -1150,7 +1350,7 @@ fn build_md(
                 faces,
             );
             let height = measure_height(&buffer);
-            Some(Measured { buffer, text, height, card_alpha: 0.0, indent: 0.0, code: false, natural_w: 0.0, table: None })
+            Some(Measured { buffer, text, height, card_alpha: 0.0, indent: 0.0, code: false, natural_w: 0.0, table: None, tool_key: None, header_h: 0.0 })
         }
         MB::Code { text, lang, diff } => {
             // Code is rendered unwrapped and clipped to the card; the panel
@@ -1217,6 +1417,8 @@ fn build_md(
                 code: true,
                 natural_w,
                 table: None,
+                tool_key: None,
+                header_h: 0.0,
             })
         }
         MB::ListItem { depth, marker, spans } => {
@@ -1238,7 +1440,7 @@ fn build_md(
                 faces,
             );
             let height = measure_height(&buffer);
-            Some(Measured { buffer, text, height, card_alpha: 0.0, indent, code: false, natural_w: 0.0, table: None })
+            Some(Measured { buffer, text, height, card_alpha: 0.0, indent, code: false, natural_w: 0.0, table: None, tool_key: None, header_h: 0.0 })
         }
         MB::Quote(spans) => {
             let indent = font_size;
@@ -1253,7 +1455,7 @@ fn build_md(
                 faces,
             );
             let height = measure_height(&buffer);
-            Some(Measured { buffer, text, height, card_alpha: 0.0, indent, code: false, natural_w: 0.0, table: None })
+            Some(Measured { buffer, text, height, card_alpha: 0.0, indent, code: false, natural_w: 0.0, table: None, tool_key: None, header_h: 0.0 })
         }
         MB::Table { headers, rows } => {
             build_table(fs, headers, rows, content_w, font_size, line_height, faces, text_color)
@@ -1376,6 +1578,8 @@ fn build_table(
             header_h: border + row_h[0],
             total_w,
         }),
+        tool_key: None,
+        header_h: 0.0,
     })
 }
 
