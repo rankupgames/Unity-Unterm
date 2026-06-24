@@ -53,6 +53,18 @@ namespace Unterm.Editor
         // Serialized so a domain reload re-adopts and re-registers it as open.
         [SerializeField] private string _claudeSessionId = "";
 
+        // Per-window agent settings, persisted across domain reloads. Permission
+        // mode and model are pushed to the engine at runtime (control_requests).
+        // Reasoning effort is a spawn-time CLI flag (--effort), so it's passed when
+        // (re)creating the view and changing it respawns claude (resuming to keep
+        // context). (Empty model = engine default; empty effort = model default.)
+        [SerializeField] private string _permissionMode = "default";
+        [SerializeField] private string _modelSelection = "";
+        [SerializeField] private string _effort = "";
+
+        private static readonly string[] s_modes =
+            { "default", "plan", "acceptEdits", "bypassPermissions" };
+
         // Claude session ids currently driven by some agent window in this editor
         // process. The picker greys out (non-selectable, no label) a session open
         // in another window so two windows never drive the same conversation.
@@ -194,11 +206,11 @@ namespace Unterm.Editor
                         // Editor restart: restore THIS window's own conversation
                         // (its transcript is rebuilt from the session jsonl), or a
                         // fresh one if it can no longer be loaded.
-                        _viewId = (long)_native.AgentviewLoad(ProjectRoot, _claudeSessionId, pw, ph, iw, ih, ClaudeCode.ClaudePath);
+                        _viewId = (long)_native.AgentviewLoad(ProjectRoot, _claudeSessionId, pw, ph, iw, ih, _effort, ClaudeCode.ClaudePath);
                         if (_viewId == 0)
                         {
                             _claudeSessionId = "";
-                            _viewId = (long)_native.AgentviewCreate(ProjectRoot, pw, ph, iw, ih, ClaudeCode.ClaudePath);
+                            _viewId = (long)_native.AgentviewCreate(ProjectRoot, pw, ph, iw, ih, _effort, ClaudeCode.ClaudePath);
                         }
                     }
                     else
@@ -206,7 +218,7 @@ namespace Unterm.Editor
                         // A freshly opened window (from the menu) always starts a
                         // NEW conversation; resuming a past one is an explicit
                         // choice via the header session picker.
-                        _viewId = (long)_native.AgentviewCreate(ProjectRoot, pw, ph, iw, ih, ClaudeCode.ClaudePath);
+                        _viewId = (long)_native.AgentviewCreate(ProjectRoot, pw, ph, iw, ih, _effort, ClaudeCode.ClaudePath);
                     }
                 }
 
@@ -216,6 +228,7 @@ namespace Unterm.Editor
                 if (!string.IsNullOrEmpty(_claudeSessionId)) s_open.Add(_claudeSessionId);
 
                 ApplyFonts();
+                ApplyAgentSettings();
                 _refocus = true; // park the IME field for typing
                 RenderView();
             }
@@ -651,6 +664,14 @@ namespace Unterm.Editor
                 return;
             }
 
+            // Shift+Tab cycles the permission mode (Claude Code convention).
+            if (e.keyCode == KeyCode.Tab && e.shift)
+            {
+                CyclePermissionMode();
+                e.Use();
+                return;
+            }
+
             // Cmd/Ctrl+C with a transcript selection copies that (transcript takes
             // precedence over the input box); leave the selection untouched.
             if ((e.command || e.control) && e.keyCode == KeyCode.C
@@ -1018,13 +1039,33 @@ namespace Unterm.Editor
         {
             using (new GUILayout.HorizontalScope(EditorStyles.toolbar))
             {
+                // Session picker (shrinks so the settings dropdowns always fit).
                 string label = CurrentTitle();
                 if (EditorGUILayout.DropdownButton(new GUIContent(label), FocusType.Passive,
-                    EditorStyles.toolbarDropDown, GUILayout.MaxWidth(position.width - 8f)))
+                    EditorStyles.toolbarDropDown, GUILayout.MaxWidth(Mathf.Max(40f, position.width - 250f))))
                 {
                     ShowSessionMenu(GUILayoutUtility.GetLastRect());
                 }
                 GUILayout.FlexibleSpace();
+
+                // Follow-up queue indicator (only while prompts are waiting).
+                uint q = (_native != null && _viewId != 0) ? _native.AgentviewQueueLen(Vid) : 0u;
+                if (q > 0)
+                    GUILayout.Label(new GUIContent("⏳" + q, "Queued follow-up prompts"),
+                        EditorStyles.toolbarButton, GUILayout.MaxWidth(38f));
+
+                // Separate dropdowns on the right: permission mode / model / effort.
+                // Each menu is anchored at the cursor (ShowAsContext) so it drops
+                // under its button.
+                if (EditorGUILayout.DropdownButton(new GUIContent(ModeLabel(), "Permission mode (Shift+Tab to cycle)"),
+                    FocusType.Passive, EditorStyles.toolbarDropDown, GUILayout.MaxWidth(72f)))
+                    ShowModeMenu();
+                if (EditorGUILayout.DropdownButton(new GUIContent(ModelLabel(), "Model"),
+                    FocusType.Passive, EditorStyles.toolbarDropDown, GUILayout.MaxWidth(72f)))
+                    ShowModelMenu();
+                if (EditorGUILayout.DropdownButton(new GUIContent(EffortLabel(), "Reasoning effort (respawns to change)"),
+                    FocusType.Passive, EditorStyles.toolbarDropDown, GUILayout.MaxWidth(70f)))
+                    ShowEffortMenu();
             }
         }
 
@@ -1084,8 +1125,9 @@ namespace Unterm.Editor
             _scroll = 0f;
             var (pw, ph) = CurrentPanelSize();
             var (iw, ih) = CurrentInputSize();
-            _viewId = (long)_native.AgentviewLoad(ProjectRoot, id, pw, ph, iw, ih, ClaudeCode.ClaudePath);
+            _viewId = (long)_native.AgentviewLoad(ProjectRoot, id, pw, ph, iw, ih, _effort, ClaudeCode.ClaudePath);
             ApplyFonts();
+            ApplyAgentSettings();
             RenderView(); Repaint();
         }
 
@@ -1099,9 +1141,125 @@ namespace Unterm.Editor
             _scroll = 0f;
             var (pw, ph) = CurrentPanelSize();
             var (iw, ih) = CurrentInputSize();
-            _viewId = (long)_native.AgentviewCreate(ProjectRoot, pw, ph, iw, ih, ClaudeCode.ClaudePath);
+            _viewId = (long)_native.AgentviewCreate(ProjectRoot, pw, ph, iw, ih, _effort, ClaudeCode.ClaudePath);
             ApplyFonts();
+            ApplyAgentSettings();
             RenderView(); Repaint();
+        }
+
+        // --- Agent settings: permission mode / model / reasoning effort ---------
+
+        // Push the persisted settings onto the native view (after a (re)create/load
+        // or a domain-reload re-adopt). Idempotent: the native side stores them and
+        // re-applies mode/model once the engine finishes initializing.
+        private void ApplyAgentSettings()
+        {
+            if (_native == null || _viewId == 0) return;
+            _native.AgentviewSetPermissionMode(Vid, _permissionMode);
+            _native.AgentviewSetModel(Vid, _modelSelection);
+            // Effort is applied at spawn (--effort), not here.
+        }
+
+        private void SetPermissionMode(string mode)
+        {
+            _permissionMode = mode;
+            if (_native != null && _viewId != 0) _native.AgentviewSetPermissionMode(Vid, mode);
+            Repaint();
+        }
+
+        // Shift+Tab cycles default → plan → acceptEdits → bypassPermissions (the
+        // Claude Code convention).
+        private void CyclePermissionMode()
+        {
+            int i = Array.IndexOf(s_modes, _permissionMode);
+            SetPermissionMode(s_modes[(i + 1) % s_modes.Length]);
+        }
+
+        private void SetModelSelection(string model)
+        {
+            _modelSelection = model ?? "";
+            if (_native != null && _viewId != 0) _native.AgentviewSetModel(Vid, _modelSelection);
+            Repaint();
+        }
+
+        // Reasoning effort is a spawn-time flag, so changing it respawns claude,
+        // resuming the same conversation (its transcript rebuilds from the jsonl) so
+        // context is kept. A fresh, never-talked-to window just recreates.
+        private void SetEffort(string effort)
+        {
+            effort ??= "";
+            if ((_effort ?? "") == effort) return;
+            _effort = effort;
+            Respawn();
+        }
+
+        private void Respawn()
+        {
+            if (_native == null) return;
+            if (_viewId != 0) _native.AgentviewDestroy(Vid);
+            _scroll = 0f;
+            var (pw, ph) = CurrentPanelSize();
+            var (iw, ih) = CurrentInputSize();
+            _viewId = string.IsNullOrEmpty(_claudeSessionId)
+                ? (long)_native.AgentviewCreate(ProjectRoot, pw, ph, iw, ih, _effort, ClaudeCode.ClaudePath)
+                : (long)_native.AgentviewLoad(ProjectRoot, _claudeSessionId, pw, ph, iw, ih, _effort, ClaudeCode.ClaudePath);
+            ApplyFonts();
+            ApplyAgentSettings();
+            RenderView(); Repaint();
+        }
+
+        private string ModeLabel() => _permissionMode switch
+        {
+            "plan" => "Plan",
+            "acceptEdits" => "Accept",
+            "bypassPermissions" => "Bypass",
+            _ => "Default",
+        };
+
+        // Model: just "Default" when not pinned (don't resolve to the running model);
+        // otherwise the chosen alias, capitalized.
+        private string ModelLabel() =>
+            string.IsNullOrEmpty(_modelSelection) ? "Default" : Cap(_modelSelection);
+
+        private string EffortLabel() =>
+            string.IsNullOrEmpty(_effort) ? "Default" : Cap(_effort);
+
+        private static string Cap(string s) =>
+            string.IsNullOrEmpty(s) ? s : char.ToUpperInvariant(s[0]) + s.Substring(1);
+
+        // Each control is its own dropdown of mutually-exclusive checked items,
+        // anchored at the cursor (ShowAsContext) so it drops under its button.
+        private void ShowModeMenu()
+        {
+            var m = new GenericMenu();
+            m.AddItem(new GUIContent("Default (ask)"), _permissionMode == "default", () => SetPermissionMode("default"));
+            m.AddItem(new GUIContent("Plan"), _permissionMode == "plan", () => SetPermissionMode("plan"));
+            m.AddItem(new GUIContent("Accept edits"), _permissionMode == "acceptEdits", () => SetPermissionMode("acceptEdits"));
+            m.AddItem(new GUIContent("Bypass permissions"), _permissionMode == "bypassPermissions", () => SetPermissionMode("bypassPermissions"));
+            m.ShowAsContext();
+        }
+
+        private void ShowModelMenu()
+        {
+            var m = new GenericMenu();
+            m.AddItem(new GUIContent("Default"), string.IsNullOrEmpty(_modelSelection), () => SetModelSelection(""));
+            m.AddItem(new GUIContent("Opus"), _modelSelection == "opus", () => SetModelSelection("opus"));
+            m.AddItem(new GUIContent("Sonnet"), _modelSelection == "sonnet", () => SetModelSelection("sonnet"));
+            m.AddItem(new GUIContent("Haiku"), _modelSelection == "haiku", () => SetModelSelection("haiku"));
+            m.ShowAsContext();
+        }
+
+        private void ShowEffortMenu()
+        {
+            string e = _effort ?? "";
+            var m = new GenericMenu();
+            m.AddItem(new GUIContent("Default (model default)"), e == "", () => SetEffort(""));
+            m.AddItem(new GUIContent("None"), e == "none", () => SetEffort("none"));
+            m.AddItem(new GUIContent("Low"), e == "low", () => SetEffort("low"));
+            m.AddItem(new GUIContent("Medium"), e == "medium", () => SetEffort("medium"));
+            m.AddItem(new GUIContent("High"), e == "high", () => SetEffort("high"));
+            m.AddItem(new GUIContent("Max"), e == "max", () => SetEffort("max"));
+            m.ShowAsContext();
         }
     }
 }

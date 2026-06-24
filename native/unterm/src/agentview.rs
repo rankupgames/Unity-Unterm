@@ -43,6 +43,8 @@ pub struct AgentView {
     selected_snap: CString,
     text_snap: CString,
     copy_snap: CString,
+    mode_snap: CString,
+    model_snap: CString,
 }
 
 impl AgentView {
@@ -54,13 +56,14 @@ impl AgentView {
         panel_h: u32,
         input_w: u32,
         input_h: u32,
+        effort: String,
         claude_cmd: String,
     ) -> Self {
         let seed = match resume.as_deref() {
             Some(id) if !id.is_empty() => control::reconstruct_transcript(id, &cwd),
             _ => Conv::new(),
         };
-        let (driver, fail) = match Driver::new(cwd, mcp, resume, seed, claude_cmd) {
+        let (driver, fail) = match Driver::new(cwd, mcp, resume, seed, effort, claude_cmd) {
             Ok(d) => (Some(d), String::new()),
             Err(e) => (None, e.to_string()),
         };
@@ -81,6 +84,8 @@ impl AgentView {
             selected_snap: CString::default(),
             text_snap: CString::default(),
             copy_snap: CString::default(),
+            mode_snap: CString::default(),
+            model_snap: CString::default(),
         }
     }
 
@@ -253,6 +258,37 @@ impl AgentView {
     pub fn interrupt(&self) {
         if let Some(d) = &self.driver {
             d.interrupt();
+        }
+    }
+
+    // --- Runtime settings (mode / model / thinking) + follow-up queue ----------
+
+    pub fn set_permission_mode(&self, mode: &str) {
+        if let Some(d) = &self.driver {
+            d.set_permission_mode(mode);
+        }
+    }
+    pub fn permission_mode(&mut self) -> &CString {
+        let s = self.driver.as_ref().map(|d| d.permission_mode()).unwrap_or_default();
+        self.mode_snap = clean(s);
+        &self.mode_snap
+    }
+    pub fn set_model(&self, model: &str) {
+        if let Some(d) = &self.driver {
+            d.set_model(model);
+        }
+    }
+    pub fn model(&mut self) -> &CString {
+        let s = self.driver.as_ref().map(|d| d.model()).unwrap_or_default();
+        self.model_snap = clean(s);
+        &self.model_snap
+    }
+    pub fn queue_len(&self) -> u32 {
+        self.driver.as_ref().map(|d| d.queue_len()).unwrap_or(0)
+    }
+    pub fn cancel_queued(&self, index: u32) {
+        if let Some(d) = &self.driver {
+            d.cancel_queued(index);
         }
     }
 

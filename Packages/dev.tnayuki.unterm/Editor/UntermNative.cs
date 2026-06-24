@@ -97,8 +97,8 @@ namespace Unterm.Editor
         // --- agent view (id-based; owns session + transcript panel + input box;
         // survives reload via a process-global registry). All symbols prefixed
         // `unterm_agentview_`. ---
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate ulong AvCreateFn([MarshalAs(UnmanagedType.LPUTF8Str)] string cwd, uint pw, uint ph, uint iw, uint ih, [MarshalAs(UnmanagedType.LPUTF8Str)] string claudeCmd);
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate ulong AvLoadFn([MarshalAs(UnmanagedType.LPUTF8Str)] string cwd, [MarshalAs(UnmanagedType.LPUTF8Str)] string resume, uint pw, uint ph, uint iw, uint ih, [MarshalAs(UnmanagedType.LPUTF8Str)] string claudeCmd);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate ulong AvCreateFn([MarshalAs(UnmanagedType.LPUTF8Str)] string cwd, uint pw, uint ph, uint iw, uint ih, [MarshalAs(UnmanagedType.LPUTF8Str)] string effort, [MarshalAs(UnmanagedType.LPUTF8Str)] string claudeCmd);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate ulong AvLoadFn([MarshalAs(UnmanagedType.LPUTF8Str)] string cwd, [MarshalAs(UnmanagedType.LPUTF8Str)] string resume, uint pw, uint ph, uint iw, uint ih, [MarshalAs(UnmanagedType.LPUTF8Str)] string effort, [MarshalAs(UnmanagedType.LPUTF8Str)] string claudeCmd);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] [return: MarshalAs(UnmanagedType.I1)] private delegate bool AvExistsFn(ulong id);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void AvVoidFn(ulong id);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate uint AvPollFn(ulong id);
@@ -117,6 +117,8 @@ namespace Unterm.Editor
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate byte AvInputDownFn(ulong id, float x, float y, byte kind);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void AvInputKeyFn(ulong id, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, [MarshalAs(UnmanagedType.I1)] bool ctrl, [MarshalAs(UnmanagedType.I1)] bool alt, [MarshalAs(UnmanagedType.I1)] bool shift);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void AvStrFn(ulong id, [MarshalAs(UnmanagedType.LPUTF8Str)] string text);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate uint AvUintGetFn(ulong id);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void AvUintSetFn(ulong id, uint v);
 
         private IntPtr _handle;
         private string _shadowPath;
@@ -139,6 +141,9 @@ namespace Unterm.Editor
         private AvPtrFn _avPanelTexture; private AvPtrFn _avInputTexture;
         private AvFloatFn _avContentHeight; private AvFloatFn _avInputHeight; private AvF1Fn _avSetScroll; private AvCaretFn _avCaret;
         private AvVoidFn _avInterrupt; private AvBufFn _avSessionId; private AvBufFn _avTitle;
+        private AvStrFn _avSetPermissionMode; private AvBufFn _avPermissionMode;
+        private AvStrFn _avSetModel; private AvBufFn _avModel;
+        private AvUintGetFn _avQueueLen; private AvUintSetFn _avCancelQueued;
         private AvDownFn _avPanelDown; private AvDragFn _avPanelDrag; private AvScrollHFn _avPanelScrollH;
         private AvVoidFn _avPanelSelectAll; private AvVoidFn _avPanelSelectClear; private AvBoolFn _avPanelHasSelection; private AvBufFn _avPanelSelectedText;
         private AvBoolFn _avThinking;
@@ -245,6 +250,12 @@ namespace Unterm.Editor
             _avSetScroll = Sym<AvF1Fn>("unterm_agentview_set_scroll");
             _avCaret = Sym<AvCaretFn>("unterm_agentview_caret");
             _avInterrupt = Sym<AvVoidFn>("unterm_agentview_interrupt");
+            _avSetPermissionMode = Sym<AvStrFn>("unterm_agentview_set_permission_mode");
+            _avPermissionMode = Sym<AvBufFn>("unterm_agentview_permission_mode");
+            _avSetModel = Sym<AvStrFn>("unterm_agentview_set_model");
+            _avModel = Sym<AvBufFn>("unterm_agentview_model");
+            _avQueueLen = Sym<AvUintGetFn>("unterm_agentview_queue_len");
+            _avCancelQueued = Sym<AvUintSetFn>("unterm_agentview_cancel_queued");
             _avSessionId = Sym<AvBufFn>("unterm_agentview_session_id");
             _avTitle = Sym<AvBufFn>("unterm_agentview_title");
             _avPanelDown = Sym<AvDownFn>("unterm_agentview_panel_down");
@@ -360,12 +371,13 @@ namespace Unterm.Editor
         // --- agent view (id-based; owns session + transcript panel + input box) ---
         /// Start a new conversation rooted at `cwd`; returns the view id. Sizes are
         /// physical px: (panel w/h, input w/h).
-        public ulong AgentviewCreate(string cwd, uint pw, uint ph, uint iw, uint ih, string claudeCmd) =>
-            _avCreate(cwd ?? string.Empty, pw, ph, iw, ih, claudeCmd ?? string.Empty);
+        public ulong AgentviewCreate(string cwd, uint pw, uint ph, uint iw, uint ih, string effort, string claudeCmd) =>
+            _avCreate(cwd ?? string.Empty, pw, ph, iw, ih, effort ?? string.Empty, claudeCmd ?? string.Empty);
         /// Resume a prior conversation `resume` (empty -> fresh); returns the view id.
+        /// `effort` is the reasoning effort (none/low/medium/high/max; ""/default = model default).
         /// `claudeCmd` is the resolved absolute path to the `claude` CLI ("" -> bare `claude`).
-        public ulong AgentviewLoad(string cwd, string resume, uint pw, uint ph, uint iw, uint ih, string claudeCmd) =>
-            _avLoad(cwd ?? string.Empty, resume ?? string.Empty, pw, ph, iw, ih, claudeCmd ?? string.Empty);
+        public ulong AgentviewLoad(string cwd, string resume, uint pw, uint ph, uint iw, uint ih, string effort, string claudeCmd) =>
+            _avLoad(cwd ?? string.Empty, resume ?? string.Empty, pw, ph, iw, ih, effort ?? string.Empty, claudeCmd ?? string.Empty);
         public bool AgentviewExists(ulong id) => id != 0 && _avExists(id);
         public void AgentviewDestroy(ulong id) { if (id != 0) _avDestroy(id); }
         /// bit0 = dirty (re-render + repaint), bit1 = animating (repaint only).
@@ -385,6 +397,17 @@ namespace Unterm.Editor
         public void AgentviewCaret(ulong id, out float x, out float y, out float w, out float h) =>
             _avCaret(id, out x, out y, out w, out h);
         public void AgentviewInterrupt(ulong id) { if (id != 0) _avInterrupt(id); }
+        /// Permission mode: "default" / "plan" / "acceptEdits" / "bypassPermissions".
+        public void AgentviewSetPermissionMode(ulong id, string mode) { if (id != 0) _avSetPermissionMode(id, mode ?? "default"); }
+        public string AgentviewPermissionMode(ulong id) { var p = _avPermissionMode(id, out UIntPtr len); return Utf8(p, len); }
+        /// Model alias ("opus"/"sonnet"/"haiku"), or "" / "default" for the engine default.
+        public void AgentviewSetModel(ulong id, string model) { if (id != 0) _avSetModel(id, model ?? string.Empty); }
+        /// Active model: the user's choice, else the resolved model from init.
+        public string AgentviewModel(ulong id) { var p = _avModel(id, out UIntPtr len); return Utf8(p, len); }
+        /// Number of follow-up prompts waiting in the queue.
+        public uint AgentviewQueueLen(ulong id) => id != 0 ? _avQueueLen(id) : 0u;
+        /// Cancel the index-th queued follow-up prompt (0-based).
+        public void AgentviewCancelQueued(ulong id, uint index) { if (id != 0) _avCancelQueued(id, index); }
         public string AgentviewSessionId(ulong id) { var p = _avSessionId(id, out UIntPtr len); return Utf8(p, len); }
         public string AgentviewTitle(ulong id) { var p = _avTitle(id, out UIntPtr len); return Utf8(p, len); }
         /// Transcript mouse-down: resolves permission buttons AND begins selection
@@ -440,6 +463,8 @@ namespace Unterm.Editor
             _avPanelTexture = null; _avInputTexture = null;
             _avContentHeight = null; _avInputHeight = null; _avSetScroll = null; _avCaret = null;
             _avInterrupt = null; _avSessionId = null; _avTitle = null;
+            _avSetPermissionMode = null; _avPermissionMode = null; _avSetModel = null; _avModel = null;
+            _avQueueLen = null; _avCancelQueued = null;
             _avPanelDown = null; _avPanelDrag = null; _avPanelScrollH = null;
             _avPanelSelectAll = null; _avPanelSelectClear = null; _avPanelHasSelection = null; _avPanelSelectedText = null;
             _avThinking = null;

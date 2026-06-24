@@ -45,6 +45,8 @@ enum Role {
     Agent,
     Thought,
     Tool,
+    /// A follow-up prompt queued while a turn runs (dimmed; sent on turn end).
+    Queued,
 }
 
 impl Role {
@@ -53,12 +55,13 @@ impl Role {
             'u' => Role::User,
             't' => Role::Thought,
             'x' => Role::Tool,
+            'q' => Role::Queued,
             _ => Role::Agent,
         }
     }
     /// Whether the block gets a card background.
     fn carded(self) -> bool {
-        matches!(self, Role::User | Role::Tool)
+        matches!(self, Role::User | Role::Tool | Role::Queued)
     }
 }
 
@@ -907,6 +910,7 @@ fn build_plain(
     let color = match b.role {
         Role::Thought => dim(text_color, 150),
         Role::Tool => dim(text_color, 205),
+        Role::Queued => dim(text_color, 120),
         _ => text_color,
     };
     let mut buffer = Buffer::new(fs, Metrics::new(font_size, line_height));
@@ -923,6 +927,7 @@ fn build_plain(
     let card_alpha = match b.role {
         Role::User => 0.10,
         Role::Tool => 0.06,
+        Role::Queued => 0.05,
         _ => 0.0,
     };
     let height = if carded { text_h + card_pad * 2.0 } else { text_h };

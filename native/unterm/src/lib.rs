@@ -625,12 +625,13 @@ pub unsafe extern "C" fn unterm_agentview_create(
     ph: u32,
     iw: u32,
     ih: u32,
+    effort: *const c_char,
     claude_cmd: *const c_char,
 ) -> u64 {
     init_log();
     let mcp = ensure_mcp_dispatcher();
     let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
-    let v = AgentView::new(cstr(cwd), mcp, None, pw.max(1), ph.max(1), iw.max(1), ih.max(1), cstr(claude_cmd));
+    let v = AgentView::new(cstr(cwd), mcp, None, pw.max(1), ph.max(1), iw.max(1), ih.max(1), cstr(effort), cstr(claude_cmd));
     views().lock().unwrap().insert(id, Box::new(v));
     id
 }
@@ -647,6 +648,7 @@ pub unsafe extern "C" fn unterm_agentview_load(
     ph: u32,
     iw: u32,
     ih: u32,
+    effort: *const c_char,
     claude_cmd: *const c_char,
 ) -> u64 {
     init_log();
@@ -656,7 +658,7 @@ pub unsafe extern "C" fn unterm_agentview_load(
         (!s.is_empty()).then_some(s)
     };
     let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
-    let v = AgentView::new(cstr(cwd), mcp, resume, pw.max(1), ph.max(1), iw.max(1), ih.max(1), cstr(claude_cmd));
+    let v = AgentView::new(cstr(cwd), mcp, resume, pw.max(1), ph.max(1), iw.max(1), ih.max(1), cstr(effort), cstr(claude_cmd));
     views().lock().unwrap().insert(id, Box::new(v));
     id
 }
@@ -808,6 +810,62 @@ pub unsafe extern "C" fn unterm_agentview_caret(
 pub extern "C" fn unterm_agentview_interrupt(id: u64) {
     if let Some(v) = views().lock().unwrap().get(&id) {
         v.interrupt();
+    }
+}
+
+/// Set the permission mode (`default`/`plan`/`acceptEdits`/`bypassPermissions`).
+///
+/// # Safety
+/// `mode` must be a valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_set_permission_mode(id: u64, mode: *const c_char) {
+    let mode = cstr(mode);
+    if let Some(v) = views().lock().unwrap().get(&id) {
+        v.set_permission_mode(&mode);
+    }
+}
+
+/// The current permission mode. Writes the byte length.
+///
+/// # Safety
+/// `out_len` writable or null. Pointer valid until the next call on this view.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_permission_mode(id: u64, out_len: *mut usize) -> *const c_char {
+    view_string(id, out_len, |v| v.permission_mode())
+}
+
+/// Set the model (alias like `opus`/`sonnet`/`haiku`, empty/`default` = engine default).
+///
+/// # Safety
+/// `model` must be a valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_set_model(id: u64, model: *const c_char) {
+    let model = cstr(model);
+    if let Some(v) = views().lock().unwrap().get(&id) {
+        v.set_model(&model);
+    }
+}
+
+/// The active model (user choice, else resolved from init). Writes the byte length.
+///
+/// # Safety
+/// `out_len` writable or null. Pointer valid until the next call on this view.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_model(id: u64, out_len: *mut usize) -> *const c_char {
+    view_string(id, out_len, |v| v.model())
+}
+
+/// Number of follow-up prompts waiting in the queue.
+#[no_mangle]
+pub extern "C" fn unterm_agentview_queue_len(id: u64) -> u32 {
+    views().lock().unwrap().get(&id).map(|v| v.queue_len()).unwrap_or(0)
+}
+
+/// Cancel the `index`-th queued follow-up prompt (0-based).
+#[no_mangle]
+pub extern "C" fn unterm_agentview_cancel_queued(id: u64, index: u32) {
+    if let Some(v) = views().lock().unwrap().get(&id) {
+        v.cancel_queued(index);
     }
 }
 

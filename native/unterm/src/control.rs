@@ -77,6 +77,59 @@ impl Conv {
         self.blocks.push(('u', text.to_string()));
     }
 
+    /// Append a queued (not-yet-sent) user prompt, kept as a dimmed `'q'` block in
+    /// the transcript until the running turn finishes and it is promoted/sent.
+    pub fn push_queued(&mut self, text: &str) {
+        self.blocks.push(('q', text.to_string()));
+    }
+
+    /// Promote the oldest queued prompt to a real user turn, returning its text
+    /// (None if nothing is queued).
+    fn promote_first_queued(&mut self) -> Option<String> {
+        for b in self.blocks.iter_mut() {
+            if b.0 == 'q' {
+                b.0 = 'u';
+                return Some(b.1.clone());
+            }
+        }
+        None
+    }
+
+    fn queued_count(&self) -> usize {
+        self.blocks.iter().filter(|b| b.0 == 'q').count()
+    }
+
+    /// Drop the `index`-th queued prompt (0-based among queued blocks only).
+    fn cancel_queued(&mut self, index: usize) {
+        let mut seen = 0;
+        let mut target = None;
+        for (i, b) in self.blocks.iter().enumerate() {
+            if b.0 == 'q' {
+                if seen == index {
+                    target = Some(i);
+                    break;
+                }
+                seen += 1;
+            }
+        }
+        if let Some(i) = target {
+            self.remove_block(i);
+        }
+    }
+
+    /// Remove block `i`, keeping the tool-id → block-index map consistent.
+    fn remove_block(&mut self, i: usize) {
+        if i >= self.blocks.len() {
+            return;
+        }
+        self.blocks.remove(i);
+        for (idx, _) in self.tools.values_mut() {
+            if *idx > i {
+                *idx -= 1;
+            }
+        }
+    }
+
     fn append_role(&mut self, role: char, s: &str) {
         if s.is_empty() {
             return;
@@ -299,6 +352,12 @@ struct State {
     outbox: Mutex<Vec<String>>, // prompts buffered until `initialize` completes
     mcp: Option<McpDispatcher>,
     init_id: String,
+    // Runtime settings driven from the UI: `permission_mode`/`model` are pushed to
+    // the engine via control_requests (and re-applied once `initialize` completes,
+    // for values chosen before the engine was ready). Reasoning effort is a
+    // spawn-time CLI flag (see `Driver::new`), not stored here.
+    permission_mode: Mutex<String>,
+    model: Mutex<String>,
 }
 
 impl State {
@@ -345,6 +404,19 @@ impl State {
             "response": { "subtype": "error", "request_id": request_id, "error": message }
         }));
     }
+
+    /// Send a host→engine `control_request` carrying a single `{key: value}` field
+    /// (e.g. `set_model`/`set_permission_mode`). Fire-and-forget: the engine's
+    /// success reply is ignored, like `interrupt`.
+    fn send_control(&self, subtype: &str, key: &str, value: &str) {
+        let id = format!("unterm-ctl-{}", NEXT_REQ.fetch_add(1, Ordering::Relaxed));
+        self.write_value(&json!({
+            "type": "control_request",
+            "request_id": id,
+            "request": { "subtype": subtype, key: value }
+        }));
+    }
+
 }
 
 /// A live control-protocol session: the spawned `claude` child plus its reader
@@ -364,6 +436,7 @@ impl Driver {
         mcp: Option<McpDispatcher>,
         resume: Option<String>,
         seed: Conv,
+        effort: String,
         claude_cmd: String,
     ) -> std::io::Result<Self> {
         // The host (see ClaudeCode) resolves `claude` to an absolute path and passes
@@ -381,6 +454,13 @@ impl Driver {
         if let Some(id) = resume.as_deref().filter(|s| !s.is_empty()) {
             args.push("--resume".into());
             args.push(id.to_string());
+        }
+        // Reasoning effort (none/low/medium/high/max). Empty/"default" = don't
+        // override, so the model's own default applies (e.g. high on 4.x). This is
+        // a spawn-time flag (no runtime control), so the host respawns to change it.
+        if !effort.is_empty() && effort != "default" {
+            args.push("--effort".into());
+            args.push(effort);
         }
         let workdir: std::path::PathBuf = if cwd.is_empty() { ".".into() } else { cwd.into() };
 
@@ -440,6 +520,8 @@ impl Driver {
             outbox: Mutex::new(Vec::new()),
             mcp,
             init_id: init_id.clone(),
+            permission_mode: Mutex::new("default".to_string()),
+            model: Mutex::new(String::new()),
         });
 
         // Declare our in-process MCP server so the engine routes its calls to us.
@@ -458,9 +540,21 @@ impl Driver {
         })
     }
 
-    /// Queue a user prompt. Writes immediately once `initialize` has completed,
-    /// otherwise buffers until then (the engine must be initialized first).
+    /// Send a user prompt, or queue it if a turn is already running.
+    ///
+    /// - A turn is in flight (`ready` and status `thinking`): hold it as a dimmed
+    ///   queued block; the reader sends it as its own turn when the current one
+    ///   ends (see the `result` handler). This is the follow-up input queue.
+    /// - Otherwise write immediately once `initialize` has completed, else buffer
+    ///   in `outbox` until then (the engine must be initialized first).
     pub fn send(&self, prompt: &str) {
+        if self.state.ready.load(Ordering::Relaxed)
+            && *self.state.status.lock().unwrap() == "thinking"
+        {
+            self.state.conv.lock().unwrap().push_queued(prompt);
+            self.state.sync_transcript();
+            return;
+        }
         {
             let mut c = self.state.conv.lock().unwrap();
             c.push_user(prompt);
@@ -558,6 +652,45 @@ impl Driver {
             "request_id": id,
             "request": { "subtype": "interrupt" }
         }));
+    }
+
+    /// Set the permission mode (`default`/`plan`/`acceptEdits`/`bypassPermissions`).
+    /// Stored, and pushed to the engine now if ready (else applied on init).
+    pub fn set_permission_mode(&self, mode: &str) {
+        *self.state.permission_mode.lock().unwrap() = mode.to_string();
+        if self.state.ready.load(Ordering::Relaxed) {
+            self.state.send_control("set_permission_mode", "mode", mode);
+        }
+    }
+    pub fn permission_mode(&self) -> String {
+        self.state.permission_mode.lock().unwrap().clone()
+    }
+
+    /// Set the model (alias like `opus`/`sonnet`/`haiku`, or empty/`default` to
+    /// keep the engine default). Stored, and pushed now if ready (else on init).
+    pub fn set_model(&self, model: &str) {
+        *self.state.model.lock().unwrap() = model.to_string();
+        // The engine rejects an empty model ("String should have at least 1
+        // character"); empty/`default` just means "keep the engine default".
+        if self.state.ready.load(Ordering::Relaxed) && !model.is_empty() && model != "default" {
+            self.state.send_control("set_model", "model", model);
+        }
+    }
+    /// The active model: a user choice, else the resolved model from `system/init`.
+    pub fn model(&self) -> String {
+        self.state.model.lock().unwrap().clone()
+    }
+
+    /// Number of prompts waiting in the follow-up queue.
+    pub fn queue_len(&self) -> u32 {
+        self.state.conv.lock().unwrap().queued_count() as u32
+    }
+    /// Cancel the `index`-th queued prompt (0-based among queued blocks).
+    pub fn cancel_queued(&self, index: u32) {
+        {
+            self.state.conv.lock().unwrap().cancel_queued(index as usize);
+        }
+        self.state.sync_transcript();
     }
 
     pub fn transcript(&self) -> String {
@@ -748,6 +881,18 @@ fn handle_message(state: &Arc<State>, v: Value) {
                     return;
                 }
                 state.ready.store(true, Ordering::Relaxed);
+                // Apply settings chosen before the engine was ready (persisted
+                // mode/model the host pushed onto a not-yet-initialized session).
+                {
+                    let mode = state.permission_mode.lock().unwrap().clone();
+                    if !mode.is_empty() && mode != "default" {
+                        state.send_control("set_permission_mode", "mode", &mode);
+                    }
+                    let model = state.model.lock().unwrap().clone();
+                    if !model.is_empty() && model != "default" {
+                        state.send_control("set_model", "model", &model);
+                    }
+                }
                 let buffered = std::mem::take(&mut *state.outbox.lock().unwrap());
                 let had_prompts = !buffered.is_empty();
                 for line in buffered {
@@ -764,12 +909,32 @@ fn handle_message(state: &Arc<State>, v: Value) {
                         *state.session_id.lock().unwrap() = sid.to_string();
                     }
                 }
+                // Record the resolved model for display, unless the user already
+                // chose one (don't clobber an explicit selection).
+                if let Some(m) = v["model"].as_str() {
+                    if !m.is_empty() {
+                        let mut cur = state.model.lock().unwrap();
+                        if cur.is_empty() {
+                            *cur = m.to_string();
+                        }
+                    }
+                }
             }
         }
         Some("assistant") => {
             {
                 let mut c = state.conv.lock().unwrap();
                 c.apply_message("assistant", &v["message"]["content"]);
+            }
+            // Capture the resolved model for display (every assistant message
+            // carries it), unless the user pinned one (don't clobber a choice).
+            if let Some(m) = v["message"]["model"].as_str() {
+                if !m.is_empty() {
+                    let mut cur = state.model.lock().unwrap();
+                    if cur.is_empty() {
+                        *cur = m.to_string();
+                    }
+                }
             }
             state.sync_transcript();
         }
@@ -780,7 +945,20 @@ fn handle_message(state: &Arc<State>, v: Value) {
             }
             state.sync_transcript();
         }
-        Some("result") => state.set_status("ready"),
+        Some("result") => {
+            // Turn finished. Send the next queued follow-up prompt as its own turn,
+            // else go idle. (An interrupt also ends in a `result`, so the queue
+            // survives an interrupt and keeps draining.)
+            let next = state.conv.lock().unwrap().promote_first_queued();
+            if let Some(text) = next {
+                state.sync_transcript();
+                let line = user_line(&text);
+                state.write_line(&line);
+                state.set_status("thinking");
+            } else {
+                state.set_status("ready");
+            }
+        }
         // keep_alive, control_cancel_request, transcript_mirror, etc.: ignore.
         _ => {}
     }
