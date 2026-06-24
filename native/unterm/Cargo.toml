@@ -20,6 +20,8 @@ pollster = "0.3"
 bytemuck = "1"
 log = "0.4"
 env_logger = "0.11"
+# Display width of the IME preedit so it can be laid out over the right cells.
+unicode-width = "0.1"
 
 # Terminal model + PTY.
 alacritty_terminal = "0.25"

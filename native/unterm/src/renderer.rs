@@ -21,6 +21,7 @@ use crate::palette::{self, Theme};
 use crate::quads::{Quad, QuadRenderer};
 use crate::term::EventProxy;
 use std::ffi::c_void;
+use unicode_width::UnicodeWidthChar;
 
 /// Padding inside the window edge, in points (scaled to physical px).
 const PAD_PT: f32 = 2.0;
@@ -264,8 +265,10 @@ impl Renderer {
         self.cursor_px
     }
 
-    /// Render `term`'s visible grid into the IOSurface target.
-    pub fn render(&mut self, term: &Term<EventProxy>, theme: &Theme, focused: bool) {
+    /// Render `term`'s visible grid into the IOSurface target. `preedit` is the
+    /// in-progress IME composition drawn as an underlined overlay at the cursor
+    /// (empty = nothing to draw).
+    pub fn render(&mut self, term: &Term<EventProxy>, theme: &Theme, focused: bool, preedit: &str) {
         self.ensure_metrics();
         // No-op on the single-buffered targets; kept for the surface interface.
         self.shared.begin_frame();
@@ -483,6 +486,109 @@ impl Renderer {
                     buf.set_rich_text(&mut fs, spans, Attrs::new().family(family), Shaping::Advanced);
                     buf.shape_until_scroll(&mut fs, false);
                     row_buffers.push((buf, pad + seg_start as f32 * cell_w, top));
+                }
+            }
+
+            // --- IME preedit overlay: the in-progress composition at the cursor. ---
+            // Laid out cell-by-cell like typed text, starting at the cursor and
+            // wrapping to the next row at the right edge so it never runs off the
+            // side. Each visual segment gets an opaque background (so the grid
+            // underneath doesn't show through), an underline marking it composing,
+            // and the glyphs in the terminal font; a thin caret follows the end.
+            if !preedit.is_empty() {
+                if let Some(cur) = cursor_vp {
+                    // Break the composition into per-row segments by display column.
+                    let mut line = cur.line;
+                    let mut col = cur.column.0;
+                    let mut seg_start = col;
+                    let mut seg = String::new();
+                    // (line, start_col, text, width_in_cols)
+                    let mut segments: Vec<(usize, usize, String, usize)> = Vec::new();
+                    for ch in preedit.chars() {
+                        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+                        if col + w.max(1) > cols && col > 0 {
+                            segments.push((line, seg_start, std::mem::take(&mut seg), col - seg_start));
+                            line += 1;
+                            col = 0;
+                            seg_start = 0;
+                        }
+                        seg.push(ch);
+                        col += w;
+                    }
+                    segments.push((line, seg_start, seg, col.saturating_sub(seg_start)));
+
+                    let ut = (1.5 * self.scale).max(1.0);
+                    for (ln, sc, text, wc) in &segments {
+                        if *wc == 0 {
+                            continue;
+                        }
+                        let y = pad + *ln as f32 * cell_h;
+                        // Opaque background + underline over the whole segment.
+                        let bx = pad + *sc as f32 * cell_w;
+                        let bw = *wc as f32 * cell_w;
+                        quads.push(Quad { x: bx, y, w: bw, h: cell_h, color: linear(theme.bg, 1.0), radius: 0.0 });
+                        quads.push(Quad { x: bx, y: y + cell_h - ut, w: bw, h: ut, color: linear(theme.fg, 1.0), radius: 0.0 });
+                        // Glyphs are placed exactly like the grid: narrow runs are
+                        // shaped together and anchored at their start column, while a
+                        // wide (CJK) glyph gets its own buffer anchored at its column
+                        // (its font advance differs from 2 cells, so shaping it inside
+                        // a run would drift the rest of the segment — the cause of the
+                        // pre-/post-commit width mismatch).
+                        let chs: Vec<char> = text.chars().collect();
+                        let mut c = *sc;
+                        let mut i = 0;
+                        while i < chs.len() {
+                            let cw = UnicodeWidthChar::width(chs[i]).unwrap_or(0);
+                            if cw >= 2 {
+                                let mut buf = Buffer::new(&mut fs, Metrics::new(font_px, line_h));
+                                buf.set_size(&mut fs, None, Some(line_h));
+                                buf.set_text(
+                                    &mut fs,
+                                    chs[i].encode_utf8(&mut [0u8; 4]),
+                                    attrs_of(theme.fg, false, false),
+                                    Shaping::Advanced,
+                                );
+                                buf.shape_until_scroll(&mut fs, false);
+                                row_buffers.push((buf, pad + c as f32 * cell_w, y));
+                                c += cw;
+                                i += 1;
+                            } else {
+                                let run_col = c;
+                                let mut run = String::new();
+                                while i < chs.len() {
+                                    let w2 = UnicodeWidthChar::width(chs[i]).unwrap_or(0);
+                                    if w2 >= 2 {
+                                        break;
+                                    }
+                                    run.push(chs[i]);
+                                    c += w2;
+                                    i += 1;
+                                }
+                                if !run.is_empty() {
+                                    let mut buf = Buffer::new(&mut fs, Metrics::new(font_px, line_h));
+                                    buf.set_size(&mut fs, None, Some(line_h));
+                                    buf.set_text(&mut fs, &run, attrs_of(theme.fg, false, false), Shaping::Advanced);
+                                    buf.shape_until_scroll(&mut fs, false);
+                                    row_buffers.push((buf, pad + run_col as f32 * cell_w, y));
+                                }
+                            }
+                        }
+                    }
+                    // Caret at the composition's end (wrapped to the next row if it
+                    // lands exactly on the right edge).
+                    if col >= cols {
+                        line += 1;
+                        col = 0;
+                    }
+                    let ct = (1.0 * self.scale).max(1.0);
+                    quads.push(Quad {
+                        x: pad + col as f32 * cell_w,
+                        y: pad + line as f32 * cell_h,
+                        w: ct,
+                        h: cell_h,
+                        color: linear(theme.cursor, 1.0),
+                        radius: 0.0,
+                    });
                 }
             }
 

@@ -85,17 +85,24 @@ namespace Unterm.Editor
 
         // IME: a hidden, always-focused text field is the input sink so the OS
         // IME engages. Plain typing + committed IME text land in `_imeBuffer`
-        // and are flushed to the PTY each frame; the in-progress composition is
-        // drawn at the cursor. `_composing` is snapshotted at Layout so key
-        // handling is stable within a frame. `_composeJustEnded` marks the frame
-        // a composition was committed so the Enter that committed it is swallowed
-        // instead of being forwarded to the PTY ahead of the committed text.
+        // and are flushed to the PTY each frame. The in-progress composition is
+        // NOT drawn by Unity (the field is invisible) — it's mirrored to the
+        // native renderer via SetPreedit and drawn at the cursor in the terminal
+        // font, so it matches the grid. `_composing` is snapshotted at Layout so
+        // key handling is stable within a frame. `_composeJustEnded` marks the
+        // frame a composition was committed so the Enter that committed it is
+        // swallowed instead of being forwarded to the PTY ahead of the text.
         private const string InputControl = "UntermInput";
         private string _imeBuffer = "";
         private bool _composing;
         private bool _prevComposing;
         private bool _composeJustEnded;
         private bool _refocus;
+        // Last composition string pushed to the native preedit, to avoid redundant
+        // calls/renders while it's unchanged.
+        private string _lastPreedit = "";
+        // Cached transparent style for the hidden IME input field.
+        private GUIStyle _imeHidden;
 
         // Mouse selection: a drag from MouseDown extends the highlight; a plain
         // click (down+up with no drag) clears it. `_selecting` is live between
@@ -111,8 +118,6 @@ namespace Unterm.Editor
         private float _dragGrabY;
         private Color32 _bg = new Color32(24, 24, 24, 255);
         private Color32 _fg = new Color32(208, 208, 212, 255);
-        private GUIStyle _imeStyle;
-        private Texture2D _imeBgTex;
 
         private static bool s_reloading;
         // A one-shot command for the next terminal created by CreateRunning; null
@@ -429,12 +434,6 @@ namespace Unterm.Editor
                 _tex = null;
                 _externalTexPtr = IntPtr.Zero;
             }
-            if (_imeBgTex != null)
-            {
-                DestroyImmediate(_imeBgTex);
-                _imeBgTex = null;
-                _imeStyle = null;
-            }
 
             // Drop the field before disposing so a re-entrant EditorApplication
             // update tick bails on the `_native == null` guard rather than calling
@@ -541,7 +540,6 @@ namespace Unterm.Editor
             }
             _bg = bg;
             _fg = fg;
-            _imeStyle = null; // rebuild against the new colors
             _native.SetColors(Tid, fg, bg, cursor);
         }
 
@@ -626,6 +624,8 @@ namespace Unterm.Editor
                 _prevComposing = now;
                 _composing = now;
             }
+            // Preedit/commit is synced in SyncIme (after DrawImeField) so it can
+            // include any segments the IME has already committed into the field.
 
             var rect = new Rect(0, 0, position.width, position.height);
 
@@ -654,7 +654,7 @@ namespace Unterm.Editor
             // The IME sink is drawn on top at the cursor: invisible when idle,
             // opaque while composing so the OS renders the composition inline.
             DrawImeField(rect);
-            FlushIme();
+            SyncIme();
 
             if (_refocus && Event.current.type == EventType.Repaint)
             {
@@ -676,74 +676,133 @@ namespace Unterm.Editor
             return new Rect(rect.x + 4, rect.yMax - 18, 8, 16);
         }
 
-        // The focused text field that drives IME + plain input. It sits at the
-        // cursor: invisible (no style, empty) when idle, and opaque while the IME
-        // is composing so the OS draws the composition inline at the cursor.
+        // The focused text field that drives the OS IME and collects plain typing +
+        // committed phrases into `_imeBuffer`. It sits AT the caret — the editor IME
+        // anchors the candidate window to this field's caret, not to
+        // compositionCursorPos, so parking it off-screen sent the candidate to a
+        // corner. The composition is drawn natively (SetPreedit), so the field must
+        // not also show it: ImeHidden() draws its text fully transparent, hiding the
+        // OS inline marked text while keeping the field where the candidate needs it.
         private void DrawImeField(Rect rect)
         {
             if (_native == null || Tid == 0) return;
             var cr = CursorPointRect(rect);
-            // Visible only while composing — plain typing is flushed the same
-            // frame, so it never needs to paint.
-            bool show = _composing || !string.IsNullOrEmpty(Input.compositionString);
-
             GUI.SetNextControlName(InputControl);
-            if (show)
+            // While composing the field must span to the window edge: the editor IME
+            // anchors the candidate window to this field's caret, and a tiny field
+            // misplaces it. Idle it's 2px so it doesn't intercept terminal clicks.
+            // Text is fully transparent (ImeHidden), so the OS inline composition
+            // stays hidden behind the native preedit either way.
+            bool composing = _composing || !string.IsNullOrEmpty(Input.compositionString);
+            var style = ImeHidden();
+            if (composing)
             {
-                float w = Mathf.Max(60f, rect.xMax - cr.x);
-                _imeBuffer = GUI.TextField(new Rect(cr.x, cr.y, w, cr.height), _imeBuffer, ImeStyle());
+                // Right-align the field with its RIGHT edge at the cursor, so the
+                // (invisible) marked text always ENDS at the cursor — pinning the
+                // caret, which the editor IME anchors the candidate window to, at the
+                // composition start regardless of text length or font. This stops the
+                // candidate drifting right as you type.
+                style.alignment = TextAnchor.UpperRight;
+                float w = Mathf.Max(120f, cr.x);
+                _imeBuffer = GUI.TextField(new Rect(cr.x - w, cr.y, w, cr.height), _imeBuffer, style);
             }
             else
             {
-                _imeBuffer = GUI.TextField(new Rect(cr.x, cr.y, Mathf.Max(2f, cr.width), cr.height),
-                    _imeBuffer, GUIStyle.none);
+                style.alignment = TextAnchor.UpperLeft;
+                _imeBuffer = GUI.TextField(new Rect(cr.x, cr.y, 2f, cr.height), _imeBuffer, style);
             }
-            // Place the OS IME/candidate window just below the caret.
-            Input.compositionCursorPos = GUIUtility.GUIToScreenPoint(new Vector2(cr.x, cr.yMax));
+            // Place the OS IME/candidate window below the caret line. In the editor
+            // Input.compositionCursorPos is in the focused window's LOCAL GUI space,
+            // not screen space — converting with GUIToScreenPoint added the window's
+            // desktop offset, so the candidate was only correct with the window at
+            // the screen's top-left. Pass the window-local point directly, dropped a
+            // line below the cursor so the candidate clears the (natively drawn)
+            // composition instead of covering it. Only the focused window may move
+            // it (the position is process-global; an unfocused window would yank the
+            // candidate window around).
+            if (focusedWindow == this)
+                Input.compositionCursorPos = new Vector2(cr.x, cr.yMax + cr.height * 1.5f);
         }
 
-        // An opaque, terminal-colored style so the inline composition is legible
-        // over the rendered grid. Rebuilt when the theme changes.
-        private GUIStyle ImeStyle()
+        // A style whose text is fully transparent in every state, so the IME field
+        // (and the inline marked text Unity draws into it) is invisible while the
+        // field still occupies the caret position.
+        private GUIStyle ImeHidden()
         {
-            if (_imeStyle != null) return _imeStyle;
-            if (_imeBgTex == null)
+            if (_imeHidden == null)
             {
-                _imeBgTex = new Texture2D(1, 1) { hideFlags = HideFlags.HideAndDontSave };
-                _imeBgTex.SetPixel(0, 0, _bg);
-                _imeBgTex.Apply();
+                _imeHidden = new GUIStyle(GUIStyle.none);
+                var clear = new Color(0f, 0f, 0f, 0f);
+                _imeHidden.normal.textColor = clear;
+                _imeHidden.focused.textColor = clear;
+                _imeHidden.hover.textColor = clear;
+                _imeHidden.active.textColor = clear;
             }
-            else
-            {
-                _imeBgTex.SetPixel(0, 0, _bg);
-                _imeBgTex.Apply();
-            }
-            _imeStyle = new GUIStyle(EditorStyles.label)
-            {
-                richText = false,
-                padding = new RectOffset(1, 1, 0, 0),
-                alignment = TextAnchor.MiddleLeft,
-            };
-            _imeStyle.normal.background = _imeBgTex;
-            _imeStyle.normal.textColor = _fg;
-            _imeStyle.focused.background = _imeBgTex;
-            _imeStyle.focused.textColor = _fg;
-            return _imeStyle;
+            return _imeHidden;
         }
 
-        // Send committed text (plain typing or a finished IME phrase) to the PTY
-        // once per frame, clearing the hidden field without dropping focus.
-        private void FlushIme()
+        // Sync IME state into the native renderer each frame. While composing, draw
+        // the segments the IME has already committed into the field PLUS the active
+        // composition together as the native preedit (terminal font, at the cursor):
+        // the field text (`_imeBuffer`) holds segments confirmed mid-phrase (e.g.
+        // after a 漢字 conversion) while `Input.compositionString` holds the segment
+        // still being edited, so showing only the latter made a converted segment
+        // vanish as you kept typing. Nothing is sent to the PTY until the phrase
+        // commits, and the field is never mutated mid-composition (which would
+        // disturb the OS IME). Once composition ends (or for plain typing), clear the
+        // preedit and send the committed text, once, without dropping focus.
+        private void SyncIme()
         {
+            if (_native == null || Tid == 0) return;
+
+            // IME state (Input.compositionString) is process-global, so an unfocused
+            // window must NOT mirror it — otherwise the 変換中 preedit appears in
+            // every open terminal window (e.g. a background terminal that keeps
+            // repainting). Clear any preedit this window left and bail.
+            if (focusedWindow != this)
+            {
+                if (!string.IsNullOrEmpty(_lastPreedit))
+                {
+                    _native.SetPreedit(Tid, "");
+                    _lastPreedit = "";
+                    RenderNow();
+                    Repaint();
+                }
+                return;
+            }
+
+            if (_composing)
+            {
+                string marked = _imeBuffer + Input.compositionString;
+                if (marked != _lastPreedit)
+                {
+                    _lastPreedit = marked;
+                    _native.SetPreedit(Tid, marked);
+                    RenderNow();
+                    Repaint();
+                }
+                return;
+            }
+
             if (Event.current.type != EventType.Repaint) return;
-            if (_composing || string.IsNullOrEmpty(_imeBuffer)) return;
-            if (_native == null || Tid == 0) { _imeBuffer = ""; return; }
 
-            _native.SendText(Tid, _imeBuffer);
-            _imeBuffer = "";
-            // Clear the focused editor's buffer in place (keeps IME engaged).
-            var te = (TextEditor)GUIUtility.GetStateObject(typeof(TextEditor), GUIUtility.keyboardControl);
-            if (te != null) { te.text = ""; te.cursorIndex = 0; te.selectIndex = 0; }
+            bool changed = false;
+            if (!string.IsNullOrEmpty(_lastPreedit))
+            {
+                _native.SetPreedit(Tid, "");
+                _lastPreedit = "";
+                changed = true;
+            }
+            if (!string.IsNullOrEmpty(_imeBuffer))
+            {
+                _native.SendText(Tid, _imeBuffer);
+                _imeBuffer = "";
+                // Clear the focused editor's buffer in place (keeps IME engaged).
+                var te = (TextEditor)GUIUtility.GetStateObject(typeof(TextEditor), GUIUtility.keyboardControl);
+                if (te != null) { te.text = ""; te.cursorIndex = 0; te.selectIndex = 0; }
+                changed = true;
+            }
+            if (changed) { RenderNow(); Repaint(); }
         }
 
         private void ChangeFont(float delta) => SetFont(_fontPt + delta);
@@ -1002,7 +1061,7 @@ namespace Unterm.Editor
             }
 
             // Plain printable input is left for the hidden IME field, which
-            // accumulates it (and any committed composition) for FlushIme().
+            // accumulates it (and any committed composition) for SyncIme().
         }
 
         // Right-click context menu: Copy the current selection (disabled when

@@ -12,6 +12,7 @@
 
 - The terminal grid now fills the whole window: the toolbar has been removed, and font size +/- moved into the right-click menu.
 - A new terminal window opens offset from the active one instead of stacking exactly on top of it.
+- The in-progress IME composition is now drawn natively at the cursor in the terminal font (with an underline and caret) instead of via an IMGUI text-field overlay, so it matches the grid on both macOS and Windows.
 
 ### Fixed
 

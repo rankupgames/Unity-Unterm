@@ -283,6 +283,18 @@ pub extern "C" fn unterm_set_focus(id: u64, focused: bool) {
     with_term(id, (), |t| t.set_focused(focused));
 }
 
+/// Set the in-progress IME composition drawn at the cursor (null/empty clears).
+/// This is display-only — committed text still arrives via `unterm_send_text`.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_set_preedit(id: u64, text: *const c_char) {
+    let s = if text.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned()
+    };
+    with_term(id, (), |t| t.set_preedit(&s));
+}
+
 /// Write printable UTF-8 text to the shell (typing / pasted text / IME commit).
 #[no_mangle]
 pub unsafe extern "C" fn unterm_send_text(id: u64, text: *const c_char) {

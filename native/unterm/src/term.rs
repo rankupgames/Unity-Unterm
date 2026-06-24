@@ -110,6 +110,8 @@ pub struct Terminal {
     rows: usize,
     scale: f32,
     focused: bool,
+    /// In-progress IME composition, drawn as an overlay at the cursor; "" = none.
+    preedit: String,
     /// Stable storage for the title returned across the C ABI.
     title_snap: CString,
     /// Stable storage for the selected text returned across the C ABI.
@@ -214,6 +216,7 @@ impl Terminal {
             rows,
             scale,
             focused: true,
+            preedit: String::new(),
             title_snap: CString::default(),
             sel_snap: CString::default(),
             dump_snap: CString::default(),
@@ -527,11 +530,20 @@ impl Terminal {
         }
     }
 
+    /// Set the IME preedit (composition) string shown at the cursor; "" clears it.
+    pub fn set_preedit(&mut self, s: &str) {
+        if self.preedit != s {
+            self.preedit.clear();
+            self.preedit.push_str(s);
+            self.shared.dirty.store(true, Ordering::Relaxed);
+        }
+    }
+
     /// Render the current grid into the IOSurface. Clears the dirty flag.
     pub fn render(&mut self) {
         self.shared.dirty.store(false, Ordering::Relaxed);
         if let Ok(term) = self.term.lock() {
-            self.renderer.render(&term, &self.theme, self.focused);
+            self.renderer.render(&term, &self.theme, self.focused, &self.preedit);
         }
     }
 

@@ -98,6 +98,7 @@ namespace Unterm.Editor
         private CreateSeededFn _createSeeded; private CreateDeadFn _createDead; private TitleFn _dump; private TitleFn _cwd;
         private SetScaleFn _setScale; private SetFontFn _setFont; private SetFontSizeFn _setFontSize;
         private SetColorsFn _setColors; private SetFocusFn _setFocus; private SendTextFn _sendText;
+        private SendTextFn _setPreedit;
         private SendKeyFn _sendKey; private SendTextFn _paste; private IdFn _clear;
         private ScrollFn _scroll; private IdFn _render; private BoolFn _dirty; private BoolFn _present;
         private SelStartFn _selStart; private SelUpdateFn _selUpdate; private IdFn _selClear; private TitleFn _selText;
@@ -162,6 +163,7 @@ namespace Unterm.Editor
             _setColors = Sym<SetColorsFn>("unterm_set_colors");
             _setFocus = Sym<SetFocusFn>("unterm_set_focus");
             _sendText = Sym<SendTextFn>("unterm_send_text");
+            _setPreedit = Sym<SendTextFn>("unterm_set_preedit");
             _sendKey = Sym<SendKeyFn>("unterm_send_key");
             _paste = Sym<SendTextFn>("unterm_paste");
             _clear = Sym<IdFn>("unterm_clear");
@@ -226,6 +228,8 @@ namespace Unterm.Editor
             _setColors(id, Pack(fg), Pack(bg), Pack(cursor));
         public void SetFocus(ulong id, bool focused) => _setFocus(id, focused);
         public void SendText(ulong id, string text) { if (!string.IsNullOrEmpty(text)) _sendText(id, text); }
+        // Empty string clears the composition, so always forward (don't short-circuit).
+        public void SetPreedit(ulong id, string text) => _setPreedit(id, text ?? "");
         public void SendKey(ulong id, string name, bool ctrl, bool alt, bool shift) => _sendKey(id, name, ctrl, alt, shift);
         public void Paste(ulong id, string text) { if (!string.IsNullOrEmpty(text)) _paste(id, text); }
         public void Clear(ulong id) => _clear(id);
