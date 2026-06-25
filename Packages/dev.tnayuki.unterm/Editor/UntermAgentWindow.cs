@@ -62,6 +62,11 @@ namespace Unterm.Editor
         [SerializeField] private string _modelSelection = "";
         [SerializeField] private string _effort = "";
 
+        // Set when we launch /login (or /logout) in a terminal; consumed on the
+        // next OnFocus to rebuild the session with the new credentials. Serialized
+        // so it survives a domain reload that happens while the user is logging in.
+        [SerializeField] private bool _reconnectPending;
+
         private static readonly string[] s_modes =
             { "default", "plan", "acceptEdits", "bypassPermissions" };
 
@@ -129,6 +134,16 @@ namespace Unterm.Editor
             // starts. Force it on while we're focused; restored on blur.
             Input.imeCompositionMode = IMECompositionMode.On;
 #endif
+            // Returning to the panel after launching /login in a terminal: rebuild
+            // the session so a fresh `claude` picks up the new credentials. Only
+            // when no conversation was established yet (the not-signed-in case), so
+            // a live transcript is never discarded.
+            if (_reconnectPending)
+            {
+                _reconnectPending = false;
+                if (_native != null && _viewId != 0 && string.IsNullOrEmpty(_claudeSessionId))
+                    RecreateView();
+            }
         }
 
         private void OnLostFocus()
@@ -162,6 +177,12 @@ namespace Unterm.Editor
             bool dirty = (f & 1) != 0;
             if (dirty) { RenderView(measureInput: false); Repaint(); }
             else if ((f & 2) != 0) Repaint();
+
+            // A built-in command the agent panel can't run over stream-json — it
+            // needs a real TTY (/login's OAuth/browser flow). Launch it in an
+            // interactive terminal; refocusing this window then reconnects.
+            string hostCmd = _native.AgentviewTakeHostCommand(Vid);
+            if (!string.IsNullOrEmpty(hostCmd)) RunHostCommand(hostCmd);
 
             // Keep the mode dropdown in sync with the engine: approving ExitPlanMode
             // switches the permission mode native-side, so mirror it back here.
@@ -198,6 +219,57 @@ namespace Unterm.Editor
             {
                 UntermAgentSessions.Touch(_claudeSessionId, _native.AgentviewTitle(Vid));
                 _lastTouch = EditorApplication.timeSinceStartup;
+            }
+        }
+
+        // Run a built-in command (/login, /logout) in a real interactive terminal:
+        // the stream-json session can't do the OAuth/browser flow, so shell out to
+        // the same `claude` binary the agent uses (resolved by ClaudeCode).
+        // Refocusing this window afterwards reconnects.
+        private void RunHostCommand(string hostCmd)
+        {
+#if UNITY_EDITOR_OSX || UNITY_EDITOR_WIN
+            string verb = hostCmd.StartsWith("/") ? hostCmd.Substring(1) : hostCmd;
+            string claude = ClaudeCode.ClaudePath;
+            if (string.IsNullOrEmpty(claude)) claude = "claude";
+
+            // Quote the path (it may contain spaces under the user profile dir).
+#if UNITY_EDITOR_WIN
+            // PowerShell needs the call operator to run a quoted path; '' escapes '.
+            string command = "& '" + claude.Replace("'", "''") + "' " + verb;
+#else
+            // Embedded in the shell's double-quoted `exec "..."`; '\'' escapes '.
+            string command = "'" + claude.Replace("'", "'\\''") + "' " + verb;
+#endif
+            string title = verb == "logout" ? "Claude Logout" : "Claude Login";
+            UntermWindow.CreateRunning(title, command);
+            _reconnectPending = true;
+#endif
+        }
+
+        // Destroy the current (dead) native view and start a fresh session, so a
+        // new `claude` process initializes with the latest credentials.
+        private void RecreateView()
+        {
+            try
+            {
+                var (pw, ph) = CurrentPanelSize();
+                var (iw, ih) = CurrentInputSize();
+                ulong old = Vid;
+                // Create the replacement before destroying the old one, so a failed
+                // create leaves the existing view intact.
+                _viewId = (long)_native.AgentviewCreate(ProjectRoot, pw, ph, iw, ih, _effort, ClaudeCode.ClaudePath);
+                if (old != 0 && old != Vid) _native.AgentviewDestroy(old);
+                ApplyFonts();
+                ApplyAgentSettings();
+                _refocus = true;
+                RenderView();
+                Repaint();
+            }
+            catch (Exception e)
+            {
+                _status = "reconnect failed: " + e.Message;
+                Debug.LogError("[Unterm] " + e);
             }
         }
 

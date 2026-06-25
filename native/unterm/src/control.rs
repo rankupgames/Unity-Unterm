@@ -609,6 +609,18 @@ impl Driver {
     /// - Otherwise write immediately once `initialize` has completed, else buffer
     ///   in `outbox` until then (the engine must be initialized first).
     pub fn send(&self, prompt: &str) {
+        // A dead session can't accept a turn: `init failed` (most often: not
+        // signed in) is terminal, and `closed` means the child is gone. Don't
+        // flip to "thinking" and buffer a line that would never be flushed (the
+        // outbox only drains on a *successful* init). The panel surfaces a
+        // "not signed in" note, and `/login` is intercepted by the host.
+        // (`initializing` is transient and still buffers — handled below.)
+        {
+            let status = self.state.status.lock().unwrap();
+            if status.starts_with("init failed") || *status == "closed" {
+                return;
+            }
+        }
         if self.state.ready.load(Ordering::Relaxed)
             && *self.state.status.lock().unwrap() == "thinking"
         {

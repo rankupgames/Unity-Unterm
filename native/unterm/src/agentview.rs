@@ -28,6 +28,9 @@ pub struct AgentView {
     scroll: f32,
     /// Option ids for the currently shown permission buttons (click → respond).
     pending_ids: Vec<String>,
+    /// A built-in command the host must run in a real terminal (e.g. `/login`),
+    /// not the stream-json driver. Set by `send()`, drained once by the host.
+    pending_host_cmd: Option<String>,
     /// Start time, for the indicator's dot animation.
     started: Instant,
 
@@ -45,6 +48,7 @@ pub struct AgentView {
     copy_snap: CString,
     mode_snap: CString,
     model_snap: CString,
+    host_cmd_snap: CString,
 }
 
 impl AgentView {
@@ -74,6 +78,7 @@ impl AgentView {
             input: InputBox::new(input_w, input_h),
             scroll: 0.0,
             pending_ids: Vec::new(),
+            pending_host_cmd: None,
             started: Instant::now(),
             last_transcript: String::new(),
             last_status: String::new(),
@@ -86,6 +91,7 @@ impl AgentView {
             copy_snap: CString::default(),
             mode_snap: CString::default(),
             model_snap: CString::default(),
+            host_cmd_snap: CString::default(),
         }
     }
 
@@ -177,6 +183,14 @@ impl AgentView {
         };
         if let Some(label) = label {
             push_note(&mut text, &format!("{label}{}", ".".repeat(self.dots())));
+        } else if status.starts_with("init failed") || status.starts_with("spawn failed") {
+            // A dead session (most often: not signed in) renders nothing else, so
+            // surface an actionable note instead of a blank panel. `/login` is
+            // intercepted by `send()` and run in a real terminal.
+            push_note(
+                &mut text,
+                "Not signed in — type /login to authenticate, then press Enter.",
+            );
         }
         text
     }
@@ -239,7 +253,18 @@ impl AgentView {
 
     fn send(&mut self) {
         let text = self.input.text();
-        if text.trim().is_empty() {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        // `/login` and `/logout` are interactive built-in CLI commands (OAuth /
+        // browser flow): they need a real TTY and can't run over stream-json.
+        // Hand them to the host to launch in a real terminal instead of sending
+        // them to the driver (which would hang on a turn that never finishes).
+        if trimmed == "/login" || trimmed == "/logout" {
+            self.pending_host_cmd = Some(trimmed.to_string());
+            self.input.clear();
+            self.scroll = 0.0;
             return;
         }
         if let Some(d) = &self.driver {
@@ -247,6 +272,13 @@ impl AgentView {
         }
         self.input.clear();
         self.scroll = 0.0;
+    }
+
+    /// Drain the pending host command (e.g. `/login`), if any. Consume-once: the
+    /// host runs it in a real terminal, then we forget it.
+    pub fn take_host_command(&mut self) -> &CString {
+        self.host_cmd_snap = clean(self.pending_host_cmd.take().unwrap_or_default());
+        &self.host_cmd_snap
     }
 
     /// The Send/Stop action: interrupt a running turn, else send the composer.

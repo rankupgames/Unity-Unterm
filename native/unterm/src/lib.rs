@@ -887,6 +887,17 @@ pub unsafe extern "C" fn unterm_agentview_title(id: u64, out_len: *mut usize) ->
     view_string(id, out_len, |v| v.title())
 }
 
+/// A pending built-in command for the host to run in a real terminal (`/login`,
+/// `/logout`), or empty if none. Consume-once: drained when read. Writes the
+/// byte length.
+///
+/// # Safety
+/// `out_len` writable or null. Pointer valid until the next call on this view.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_take_host_command(id: u64, out_len: *mut usize) -> *const c_char {
+    view_string(id, out_len, |v| v.take_host_command())
+}
+
 // --- transcript (panel) input ---
 
 /// Mouse-down in the transcript. Returns 1 if consumed.
