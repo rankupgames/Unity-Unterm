@@ -537,6 +537,13 @@ impl Driver {
             args.push(effort);
         }
         let workdir: std::path::PathBuf = if cwd.is_empty() { ".".into() } else { cwd.into() };
+        // The exact cwd matters on resume: `claude --resume` only finds a session
+        // under the project dir derived from this directory, so log it to verify.
+        log::info!(
+            "claude spawn: cmd={cmd:?} resume={:?} cwd={}",
+            resume.as_deref().unwrap_or(""),
+            workdir.display()
+        );
 
         // Unity launched from the GUI inherits a minimal environment, so resolve
         // `claude` the way it can be found on each OS.
@@ -574,11 +581,24 @@ impl Driver {
             .current_dir(workdir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            // Capture (don't inherit) stderr: a GUI Unity on Windows has no console
+            // for an inherited handle, so claude's own errors — "No conversation
+            // found", MCP/auth failures, crashes — would vanish. Surface each line
+            // through the log (which the editor mirrors) so they're diagnosable.
+            .stderr(Stdio::piped())
             .spawn()?;
 
         let writer = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
+        if let Some(stderr) = child.stderr.take() {
+            std::thread::spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    if !line.trim().is_empty() {
+                        log::warn!("claude stderr: {line}");
+                    }
+                }
+            });
+        }
         let init_id = format!("unterm-init-{}", NEXT_REQ.fetch_add(1, Ordering::Relaxed));
 
         let transcript = seed.serialize();
@@ -1034,6 +1054,7 @@ fn reader_main(state: Arc<State>, stdout: ChildStdout) {
         }
     }
     // Child exited / stdout closed.
+    log::warn!("claude stdout closed — child exited; session -> closed");
     {
         let mut c = state.conv.lock().unwrap();
         c.note_closed();
@@ -1051,9 +1072,11 @@ fn handle_message(state: &Arc<State>, v: Value) {
             if resp["request_id"].as_str() == Some(&state.init_id) {
                 if resp["subtype"].as_str() == Some("error") {
                     let msg = resp["error"].as_str().unwrap_or("initialize failed");
+                    log::warn!("initialize failed: {msg}");
                     state.set_status(&format!("init failed: {msg}"));
                     return;
                 }
+                log::info!("initialize ok (engine ready)");
                 state.ready.store(true, Ordering::Relaxed);
                 // Apply settings chosen before the engine was ready (persisted
                 // mode/model the host pushed onto a not-yet-initialized session).
@@ -1078,6 +1101,9 @@ fn handle_message(state: &Arc<State>, v: Value) {
         Some("control_request") => handle_control_request(state, &v),
         Some("system") => {
             if v["subtype"] == "init" {
+                // What claude reports as its connected MCP servers — tells us at a
+                // glance whether the "unity" server came up on this platform.
+                log::info!("system/init mcp_servers={}", v["mcp_servers"]);
                 if let Some(sid) = v["session_id"].as_str() {
                     if !sid.is_empty() {
                         *state.session_id.lock().unwrap() = sid.to_string();
@@ -1196,6 +1222,13 @@ fn handle_control_request(state: &Arc<State>, v: &Value) {
             }
         }
         Some("mcp_message") => {
+            // Whether claude actually engages our in-process SDK MCP server
+            // ("unity") is the key signal when tools don't show up — log each call.
+            log::info!(
+                "mcp_message server={:?} method={:?}",
+                req["server_name"].as_str().unwrap_or(""),
+                req["message"]["method"].as_str().unwrap_or("")
+            );
             if req["server_name"].as_str() != Some("unity") {
                 state.write_control_error(&request_id, "unknown MCP server");
                 return;

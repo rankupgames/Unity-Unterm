@@ -42,12 +42,44 @@ use std::sync::{Mutex, OnceLock};
 use agentview::AgentView;
 use term::Terminal;
 
+/// Tees log output to stderr *and* a file. env_logger writes only to stderr,
+/// which a GUI Unity on Windows surfaces nowhere (no console, and Unity doesn't
+/// capture a native plugin's stderr there), so the file is the only place the
+/// native logs are recoverable. The file lives at `<temp>/unterm.log`.
+struct Tee(std::fs::File);
+
+impl std::io::Write for Tee {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _ = std::io::stderr().write_all(buf);
+        self.0.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = std::io::stderr().flush();
+        self.0.flush()
+    }
+}
+
+/// The native log file path (`<temp>/unterm.log`), e.g. `%TEMP%\unterm.log` on
+/// Windows. Truncated once per process so each editor session starts fresh.
+fn log_path() -> std::path::PathBuf {
+    std::env::temp_dir().join("unterm.log")
+}
+
 /// Initialize logging once. Safe to call repeatedly.
 fn init_log() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        let _ = env_logger::try_init();
+        // Show our own logs (the agent control protocol, claude's stderr, the D3D
+        // surface status, …) without needing RUST_LOG set, so a GUI Unity — notably
+        // on Windows, where there's no console — is diagnosable; dependencies stay
+        // at `error` to avoid flooding. RUST_LOG still overrides.
+        let env = env_logger::Env::default().default_filter_or("error,unterm=info");
+        let mut builder = env_logger::Builder::from_env(env);
+        if let Ok(file) = std::fs::File::create(log_path()) {
+            builder.target(env_logger::Target::Pipe(Box::new(Tee(file))));
+        }
+        let _ = builder.try_init();
     });
 }
 
