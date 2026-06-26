@@ -63,10 +63,17 @@ impl AgentView {
         effort: String,
         claude_cmd: String,
     ) -> Self {
-        let seed = match resume.as_deref() {
-            Some(id) if !id.is_empty() => control::reconstruct_transcript(id, &cwd),
-            _ => Conv::new(),
+        let (seed, resume_cwd) = match resume.as_deref() {
+            Some(id) if !id.is_empty() => control::reconstruct_transcript(id),
+            _ => (Conv::new(), None),
         };
+        // Resume in the directory the session was created in (recorded in its
+        // transcript), so claude's cwd-scoped `--resume` lookup resolves to the
+        // right project dir. Falls back to the passed cwd for a fresh session, or
+        // if the recorded directory is gone (a moved project).
+        let cwd = resume_cwd
+            .filter(|c| std::path::Path::new(c).is_dir())
+            .unwrap_or(cwd);
         let (driver, fail) = match Driver::new(cwd, mcp, resume, seed, effort, claude_cmd) {
             Ok(d) => (Some(d), String::new()),
             Err(e) => (None, e.to_string()),

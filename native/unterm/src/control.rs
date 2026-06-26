@@ -309,10 +309,17 @@ impl Conv {
 /// `claude --resume` retains context but does not replay turns as stream events.
 /// Globs `~/.claude/projects/*/<session-id>.jsonl` (robust vs computing the
 /// encoded cwd dir) and reads it best-effort (the file may not exist yet).
-pub fn reconstruct_transcript(session_id: &str, _cwd: &str) -> Conv {
+///
+/// Also returns the `cwd` the session recorded, so the resume can run claude in
+/// that exact directory: `claude --resume` only finds a session under the project
+/// dir derived from the *current* cwd, so a mismatch (e.g. Unity's forward-slash
+/// project path vs the saved one on Windows) makes claude report "No conversation
+/// found" and exit. The recorded cwd round-trips to the right project dir.
+pub fn reconstruct_transcript(session_id: &str) -> (Conv, Option<String>) {
     let mut conv = Conv::new();
+    let mut cwd: Option<String> = None;
     if session_id.is_empty() {
-        return conv;
+        return (conv, cwd);
     }
     // `HOME` on Unix; Windows GUI processes set `USERPROFILE` instead.
     let home = std::env::var("HOME")
@@ -323,7 +330,7 @@ pub fn reconstruct_transcript(session_id: &str, _cwd: &str) -> Conv {
     let base = PathBuf::from(home).join(".claude").join("projects");
     let file_name = format!("{session_id}.jsonl");
     let Ok(dirs) = std::fs::read_dir(&base) else {
-        return conv;
+        return (conv, cwd);
     };
     for entry in dirs.flatten() {
         let path = entry.path().join(&file_name);
@@ -338,6 +345,12 @@ pub fn reconstruct_transcript(session_id: &str, _cwd: &str) -> Conv {
                 let Ok(v) = serde_json::from_str::<Value>(line) else {
                     continue;
                 };
+                // Records carry the cwd claude ran in; keep the first we see.
+                if cwd.is_none() {
+                    if let Some(c) = v["cwd"].as_str().filter(|s| !s.is_empty()) {
+                        cwd = Some(c.to_string());
+                    }
+                }
                 // Only conversational records carry a message; skip metadata
                 // (queue-operation, ai-title, last-prompt, attachment, ...).
                 let role = v["type"].as_str().unwrap_or("");
@@ -348,7 +361,7 @@ pub fn reconstruct_transcript(session_id: &str, _cwd: &str) -> Conv {
         }
         break;
     }
-    conv
+    (conv, cwd)
 }
 
 // ===========================================================================
