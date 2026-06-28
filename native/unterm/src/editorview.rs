@@ -19,6 +19,7 @@ pub struct EditorView {
     text_snap: CString,
     copy_snap: CString,
     cut_snap: CString,
+    word_snap: CString,
 }
 
 impl EditorView {
@@ -33,6 +34,7 @@ impl EditorView {
             text_snap: CString::default(),
             copy_snap: CString::default(),
             cut_snap: CString::default(),
+            word_snap: CString::default(),
         }
     }
 
@@ -166,6 +168,10 @@ impl EditorView {
         self.edit.goto_line(line);
     }
 
+    pub fn add_using(&mut self, ns: &str) {
+        self.edit.add_using(ns);
+    }
+
     pub fn find(&mut self, query: &str, forward: bool, case_sensitive: bool) -> bool {
         self.edit.find(query, forward, case_sensitive)
     }
@@ -176,6 +182,29 @@ impl EditorView {
 
     pub fn replace_all(&mut self, query: &str, repl: &str, case_sensitive: bool) -> u32 {
         self.edit.replace_all(query, repl, case_sensitive)
+    }
+
+    pub fn caret_offset(&self) -> usize {
+        self.edit.caret_offset()
+    }
+
+    pub fn word_prefix(&mut self) -> &CString {
+        self.word_snap = clean(&self.edit.word_prefix());
+        &self.word_snap
+    }
+
+    pub fn complete(&mut self, prefix_len: usize, text: &str) {
+        self.edit.complete(prefix_len, text);
+    }
+
+    /// Set the autocomplete popup items ('\n'-joined; empty hides it) + selection.
+    pub fn set_completions(&mut self, joined: &str, selected: usize) {
+        let items: Vec<String> = if joined.is_empty() {
+            Vec::new()
+        } else {
+            joined.split('\n').map(|s| s.to_string()).collect()
+        };
+        self.edit.set_completions(items, selected);
     }
 
     pub fn text(&mut self) -> &CString {

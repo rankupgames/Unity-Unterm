@@ -21,6 +21,12 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     /// Shared glyphon cache (pipelines/bind layouts) for this device.
     pub cache: Cache,
+    /// Kept so on-screen surfaces (e.g. the native completion popup's
+    /// CAMetalLayer) can be created from the same instance/adapter as the device.
+    pub instance: wgpu::Instance,
+    /// Kept to query surface capabilities (formats/alpha modes) for on-screen
+    /// surfaces — a CAMetalLayer doesn't accept the IOSurface's RGBA8 sRGB format.
+    pub adapter: wgpu::Adapter,
 }
 
 fn init_gpu() -> Gpu {
@@ -39,10 +45,10 @@ fn init_gpu() -> Gpu {
         backend_options: wgpu::BackendOptions::default(),
         display: None,
     });
-    let (device, queue) = open_device(&instance);
+    let (device, queue, adapter) = open_device(&instance);
 
     let cache = Cache::new(&device);
-    Gpu { device, queue, cache }
+    Gpu { device, queue, cache, instance, adapter }
 }
 
 /// The device descriptor shared by every adapter open. Uses the adapter's real
@@ -61,12 +67,14 @@ fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static>
 }
 
 /// Open the render device. Off macOS, take the high-performance adapter (Windows
-/// matches Unity's adapter inside `pick_adapter`).
+/// matches Unity's adapter inside `pick_adapter`). The adapter is returned too so
+/// on-screen surfaces (the native popup) can query its capabilities.
 #[cfg(not(target_os = "macos"))]
-fn open_device(instance: &wgpu::Instance) -> (wgpu::Device, wgpu::Queue) {
+fn open_device(instance: &wgpu::Instance) -> (wgpu::Device, wgpu::Queue, wgpu::Adapter) {
     let adapter = pick_adapter(instance);
-    pollster::block_on(adapter.request_device(&device_descriptor(&adapter)))
-        .expect("unterm: failed to create device")
+    let (device, queue) = pollster::block_on(adapter.request_device(&device_descriptor(&adapter)))
+        .expect("unterm: failed to create device");
+    (device, queue, adapter)
 }
 
 /// Open the render device on macOS, on the editor's own `MTLDevice`/queue.
@@ -78,7 +86,7 @@ fn open_device(instance: &wgpu::Instance) -> (wgpu::Device, wgpu::Queue) {
 /// via `crate::unity`). With no captured device (headless tests, or Unity
 /// graphics not up), fall back to the default adapter.
 #[cfg(target_os = "macos")]
-fn open_device(instance: &wgpu::Instance) -> (wgpu::Device, wgpu::Queue) {
+fn open_device(instance: &wgpu::Instance) -> (wgpu::Device, wgpu::Queue, wgpu::Adapter) {
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         force_fallback_adapter: false,
@@ -88,16 +96,20 @@ fn open_device(instance: &wgpu::Instance) -> (wgpu::Device, wgpu::Queue) {
 
     let Some(device) = crate::unity::unity_device() else {
         log::info!("unterm: editor MTLDevice unavailable (UnityPluginLoad not run); using default adapter");
-        return pollster::block_on(adapter.request_device(&device_descriptor(&adapter)))
+        let (device, queue) = pollster::block_on(adapter.request_device(&device_descriptor(&adapter)))
             .expect("unterm: failed to create device");
+        return (device, queue, adapter);
     };
 
     // `create_device_from_hal` uses the OpenDevice's device/queue (not the
     // adapter's), so the adapter only serves as the backend/parent handle here.
     log::info!("unterm: rendering on the editor's own MTLDevice");
     let open = unsafe { unity_open_device(device, crate::unity::unity_queue()) };
-    unsafe { adapter.create_device_from_hal::<wgpu::hal::api::Metal>(open, &device_descriptor(&adapter)) }
-        .expect("unterm: failed to create device from Unity's MTLDevice")
+    let (device, queue) = unsafe {
+        adapter.create_device_from_hal::<wgpu::hal::api::Metal>(open, &device_descriptor(&adapter))
+    }
+    .expect("unterm: failed to create device from Unity's MTLDevice");
+    (device, queue, adapter)
 }
 
 /// Build a wgpu-hal `OpenDevice` from the editor's `MTLDevice` and (optional)
@@ -166,6 +178,15 @@ fn pick_adapter(instance: &wgpu::Instance) -> wgpu::Adapter {
 pub fn gpu() -> &'static Gpu {
     static GPU: OnceLock<Gpu> = OnceLock::new();
     GPU.get_or_init(init_gpu)
+}
+
+/// Lock the shared font system, recovering from a poisoned mutex instead of
+/// panicking. A panic caught at the FFI boundary (e.g. a cosmic-text edit error)
+/// can poison this lock while it's held; without recovery every later text layout
+/// would then panic on `.unwrap()` and the editor would be wedged (no redraw, no
+/// edits registering) — exactly the lock-poisoning recovery the registries use.
+pub fn lock_font_system() -> std::sync::MutexGuard<'static, FontSystem> {
+    font_system().lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// The shared font database. Locked briefly during layout/render.

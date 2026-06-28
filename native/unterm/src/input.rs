@@ -113,11 +113,20 @@ pub struct InputBox {
     /// steady-state frames skip the whole-document attrs loop.
     attrs_dirty: bool,
 
+    /// Autocomplete popup items + selected index (code mode). The host computes
+    /// the list; this draws it (on top of the text) anchored at the caret.
+    completions: Vec<String>,
+    compl_sel: usize,
+
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     quads: QuadRenderer,
+    /// Separate renderers for the popup so it draws ON TOP of the main text (own
+    /// GPU buffers — re-preparing the main ones for a second draw would race).
+    popup_text: TextRenderer,
+    popup_quads: QuadRenderer,
 }
 
 impl InputBox {
@@ -133,9 +142,12 @@ impl InputBox {
         let text_renderer =
             TextRenderer::new(&mut atlas, &g.device, wgpu::MultisampleState::default(), None);
         let quads = QuadRenderer::new(&g.device, FORMAT);
+        let popup_text =
+            TextRenderer::new(&mut atlas, &g.device, wgpu::MultisampleState::default(), None);
+        let popup_quads = QuadRenderer::new(&g.device, FORMAT);
 
         let editor = {
-            let mut fs = gpu::font_system().lock().unwrap();
+            let mut fs = gpu::lock_font_system();
             let buffer = Buffer::new(&mut fs, Metrics::new(14.0, 20.0));
             Editor::new(buffer)
         };
@@ -181,12 +193,26 @@ impl InputBox {
             hl_cache: Vec::new(),
             highlighter: None,
             attrs_dirty: true,
+            completions: Vec::new(),
+            compl_sel: 0,
             swash_cache,
             viewport,
             atlas,
             text_renderer,
             quads,
+            popup_text,
+            popup_quads,
         }
+    }
+
+    /// Set the autocomplete popup items + selected index (empty list hides it).
+    pub fn set_completions(&mut self, items: Vec<String>, selected: usize) {
+        self.completions = items;
+        self.compl_sel = if self.completions.is_empty() {
+            0
+        } else {
+            selected.min(self.completions.len() - 1)
+        };
     }
 
     pub fn set_clear_color(&mut self, r: f64, g: f64, b: f64, a: f64) {
@@ -206,7 +232,7 @@ impl InputBox {
             self.font_family = Some(path.to_string());
             return;
         }
-        let mut fs = gpu::font_system().lock().unwrap();
+        let mut fs = gpu::lock_font_system();
         let db = fs.db_mut();
         if let Err(e) = db.load_font_file(path) {
             log::warn!("unterm: failed to load input font {path}: {e}");
@@ -375,7 +401,7 @@ impl InputBox {
     fn apply_lines(&mut self, lines: Vec<String>, caret: (usize, usize), sel: Option<(usize, usize)>) {
         let text = lines.join("\n");
         {
-            let mut fs = gpu::font_system().lock().unwrap();
+            let mut fs = gpu::lock_font_system();
             self.editor.start_change();
             self.editor.set_selection(Selection::None);
             self.editor.action(&mut fs, Action::Motion(Motion::BufferStart));
@@ -579,7 +605,7 @@ impl InputBox {
     /// previous tab stop (matching VS Code / Sublime / Atom's `useTabStops`);
     /// otherwise a normal one-character backspace (also deletes a selection).
     fn smart_backspace(&mut self) {
-        let mut fs = gpu::font_system().lock().unwrap();
+        let mut fs = gpu::lock_font_system();
         if self.editor.selection_bounds().is_some() {
             self.editor.start_change();
             self.editor.action(&mut fs, Action::Backspace);
@@ -620,7 +646,7 @@ impl InputBox {
     /// Smart Home: jump to the first non-whitespace char, or to column 0 if already
     /// there. `shift` extends the selection.
     fn smart_home(&mut self, shift: bool) {
-        let mut fs = gpu::font_system().lock().unwrap();
+        let mut fs = gpu::lock_font_system();
         if shift {
             if matches!(self.editor.selection(), Selection::None) {
                 let anchor = self.editor.cursor();
@@ -639,6 +665,47 @@ impl InputBox {
         });
         let motion = if cur.index != soft { Motion::SoftHome } else { Motion::Home };
         self.editor.action(&mut fs, Action::Motion(motion));
+    }
+
+    /// The caret's absolute character offset in the document (for Roslyn position).
+    pub fn caret_offset(&self) -> usize {
+        let text = self.text();
+        cursor_char_off(&text, self.editor.cursor())
+    }
+
+    /// The identifier characters immediately before the caret (empty if none) —
+    /// the prefix an autocomplete popup filters on.
+    pub fn word_prefix(&self) -> String {
+        let cur = self.editor.cursor();
+        self.editor.with_buffer(|b| {
+            let line = b.lines.get(cur.line).map(|l| l.text()).unwrap_or("");
+            let before = &line[..cur.index.min(line.len())];
+            let mut start = before.len();
+            for (i, c) in before.char_indices().rev() {
+                if c.is_alphanumeric() || c == '_' {
+                    start = i;
+                } else {
+                    break;
+                }
+            }
+            before[start..].to_string()
+        })
+    }
+
+    /// Accept a completion: delete `prefix_len` characters before the caret and
+    /// insert `text` in their place (one undoable change).
+    pub fn complete(&mut self, prefix_len: usize, text: &str) {
+        let mut fs = gpu::lock_font_system();
+        self.editor.start_change();
+        for _ in 0..prefix_len {
+            self.editor.action(&mut fs, Action::Backspace);
+        }
+        self.editor.insert_string(text, None);
+        if let Some(c) = self.editor.finish_change() {
+            self.push_change(c);
+        }
+        drop(fs);
+        self.bump();
     }
 
     /// Target (line, char-col) for a code-aware word motion/deletion from the caret
@@ -820,7 +887,7 @@ impl InputBox {
     pub fn set_text(&mut self, text: &str) {
         let family_name = self.font_family.clone();
         let color = self.text_color;
-        let mut fs = gpu::font_system().lock().unwrap();
+        let mut fs = gpu::lock_font_system();
         let family = match family_name.as_deref() {
             Some(n) => Family::Name(n),
             None => Family::Monospace,
@@ -879,6 +946,59 @@ impl InputBox {
         if let Some(c) = self.editor.finish_change() {
             self.push_change(c);
         }
+        self.bump();
+    }
+
+    /// Insert `using <ns>;` near the top of the file (after the leading run of
+    /// `using`/blank/comment lines), as one undoable change — unless it's already
+    /// imported. The caret stays on its line (shifted down when the import lands
+    /// above it). Used by completion's auto-import of an unimported type.
+    pub fn add_using(&mut self, ns: &str) {
+        let ns = ns.trim();
+        if ns.is_empty() {
+            return;
+        }
+        let want = format!("using {ns};");
+        let lines: Vec<String> = self
+            .editor
+            .with_buffer(|b| b.lines.iter().map(|l| l.text().to_string()).collect());
+        if lines.iter().any(|l| l.trim() == want) {
+            return; // already imported
+        }
+        // Insert right after the last leading `using` (so it groups with them, before
+        // any trailing blank line or comment); if there are none, just before the first
+        // real code line (keeping a file-header comment block above it).
+        let mut last_using_end: Option<usize> = None;
+        let mut first_code = lines.len();
+        for (i, l) in lines.iter().enumerate() {
+            let t = l.trim_start();
+            if t.starts_with("using ") {
+                last_using_end = Some(i + 1);
+            } else if t.is_empty()
+                || t.starts_with("//")
+                || t.starts_with("/*")
+                || t.starts_with('*')
+                || t.starts_with('#')
+            {
+                // file-header comment / blank / preprocessor directive — keep scanning
+            } else {
+                first_code = i;
+                break;
+            }
+        }
+        let target = last_using_end
+            .unwrap_or(first_code)
+            .min(lines.len().saturating_sub(1));
+        let cur = self.editor.cursor();
+        self.editor.start_change();
+        self.editor.set_cursor(Cursor::new(target, 0));
+        self.editor.insert_string(&format!("{want}\n"), None);
+        if let Some(c) = self.editor.finish_change() {
+            self.push_change(c);
+        }
+        // Restore the caret, shifted down a line if the import was inserted above it.
+        let line = if cur.line >= target { cur.line + 1 } else { cur.line };
+        self.editor.set_cursor(Cursor::new(line, cur.index));
         self.bump();
     }
 
@@ -954,7 +1074,7 @@ impl InputBox {
             }
         }
 
-        let mut fs = gpu::font_system().lock().unwrap();
+        let mut fs = gpu::lock_font_system();
         let motion = match name {
             "LeftArrow" => Some(Motion::Left),
             "RightArrow" => Some(Motion::Right),
@@ -1028,7 +1148,7 @@ impl InputBox {
         let pad = PAD * self.scale;
         let bx = (x - pad - self.gutter_px).round() as i32;
         let by = (y - pad).round() as i32;
-        let mut fs = gpu::font_system().lock().unwrap();
+        let mut fs = gpu::lock_font_system();
         if kind == 2 {
             // Double-click: place the caret, then select the code-aware token under
             // it (cosmic-text's word select uses UAX#29, which keeps `foo.bar`
@@ -1076,7 +1196,7 @@ impl InputBox {
     }
 
     pub fn select_all(&mut self) {
-        let mut fs = gpu::font_system().lock().unwrap();
+        let mut fs = gpu::lock_font_system();
         self.editor.action(&mut fs, Action::Motion(Motion::BufferStart));
         let start = self.editor.cursor();
         self.editor.set_selection(Selection::Normal(start));
@@ -1179,7 +1299,7 @@ impl InputBox {
         let use_hl = self.highlighter.is_some() && !self.hl_cache.is_empty();
 
         let color = self.text_color;
-        let mut guard = gpu::font_system().lock().unwrap();
+        let mut guard = gpu::lock_font_system();
         let fs = &mut *guard;
         // Borrow the family name directly (no per-frame clone): `attrs` is a field-
         // disjoint shared borrow of `self.font_family` that lives only across the
@@ -1548,6 +1668,128 @@ impl InputBox {
             });
         }
 
+        // Autocomplete popup, drawn ON TOP of the text via its own renderers
+        // (re-preparing the main ones for a second draw in the same submit would
+        // race on their GPU buffers). Anchored at the caret; flips above on
+        // overflow. The host supplies the items + selection.
+        let popup = !self.completions.is_empty();
+        let mut popup_buf: Option<Buffer> = None;
+        let mut popup_text_pos = (0.0_f32, 0.0_f32);
+        let mut popup_bounds = bounds;
+        if popup {
+            let n = self.completions.len();
+            let row_h = line_height;
+            let (cx, cy) = (self.caret[0], self.caret[1]);
+
+            // Width fits the longest item (monospace estimate), capped to the surface
+            // so the popup never needs to extend past the editor's bounds.
+            let max_chars = self
+                .completions
+                .iter()
+                .take(n.min(200))
+                .map(|s| s.chars().count())
+                .max()
+                .unwrap_or(8);
+            let pw = ((max_chars as f32) * font_size * 0.6 + pad * 2.0)
+                .clamp(80.0, (width - 8.0).max(80.0));
+
+            // Pick the side (below / above the caret) with more room and cap the row
+            // count to what fits there — the popup is clipped to the editor surface.
+            let below = (height - (cy + row_h) - pad).max(0.0);
+            let above = (cy - pad).max(0.0);
+            let use_below = below >= above;
+            let room = if use_below { below } else { above };
+            let fit_rows = ((room / row_h).floor() as usize).max(1);
+            let visible = n.min(10).min(fit_rows);
+            let ph = visible as f32 * row_h + pad;
+
+            let px = cx.min((width - pw).max(0.0)).max(0.0);
+            let py = if use_below { cy + row_h } else { (cy - ph).max(0.0) };
+            let top = if self.compl_sel >= visible { self.compl_sel + 1 - visible } else { 0 };
+
+            let bg = self.clear;
+            let shade = if self.highlight_dark { 0.10_f32 } else { -0.06_f32 };
+            let mut pquads: Vec<Quad> = Vec::with_capacity(2);
+            pquads.push(Quad {
+                x: px,
+                y: py,
+                w: pw,
+                h: ph,
+                color: [
+                    (bg.r as f32 + shade).clamp(0.0, 1.0),
+                    (bg.g as f32 + shade).clamp(0.0, 1.0),
+                    (bg.b as f32 + shade).clamp(0.0, 1.0),
+                    0.98,
+                ],
+                radius: 4.0 * s,
+            });
+            let sel_row = self.compl_sel.saturating_sub(top);
+            pquads.push(Quad {
+                x: px,
+                y: py + pad * 0.5 + sel_row as f32 * row_h,
+                w: pw,
+                h: row_h,
+                color: [0.30, 0.50, 0.90, 0.55],
+                radius: 0.0,
+            });
+            self.popup_quads.prepare(&g.device, &g.queue, (width, height), &pquads);
+
+            // Each item is a 1-char kind tag + the display label. Strip the tag for
+            // display, keep it to color the row like the editor.
+            let mut joined = String::new();
+            let mut kinds: Vec<char> = Vec::with_capacity(visible);
+            for i in 0..visible {
+                let item = &self.completions[top + i];
+                let mut chars = item.chars();
+                kinds.push(chars.next().unwrap_or(' '));
+                if i > 0 {
+                    joined.push('\n');
+                }
+                joined.push_str(chars.as_str()); // the rest, after the kind tag
+            }
+            let mut b = Buffer::new(fs, Metrics::new(font_size, row_h));
+            b.set_size(fs, Some(pw - pad), Some(ph));
+            b.set_wrap(fs, Wrap::None); // labels never wrap — clip at the popup edge
+            let base = Attrs::new().family(Family::Monospace).color(self.text_color);
+            b.set_text(fs, &joined, &base, Shaping::Advanced, None);
+            // Color each row like the editor: the name by its kind (function/type/
+            // property…) and the signature/type part in the type color.
+            let dark = self.highlight_dark;
+            for (line, &kind) in b.lines.iter_mut().zip(kinds.iter()) {
+                let label = line.text().to_string();
+                line.set_attrs_list(popup_label_attrs(&label, kind, &base, dark));
+            }
+            b.shape_until_scroll(fs, false);
+            popup_text_pos = (px + pad * 0.5, py + pad * 0.5);
+            // Clip the popup text to its own box so long labels don't draw over the
+            // surrounding editor.
+            popup_bounds = TextBounds {
+                left: px as i32,
+                top: py as i32,
+                right: (px + pw) as i32,
+                bottom: (py + ph) as i32,
+            };
+            popup_buf = Some(b);
+        }
+        if let Some(pb) = popup_buf.as_ref() {
+            let popup_text = &mut self.popup_text;
+            let atlas = &mut self.atlas;
+            let swash_cache = &mut self.swash_cache;
+            let viewport = &self.viewport;
+            let area = TextArea {
+                buffer: pb,
+                left: popup_text_pos.0,
+                top: popup_text_pos.1,
+                scale: 1.0,
+                bounds: popup_bounds,
+                default_color: text_color,
+                custom_glyphs: &[],
+            };
+            popup_text
+                .prepare(&g.device, &g.queue, fs, atlas, viewport, [area], swash_cache)
+                .expect("unterm: popup glyphon prepare failed");
+        }
+
         let mut encoder = g
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1574,6 +1816,12 @@ impl InputBox {
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("unterm: input glyphon render failed");
+            if popup {
+                self.popup_quads.render(&mut pass);
+                self.popup_text
+                    .render(&self.atlas, &self.viewport, &mut pass)
+                    .expect("unterm: popup glyphon render failed");
+            }
         }
         // Blit the freshly rendered frame into the surface's presented texture:
         // no-op on macOS (the IOSurface is the render target); on Windows it copies
@@ -1625,6 +1873,39 @@ fn cursor_char_off(text: &str, cur: Cursor) -> usize {
         off += l.chars().count() + 1; // +1 for the '\n'
     }
     off
+}
+
+/// Build colored spans for a completion popup label (`name : type`, `Foo(T) : R`):
+/// the name is colored by the symbol's KIND (from the host) using the editor's
+/// theme captures, and the rest (params, `:`, type) in the type color.
+pub(crate) fn popup_label_attrs(label: &str, kind: char, base: &Attrs, dark: bool) -> glyphon::AttrsList {
+    let mut al = glyphon::AttrsList::new(base);
+    let paren = label.find('(');
+    let colon = label.find(" : ");
+    let name_end = match (paren, colon) {
+        (Some(p), Some(c)) => p.min(c),
+        (Some(p), None) => p,
+        (None, Some(c)) => c,
+        (None, None) => label.len(),
+    };
+    // Kind tag → editor highlight capture (matches the in-editor token colors).
+    let capture = match kind {
+        'M' | 'X' => "function",
+        'P' | 'V' => "property",
+        'F' | 'L' | 'A' => "variable",
+        'T' | 'E' | 'U' => "type",
+        'N' => "namespace",
+        'C' => "constant",
+        'K' => "keyword",
+        _ => "",
+    };
+    if name_end > 0 && !capture.is_empty() {
+        al.add_span(0..name_end, &base.clone().color(crate::highlight::color_of(capture, dark)));
+    }
+    if name_end < label.len() {
+        al.add_span(name_end..label.len(), &base.clone().color(crate::highlight::color_of("type", dark)));
+    }
+    al
 }
 
 /// If `text` is a single opening bracket/quote, the matching closer to auto-insert.

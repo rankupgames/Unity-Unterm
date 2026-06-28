@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEditor.ShortcutManagement;
 using UnityEngine;
@@ -102,6 +103,47 @@ namespace Unterm.Editor
 
         // Last on-disk modification time, to detect external edits.
         [SerializeField] private long _fileTicks;
+
+        // Autocomplete popup (Stage 1: C# keywords + identifiers already in the
+        // buffer; semantic/Roslyn member completion is a later stage).
+        private bool _complOpen;
+        private List<string> _complItems = new List<string>();   // insert text (bare names)
+        private List<string> _complLabels = new List<string>();  // display text (name + type/sig)
+        private List<char> _complKinds = new List<char>();       // kind tag per item (for coloring)
+        // Caret screen position (POINTS, top-left) + scale, cached each OnGUI so the
+        // native popup can be (re)shown from EditorApplication.update where
+        // GUIToScreenPoint is unavailable.
+        private float _popupAnchorX, _popupAnchorY, _popupScale = 1f;
+        // Member-completion cache: the full member list for a given member-access, so
+        // typing more of the member name filters in C# instead of re-running Roslyn.
+        private List<(string insert, string label, char kind)> _memberCache;
+        private int _memberAnchor = -1; // doc offset of the word's start
+        // Completion mode the cache/request is for: 0 = general (scope), 1 = member
+        // (after `.`), 2 = attribute (after `[`).
+        private int _cacheMode;
+        // Background Roslyn request in flight (so typing never blocks on analysis).
+        // The work runs on the shared UntermCompletionWorker thread.
+        private long _pendingSeq;       // 0 = none in flight
+        private int _pendingAnchor;
+        private int _pendingMode;
+        private int _complSel;
+        private int _complScroll; // popup view offset (top index); wheel moves this
+        private int _complPrefixLen;
+        private const int ComplRows = 10; // visible popup rows (matches native MAX_ROWS)
+        private static readonly string[] s_csKeywords =
+        {
+            "abstract", "as", "async", "await", "base", "bool", "break", "byte", "case",
+            "catch", "char", "checked", "class", "const", "continue", "decimal", "default",
+            "delegate", "do", "double", "else", "enum", "event", "explicit", "extern",
+            "false", "finally", "fixed", "float", "for", "foreach", "get", "goto", "if",
+            "implicit", "in", "int", "interface", "internal", "is", "lock", "long",
+            "nameof", "namespace", "new", "null", "object", "operator", "out", "override",
+            "params", "partial", "private", "protected", "public", "readonly", "ref",
+            "return", "sbyte", "sealed", "set", "short", "sizeof", "stackalloc", "static",
+            "string", "struct", "switch", "this", "throw", "true", "try", "typeof", "uint",
+            "ulong", "unchecked", "unsafe", "ushort", "using", "value", "var", "virtual",
+            "void", "volatile", "when", "while", "yield",
+        };
 
         // --- opening -----------------------------------------------------------
 
@@ -267,6 +309,9 @@ namespace Unterm.Editor
             _crlf = DetectCrlf(text);
             text = text.Replace("\r\n", "\n").Replace("\r", "\n");
             _langToken = LangTokenFor(path) ?? "";
+            // Warm Roslyn off the typing path so the first `.` doesn't stall.
+            if (_langToken == "cs")
+                EditorApplication.delayCall += UntermRoslynCompletion.Warmup;
             // (line ending decided above; _crlf maintains the file's, else OS default)
             _fileTicks = File.Exists(path) ? File.GetLastWriteTimeUtc(path).Ticks : 0;
             _dirty = false;
@@ -290,10 +335,18 @@ namespace Unterm.Editor
         {
             s_reloading = false;
             AssemblyReloadEvents.beforeAssemblyReload += OnBeforeReload;
+            EditorApplication.update += OnEditorUpdate;
             wantsMouseMove = false;
             // New/untitled buffer: default to the OS line ending until a file is
             // loaded (which then maintains that file's ending).
             if (string.IsNullOrEmpty(_filePath)) _crlf = Environment.NewLine == "\r\n";
+            // `_dirty` is serialized and survives a domain reload, but `hasUnsavedChanges`
+            // is reset to false by Unity on reload. Re-sync it, or MarkDirty()'s
+            // `if (_dirty) return` would keep the unsaved indicator off forever after
+            // the first recompile.
+            hasUnsavedChanges = _dirty;
+            if (_dirty && !string.IsNullOrEmpty(_filePath))
+                saveChangesMessage = $"{Path.GetFileName(_filePath)} has unsaved changes.";
             LoadNative();
             // Re-derive dirty from the native version now the view is adopted (the
             // serialized flag is just the pre-reload display value).
@@ -314,6 +367,8 @@ namespace Unterm.Editor
         private void OnDisable()
         {
             AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeReload;
+            EditorApplication.update -= OnEditorUpdate;
+            _native?.PopupHide();
             Teardown(keepView: s_reloading);
         }
 
@@ -332,6 +387,9 @@ namespace Unterm.Editor
 #if UNITY_EDITOR_WIN
             Input.imeCompositionMode = IMECompositionMode.Auto;
 #endif
+            // The popup is a floating panel; don't leave it on screen when the editor
+            // isn't focused.
+            CloseCompletion();
         }
 
         private void LoadNative()
@@ -500,12 +558,26 @@ namespace Unterm.Editor
                 && _native != null && _editorId != 0)
             {
                 var we = Event.current;
-                float ppp = EditorGUIUtility.pixelsPerPoint;
-                if (Mathf.Abs(we.delta.x) > 0.01f) _native.EditorScrollH(Eid, we.delta.x * 24f * ppp);
-                if (Mathf.Abs(we.delta.y) > 0.01f) _native.EditorScroll(Eid, we.delta.y * 24f * ppp);
-                RenderView();
-                Repaint();
-                we.Use();
+                if (_complOpen && _complItems.Count > 0 && Mathf.Abs(we.delta.y) > 0.01f)
+                {
+                    // Popup is open: the wheel scrolls the VIEW (offset) only, leaving
+                    // the selection put (the panel passes mouse events through to here).
+                    int vis = Mathf.Min(_complItems.Count, ComplRows);
+                    int maxScroll = Mathf.Max(0, _complItems.Count - vis);
+                    int dir = we.delta.y > 0 ? 1 : -1;
+                    _complScroll = Mathf.Clamp(_complScroll + dir, 0, maxScroll);
+                    PushCompletions();
+                    we.Use();
+                }
+                else
+                {
+                    float ppp = EditorGUIUtility.pixelsPerPoint;
+                    if (Mathf.Abs(we.delta.x) > 0.01f) _native.EditorScrollH(Eid, we.delta.x * 24f * ppp);
+                    if (Mathf.Abs(we.delta.y) > 0.01f) _native.EditorScroll(Eid, we.delta.y * 24f * ppp);
+                    RenderView();
+                    Repaint();
+                    we.Use();
+                }
             }
 
             HandleMouse(rect);
@@ -548,6 +620,7 @@ namespace Unterm.Editor
             switch (e.type)
             {
                 case EventType.MouseDown when e.button == 0 && rect.Contains(e.mousePosition):
+                    CloseCompletion(); // a click dismisses the popup
                     byte kind = e.clickCount >= 3 ? (byte)3 : e.clickCount == 2 ? (byte)2 : (byte)0;
                     _native.EditorMouse(Eid, lx, ly, kind);
                     _mouseDragging = true;
@@ -647,6 +720,38 @@ namespace Unterm.Editor
             // While composing, let every key reach the IME field.
             if (_composing) return;
 
+            // Ctrl+Space opens the completion popup.
+            if (e.control && e.keyCode == KeyCode.Space)
+            {
+                UpdateCompletion(1);
+                e.Use();
+                return;
+            }
+
+            // While the popup is open: navigate / accept / dismiss. Left/Right/Home/
+            // End move the caret away, so close and let them through.
+            if (_complOpen && _complItems.Count > 0)
+            {
+                switch (e.keyCode)
+                {
+                    case KeyCode.DownArrow:
+                        _complSel = (_complSel + 1) % _complItems.Count; EnsureComplSelVisible(); PushCompletions(); e.Use(); return;
+                    case KeyCode.UpArrow:
+                        _complSel = (_complSel - 1 + _complItems.Count) % _complItems.Count; EnsureComplSelVisible(); PushCompletions(); e.Use(); return;
+                    case KeyCode.Tab:
+                    case KeyCode.Return:
+                    case KeyCode.KeypadEnter:
+                        AcceptCompletion(); e.Use(); return;
+                    case KeyCode.Escape:
+                        CloseCompletion(); e.Use(); return;
+                    case KeyCode.LeftArrow:
+                    case KeyCode.RightArrow:
+                    case KeyCode.Home:
+                    case KeyCode.End:
+                        CloseCompletion(); break; // fall through to normal motion
+                }
+            }
+
             // Swallow the Enter that committed an IME composition.
             if (_composeJustEnded &&
                 (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter))
@@ -688,6 +793,7 @@ namespace Unterm.Editor
 #endif
                 _native.EditorKey(Eid, n, e.control, e.alt, e.shift);
                 MarkDirty();
+                if (_complOpen) UpdateCompletion(1);
                 RenderView(); Repaint(); e.Use();
                 return;
             }
@@ -695,6 +801,7 @@ namespace Unterm.Editor
             {
                 _native.EditorKey(Eid, "DeleteWordForward", e.control, e.alt, e.shift);
                 MarkDirty();
+                if (_complOpen) UpdateCompletion(1);
                 RenderView(); Repaint(); e.Use();
                 return;
             }
@@ -769,6 +876,8 @@ namespace Unterm.Editor
             {
                 _native.EditorKey(Eid, name, e.control, e.alt, e.shift);
                 MarkDirty();
+                if (_complOpen && (name == "Backspace" || name == "Delete")) UpdateCompletion(1);
+                else if (name == "Return") CloseCompletion();
                 RenderView();
                 Repaint();
                 e.Use();
@@ -964,6 +1073,478 @@ namespace Unterm.Editor
             else { _fileTicks = t; _status = "Kept your edits — saving will overwrite the external change"; }
         }
 
+        // --- autocomplete popup ------------------------------------------------
+
+        private static readonly Regex s_ident = new Regex(@"[A-Za-z_][A-Za-z0-9_]*", RegexOptions.Compiled);
+
+        // Decide what to complete at the caret. C#: semantic completion via Roslyn —
+        // member access (`expr.`) lists the type's members, otherwise scope symbols
+        // (types, namespaces, locals, members…). Roslyn runs ONCE per word on a
+        // BACKGROUND thread (so typing never blocks); the result is cached and keyed
+        // by the word start, so typing more filters the cache synchronously.
+        // True when the '.' at `dotIndex` is a decimal point inside a numeric literal
+        // (e.g. `1.0f`), not a member-access dot — so `1.` doesn't trigger completion.
+        // A digit run immediately before the dot that isn't preceded by an identifier
+        // char (so `a1.` stays member access) means it's a number.
+        private static bool IsNumericDot(string text, int dotIndex)
+        {
+            int i = dotIndex - 1;
+            if (i < 0 || !char.IsDigit(text[i])) return false;
+            while (i >= 0 && char.IsDigit(text[i])) i--;
+            return i < 0 || !(char.IsLetter(text[i]) || text[i] == '_');
+        }
+
+        // The completion context for the token starting at `nameStart`:
+        //   1 = member access (after a non-numeric `.`), 2 = attribute name
+        //   (the token sits in a `[ ... ]` attribute list), else 0 = general scope.
+        private static int CompletionModeAt(string text, int nameStart)
+        {
+            if (nameStart > 0 && nameStart <= text.Length && text[nameStart - 1] == '.'
+                && !IsNumericDot(text, nameStart - 1))
+                return 1;
+            if (IsAttributeContext(text, nameStart)) return 2;
+            if (PrecededByWord(text, nameStart, "new")) return 3;       // object creation → types
+            if (PrecededByWord(text, nameStart, "override")) return 5;  // override → base members
+            if (IsUsingDirective(text, nameStart)) return 4;           // using directive → namespaces
+            return 0;
+        }
+
+        // Whether the token at `nameStart` immediately follows the bare keyword `word`
+        // (separated only by whitespace, with a token boundary before the keyword).
+        private static bool PrecededByWord(string text, int nameStart, string word)
+        {
+            int i = nameStart - 1;
+            while (i >= 0 && (text[i] == ' ' || text[i] == '\t')) i--;
+            if (i < word.Length - 1) return false;
+            for (int k = 0; k < word.Length; k++)
+                if (text[i - k] != word[word.Length - 1 - k]) return false;
+            int b = i - word.Length;
+            return b < 0 || !(char.IsLetterOrDigit(text[b]) || text[b] == '_' || text[b] == '.');
+        }
+
+        // A spot where general completion should open with no prefix typed, because
+        // the context produces specific items worth showing right away: a call's
+        // argument list (`(` / `,`), an assignment / comparison (`=`), an object
+        // initializer (`{`), or after `case` / `return`.
+        private static bool IsRichContext(string text, int nameStart)
+        {
+            int i = nameStart - 1;
+            while (i >= 0 && (text[i] == ' ' || text[i] == '\t')) i--;
+            if (i >= 0)
+            {
+                char c = text[i];
+                if (c == '(' || c == ',' || c == '=' || c == '{') return true;
+            }
+            return PrecededByWord(text, nameStart, "case") || PrecededByWord(text, nameStart, "return");
+        }
+
+        // Whether the caret's token sits in the namespace part of a `using …` line.
+        private static bool IsUsingDirective(string text, int nameStart)
+        {
+            int ls = Mathf.Min(nameStart, text.Length);
+            while (ls > 0 && text[ls - 1] != '\n') ls--;
+            int i = ls;
+            while (i < text.Length && (text[i] == ' ' || text[i] == '\t')) i++;
+            const string kw = "using";
+            if (i + kw.Length >= text.Length) return false;
+            for (int k = 0; k < kw.Length; k++) if (text[i + k] != kw[k]) return false;
+            char after = text[i + kw.Length];
+            return after == ' ' || after == '\t';
+        }
+
+        // Heuristic (Roslyn-free, so it's cheap per keystroke): is the token at
+        // `nameStart` an attribute name? Scan back over the attribute-list grammar
+        // (identifiers, `.`, `,`, and balanced `( … )` of earlier attributes) to the
+        // opening `[`; then reject the indexer/array `[` that follows an expression
+        // (identifier, `)`, `]`, or `.`).
+        private static bool IsAttributeContext(string text, int nameStart)
+        {
+            int i = Mathf.Min(nameStart, text.Length) - 1;
+            int depth = 0;
+            while (i >= 0)
+            {
+                char c = text[i];
+                if (c == ')') { depth++; i--; continue; }
+                if (c == '(') { if (depth == 0) return false; depth--; i--; continue; }
+                if (depth > 0) { i--; continue; }
+                if (c == '[') break;
+                if (char.IsWhiteSpace(c) || c == ',' || c == '.' || c == '_' || char.IsLetterOrDigit(c)) { i--; continue; }
+                return false; // any other token → not an attribute-name list
+            }
+            if (i < 0 || text[i] != '[') return false;
+            int j = i - 1;
+            while (j >= 0 && char.IsWhiteSpace(text[j])) j--;
+            if (j < 0) return true; // '[' at the start of the file
+            char p = text[j];
+            // An indexer/array/`new[]` '[' follows an expression; an attribute '[' doesn't.
+            return !(char.IsLetterOrDigit(p) || p == '_' || p == ')' || p == ']' || p == '.');
+        }
+
+        // Lightweight scan from the document start to `pos`, tracking whether the caret
+        // is inside a line/block comment or a string/char literal — so completion isn't
+        // offered there. Cheap (pure char loop, no Roslyn parse) to keep typing snappy.
+        // Approximate for raw/interpolated strings, which is fine for suppression.
+        private static bool InCommentOrStringAt(string s, int pos)
+        {
+            bool line = false, block = false, str = false, chr = false, verbatim = false;
+            int end = Mathf.Min(pos, s.Length);
+            for (int i = 0; i < end; i++)
+            {
+                char c = s[i];
+                char n = i + 1 < s.Length ? s[i + 1] : '\0';
+                if (line) { if (c == '\n') line = false; continue; }
+                if (block) { if (c == '*' && n == '/') { block = false; i++; } continue; }
+                if (str)
+                {
+                    if (verbatim) { if (c == '"' && n == '"') i++; else if (c == '"') { str = false; verbatim = false; } }
+                    else if (c == '\\') i++;
+                    else if (c == '"') str = false;
+                    continue;
+                }
+                if (chr) { if (c == '\\') i++; else if (c == '\'') chr = false; continue; }
+                if (c == '/' && n == '/') { line = true; i++; }
+                else if (c == '/' && n == '*') { block = true; i++; }
+                else if (c == '"') { str = true; verbatim = false; }
+                else if ((c == '@' || c == '$') && n == '"') { str = true; verbatim = c == '@'; i++; }
+                else if (c == '\'') chr = true;
+            }
+            return line || block || str || chr;
+        }
+
+        // VS Code-style fuzzy match: `query` must appear in `cand` as a subsequence
+        // (case-insensitive). Returns false if not; otherwise `score` ranks the match
+        // (higher = better), rewarding a true prefix, word/camelCase boundaries,
+        // consecutive runs, exact case, and earlier/shorter matches.
+        private static bool FuzzyMatch(string cand, string query, out int score)
+        {
+            score = 0;
+            if (string.IsNullOrEmpty(query)) return true;
+            int ci = 0, qi = 0, run = 0, first = -1;
+            while (ci < cand.Length && qi < query.Length)
+            {
+                char c = cand[ci];
+                if (char.ToLowerInvariant(c) == char.ToLowerInvariant(query[qi]))
+                {
+                    if (first < 0) first = ci;
+                    int bonus = 0;
+                    if (c == query[qi]) bonus += 1;          // exact case
+                    if (ci == 0) bonus += 8;                 // start of identifier
+                    else
+                    {
+                        char prev = cand[ci - 1];
+                        if (prev == '_' || (char.IsLower(prev) && char.IsUpper(c))) bonus += 6; // boundary
+                    }
+                    run++;
+                    score += 10 + bonus + run * 2;           // consecutive runs compound
+                    qi++; ci++;
+                }
+                else { run = 0; ci++; }
+            }
+            if (qi < query.Length) { score = 0; return false; } // not all query chars consumed
+            score -= first;            // earlier first match is better
+            score -= cand.Length / 4;  // mild preference for shorter candidates
+            if (cand.StartsWith(query, StringComparison.OrdinalIgnoreCase)) score += 40; // prefix wins
+            return true;
+        }
+
+        private void UpdateCompletion(int minLen)
+        {
+            if (_native == null || _editorId == 0) { CloseCompletion(); return; }
+
+            if (_langToken == "cs")
+            {
+                string text = _native.EditorText(Eid);
+                int off = _native.EditorCaretOffset(Eid);
+                // Don't pop completion inside comments or string/char literals.
+                if (InCommentOrStringAt(text, off)) { CloseCompletion(); return; }
+                string wp = _native.EditorWordPrefix(Eid);
+                int nameStart = off - wp.Length;
+                int mode = CompletionModeAt(text, nameStart); // 0 general, 1 member, 2 attribute, 3 type, 4 namespace
+
+                // General completion needs a couple chars so the popup isn't the whole
+                // symbol table on the first letter; member/attribute open immediately,
+                // and a "rich" spot (call args, `new`, `case`, an assignment, …) opens
+                // with no prefix so its context-specific items show up right away.
+                if (mode == 0 && wp.Length < Mathf.Max(minLen, 1) && !IsRichContext(text, nameStart))
+                {
+                    CloseCompletion();
+                    return;
+                }
+
+                // Cache hit → filter instantly on the main thread (no Roslyn).
+                if (_memberCache != null && _memberAnchor == nameStart && _cacheMode == mode)
+                {
+                    ShowFromCache(wp, mode);
+                    return;
+                }
+                // Cache miss → ask the background worker; the popup updates when the
+                // result arrives (PollCompletion). Typing isn't blocked. Don't
+                // resubmit if a request for this same context is already in flight.
+                if (_pendingSeq == 0 || _pendingAnchor != nameStart || _pendingMode != mode)
+                {
+                    UntermRoslynCompletion.EnsureReferences(); // main-thread (Unity API)
+                    _pendingAnchor = nameStart;
+                    _pendingMode = mode;
+                    _pendingSeq = UntermCompletionWorker.Submit(text, off, mode);
+                }
+                return;
+            }
+
+            // Non-C#: synchronous word + keyword completion.
+            ShowWordCompletion(_native.EditorWordPrefix(Eid), minLen);
+        }
+
+        // Apply a finished background completion result (main thread, off the editor tick).
+        // Per-frame editor tick (registered on EditorApplication.update). A thin
+        // dispatcher: each deferred/polled concern is its own method.
+        private void OnEditorUpdate()
+        {
+            if (_native == null || _editorId == 0) return;
+            PollCompletion();
+        }
+
+        // Apply a finished background completion result (off the typing path).
+        private void PollCompletion()
+        {
+            if (_pendingSeq == 0) return;
+            if (!UntermCompletionWorker.TryTake(_pendingSeq, out var result)) return;
+
+            int anchor = _pendingAnchor;
+            int mode = _pendingMode;
+            _pendingSeq = 0;
+            _memberCache = result;
+            _memberAnchor = anchor;
+            _cacheMode = mode;
+
+            // Only show if the caret is still in the same context the request was for.
+            string text = _native.EditorText(Eid);
+            int off = _native.EditorCaretOffset(Eid);
+            string wp = _native.EditorWordPrefix(Eid);
+            int nameStart = off - wp.Length;
+            if (nameStart != anchor || CompletionModeAt(text, nameStart) != mode) return;
+
+            if (_memberCache != null) ShowFromCache(wp, mode);
+            else if (mode == 0) ShowWordCompletion(wp, 1); // Roslyn unavailable → word fallback
+            else CloseCompletion();
+        }
+
+        // Filter the cached symbol list by `wp` and show the popup. Cheap; runs
+        // synchronously per keystroke. `mode`: 0 general, 1 member, 2 attribute.
+        private void ShowFromCache(string wp, int mode)
+        {
+            if (_memberCache == null) { CloseCompletion(); return; }
+            var scored = new List<(string insert, string label, char kind, int score)>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var (insert, label, kind) in _memberCache)
+                if (FuzzyMatch(insert, wp, out int sc) && seen.Add(insert))
+                {
+                    // Context-specific items (named arguments `x: `, object-initializer
+                    // members `X = `, and the expected enum's qualified members) lead
+                    // the list — they're why completion popped here.
+                    if (insert.EndsWith(": ") || insert.EndsWith(" = ")
+                        || (kind == 'E' && insert.IndexOf('.') >= 0))
+                        sc += 500;
+                    scored.Add((insert, label, kind, sc));
+                }
+            // C# keywords only make sense in plain (general) statement context.
+            if (mode == 0)
+                foreach (var kw in s_csKeywords)
+                    if (FuzzyMatch(kw, wp, out int sc) && seen.Add(kw))
+                        scored.Add((kw, kw, 'K', sc));
+            // Unimported types matching the prefix (auto-import on accept). Queried live
+            // per keystroke from the prebuilt index — being prefix-dependent, they can't
+            // ride the per-word symbol cache. Ranked below everything in scope.
+            if (mode == 0 && wp.Length >= 3)
+            {
+                var inScope = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var it in _memberCache) inScope.Add(it.insert);
+                var uni = UntermRoslynCompletion.UnimportedTypesMatching(wp, inScope);
+                if (uni != null)
+                    foreach (var u in uni)
+                        if (seen.Add(u.label) && FuzzyMatch(u.insert, wp, out int sc))
+                            // Only a slight tiebreak below an equally-good in-scope match,
+                            // so a prefix-matching unimported type still beats in-scope
+                            // fuzzy (subsequence) matches.
+                            scored.Add((u.insert, u.label, u.kind, sc - 5));
+            }
+            if (scored.Count == 0) { CloseCompletion(); return; }
+            // Rank: concrete symbols (types, members, …) before namespaces — a `[`
+            // attribute or `new` list should lead with the class, not the namespaces
+            // it could be qualified through (matches VS Code). Then by fuzzy score,
+            // ties broken alphabetically for stability.
+            scored.Sort((a, b) =>
+            {
+                bool an = a.kind == 'N', bn = b.kind == 'N';
+                if (an != bn) return an ? 1 : -1;
+                if (b.score != a.score) return b.score.CompareTo(a.score);
+                return string.Compare(a.insert, b.insert, StringComparison.Ordinal);
+            });
+            _complItems = new List<string>();
+            _complLabels = new List<string>();
+            _complKinds = new List<char>();
+            foreach (var s in scored)
+            {
+                _complItems.Add(s.insert);
+                _complLabels.Add(s.label);
+                _complKinds.Add(s.kind);
+                if (_complItems.Count >= 300) break;
+            }
+            _complPrefixLen = wp.Length;
+            _complSel = 0; // preselect the best-ranked match
+            EnsureComplSelVisible();
+            _complOpen = true;
+            PushCompletions();
+        }
+
+        // Stage 1 (fallback): C# keywords + identifiers already in the buffer.
+        private void ShowWordCompletion(string prefix, int minLen)
+        {
+            if (prefix.Length < minLen) { CloseCompletion(); return; }
+            var scored = new List<(string word, char kind, int score)>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var kw in s_csKeywords)
+                if (kw != prefix && FuzzyMatch(kw, prefix, out int sc) && seen.Add(kw))
+                    scored.Add((kw, 'K', sc));
+            foreach (Match m in s_ident.Matches(_native.EditorText(Eid)))
+            {
+                string w = m.Value;
+                if (w != prefix && w.Length > 1 && FuzzyMatch(w, prefix, out int sc) && seen.Add(w))
+                    scored.Add((w, ' ', sc));
+            }
+            if (scored.Count == 0) { CloseCompletion(); return; }
+            scored.Sort((a, b) => b.score != a.score
+                ? b.score.CompareTo(a.score)
+                : string.Compare(a.word, b.word, StringComparison.Ordinal));
+            if (scored.Count > 200) scored = scored.GetRange(0, 200);
+            _complItems = new List<string>(scored.Count);
+            _complKinds = new List<char>(scored.Count);
+            foreach (var s in scored) { _complItems.Add(s.word); _complKinds.Add(s.kind); }
+            _complLabels = _complItems; // word/keyword completion: label == insert
+            _complPrefixLen = prefix.Length;
+            _complSel = 0; // preselect the best-ranked match
+            EnsureComplSelVisible();
+            _complOpen = true;
+            PushCompletions();
+        }
+
+        // Push the popup state (items + selection) to the native editor, which
+        // renders it on top of the text at the caret.
+        private void PushCompletions()
+        {
+            if (_native == null || _editorId == 0) return;
+            if (!_complOpen)
+            {
+                _native.EditorSetCompletions(Eid, "", 0); // clear any in-texture popup
+                _native.PopupHide();
+                RenderView();
+                Repaint();
+                return;
+            }
+            // Each line is a 1-char kind tag + the display label, so the native
+            // renderer can color it like the editor.
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < _complLabels.Count; i++)
+            {
+                if (i > 0) sb.Append('\n');
+                sb.Append(i < _complKinds.Count ? _complKinds[i] : ' ').Append(_complLabels[i]);
+            }
+            string payload = sb.ToString();
+            if (_native.PopupAvailable)
+            {
+                // Native OS popup (NSPanel): can overflow the editor window and never
+                // steals focus. Keep the in-texture popup cleared.
+                _native.EditorSetCompletions(Eid, "", 0);
+                bool dark = EditorGUIUtility.isProSkin;
+                Color32 fg = dark ? new Color32(210, 210, 214, 255) : new Color32(32, 32, 32, 255);
+                // Native clears/quads in linear space; the sRGB target re-encodes on
+                // store (same as EditorSetTheme).
+                int vis = Mathf.Min(_complItems.Count, ComplRows);
+                _complScroll = Mathf.Clamp(_complScroll, 0, Mathf.Max(0, _complItems.Count - vis));
+                _native.PopupShow(payload, (uint)_complSel, (uint)_complScroll, _popupAnchorX, _popupAnchorY, _popupScale,
+                    GetEditorBackground().linear, fg, dark);
+            }
+            else
+            {
+                _native.EditorSetCompletions(Eid, payload, (uint)_complSel); // fallback: in-texture
+            }
+            RenderView();
+            Repaint();
+        }
+
+        private void CloseCompletion()
+        {
+            if (!_complOpen) return;
+            _complOpen = false;
+            _complSel = 0;
+            _complScroll = 0;
+            PushCompletions();
+        }
+
+        // Clamp the popup scroll offset so the current selection stays visible
+        // (after arrow nav, or after the list changed).
+        private void EnsureComplSelVisible()
+        {
+            int vis = Mathf.Min(_complItems.Count, ComplRows);
+            if (_complSel < _complScroll) _complScroll = _complSel;
+            else if (_complSel >= _complScroll + vis) _complScroll = _complSel - vis + 1;
+            _complScroll = Mathf.Clamp(_complScroll, 0, Mathf.Max(0, _complItems.Count - vis));
+        }
+
+        private void AcceptCompletion()
+        {
+            if (!_complOpen || _complItems.Count == 0) { CloseCompletion(); return; }
+            int sel = _complSel;
+            string insert = _complItems[sel];
+            char kind = sel < _complKinds.Count ? _complKinds[sel] : ' ';
+            string label = sel < _complLabels.Count ? _complLabels[sel] : insert;
+            int del = _complPrefixLen;
+            // Override completion replaces the typed `override ` keyword too — the
+            // generated member already carries its own `public override`.
+            if (_cacheMode == 5)
+            {
+                string txt = _native.EditorText(Eid);
+                int caret = _native.EditorCaretOffset(Eid);
+                int p = Mathf.Clamp(caret - _complPrefixLen, 0, txt.Length);
+                int i = p;
+                while (i > 0 && (txt[i - 1] == ' ' || txt[i - 1] == '\t')) i--;
+                const string ovr = "override";
+                if (i >= ovr.Length && txt.Substring(i - ovr.Length, ovr.Length) == ovr)
+                {
+                    int b = i - ovr.Length;
+                    if (b == 0 || !(char.IsLetterOrDigit(txt[b - 1]) || txt[b - 1] == '_'))
+                        del = caret - b;
+                }
+            }
+            _native.EditorComplete(Eid, (uint)del, insert);
+            // Unimported type: add the `using` for its namespace (encoded in the label).
+            if (kind == 'U')
+            {
+                string ns = UntermRoslynCompletion.NamespaceFromUnimportedLabel(label);
+                if (!string.IsNullOrEmpty(ns)) _native.EditorAddUsing(Eid, ns);
+            }
+            MarkDirty();
+            CloseCompletion(); // clears the popup and re-renders
+        }
+
+        // Called after typed text commits, to open/refilter as the user types.
+        private void OnTextTyped(string committed)
+        {
+            // Open completion immediately (no prefix typed yet) when the new character
+            // makes a context that knows what to offer: a member dot, an attribute
+            // bracket, or an argument/new/case/assignment spot — see UpdateCompletion's
+            // rich-context check. A plain space just closes the popup.
+            char last = committed.Length > 0 ? committed[committed.Length - 1] : '\0';
+            if (committed == "." || committed == "[" || last == '(' || last == ',' || last == ' ')
+            {
+                UpdateCompletion(0);
+                return;
+            }
+            if (_complOpen) { UpdateCompletion(1); return; }
+            // Auto-open from the first identifier character (like VS Code).
+            if (committed.Length == 1 && (char.IsLetter(committed[0]) || committed[0] == '_'))
+                UpdateCompletion(1);
+        }
+
         // --- IME (hidden field that drives composition + plain typing) ---------
 
         private void DrawImeField(Rect rect)
@@ -974,6 +1555,12 @@ namespace Unterm.Editor
             float gx = rect.x + cx / ppp;
             float gy = rect.y + cy / ppp;
             float gh = Mathf.Max(14f, chh / ppp);
+
+            // Cache the caret's screen position (points) for the native completion popup.
+            var sp = GUIUtility.GUIToScreenPoint(new Vector2(gx, gy + gh));
+            _popupAnchorX = sp.x;
+            _popupAnchorY = sp.y;
+            _popupScale = ppp;
 
             // Clamp the focused field's cached TextEditor caret to the current buffer:
             // Unity doesn't re-clamp it when `_imeBuffer` is reset out from under it,
@@ -1054,12 +1641,14 @@ namespace Unterm.Editor
             }
             if (string.IsNullOrEmpty(_imeBuffer)) return;
 
+            string typed = _imeBuffer;
             _native.EditorInsert(Eid, _imeBuffer);
             _imeBuffer = "";
             var te = (TextEditor)GUIUtility.GetStateObject(typeof(TextEditor), GUIUtility.keyboardControl);
             if (te != null) { te.text = ""; te.cursorIndex = 0; te.selectIndex = 0; }
             MarkDirty();
             RenderView(); Repaint();
+            OnTextTyped(typed); // open / refilter the completion popup
         }
 
         // --- save / dirty ------------------------------------------------------

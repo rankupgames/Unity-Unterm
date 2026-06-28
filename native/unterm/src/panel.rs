@@ -323,7 +323,7 @@ impl PanelRenderer {
     /// Load Regular/Bold/Italic/BoldItalic faces (empty path = skip). Each is
     /// recorded by its own family name so Markdown selects the real face.
     pub fn set_fonts(&mut self, regular: &str, bold: &str, italic: &str, bold_italic: &str) {
-        let mut fs = gpu::font_system().lock().unwrap();
+        let mut fs = gpu::lock_font_system();
         if !regular.is_empty() {
             self.font_family = load_face(&mut fs, regular);
         }
@@ -578,7 +578,7 @@ impl PanelRenderer {
         // macOS, and after the first real frame).
         self.shared.begin_frame();
         let g = gpu::gpu();
-        let mut fs = gpu::font_system().lock().unwrap();
+        let mut fs = gpu::lock_font_system();
 
         let s = self.scale;
         let pad = 14.0 * s;

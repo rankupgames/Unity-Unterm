@@ -123,6 +123,10 @@ namespace Unterm.Editor
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void EdMouseFn(ulong id, float x, float y, byte kind);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] [return: MarshalAs(UnmanagedType.I1)] private delegate bool EdFindFn(ulong id, [MarshalAs(UnmanagedType.LPUTF8Str)] string query, [MarshalAs(UnmanagedType.I1)] bool forward, [MarshalAs(UnmanagedType.I1)] bool caseSensitive);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate uint EdReplaceAllFn(ulong id, [MarshalAs(UnmanagedType.LPUTF8Str)] string query, [MarshalAs(UnmanagedType.LPUTF8Str)] string repl, [MarshalAs(UnmanagedType.I1)] bool caseSensitive);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void EdCompleteFn(ulong id, uint prefixLen, [MarshalAs(UnmanagedType.LPUTF8Str)] string text);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void EdSetComplFn(ulong id, [MarshalAs(UnmanagedType.LPUTF8Str)] string items, uint selected);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void PopupShowFn([MarshalAs(UnmanagedType.LPUTF8Str)] string items, uint selected, uint scroll, float x, float y, float scale, float br, float bg, float bb, byte fr, byte fg, byte fb, byte dark);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void PopupHideFn();
 
         private IntPtr _handle;
 
@@ -159,12 +163,14 @@ namespace Unterm.Editor
         private AvUintSetFn _edSetUndoLimit;
         private AvVoidFn _edRender; private AvPtrFn _edRawTexture; private AvFloatFn _edContentHeight; private AvCaretFn _edCaret;
         private U64IdFn _edEditSerial;
-        private AvInputKeyFn _edKey; private AvStrFn _edInsert; private AvStrFn _edSetPreedit; private AvStrFn _edSetText;
+        private AvInputKeyFn _edKey; private AvStrFn _edInsert; private AvStrFn _edSetPreedit; private AvStrFn _edSetText; private AvStrFn _edAddUsing;
         private AvBufFn _edText; private AvVoidFn _edUndo; private AvVoidFn _edRedo; private AvVoidFn _edSelectAll;
         private AvBufFn _edCopy; private AvBufFn _edCut; private EdMouseFn _edMouse; private AvF1Fn _edScroll;
         private AvF1Fn _edSetScroll; private AvFloatFn _edScrollOffset; private AvF1Fn _edScrollH;
         private AvVoidFn _edIndent, _edOutdent, _edToggleComment, _edMoveUp, _edMoveDown, _edDuplicate, _edDeleteLine;
         private AvUintSetFn _edGotoLine; private EdFindFn _edFind; private AvStrFn _edReplaceSel; private EdReplaceAllFn _edReplaceAll;
+        private AvBufFn _edWordPrefix; private EdCompleteFn _edComplete; private EdSetComplFn _edSetCompletions; private AvUintGetFn _edCaretOffset;
+        private PopupShowFn _popupShow; private PopupHideFn _popupHide;
 
         public bool IsLoaded => _handle != IntPtr.Zero;
 
@@ -308,6 +314,7 @@ namespace Unterm.Editor
             _edInsert = Sym<AvStrFn>("unterm_editor_insert");
             _edSetPreedit = Sym<AvStrFn>("unterm_editor_set_preedit");
             _edSetText = Sym<AvStrFn>("unterm_editor_set_text");
+            _edAddUsing = Sym<AvStrFn>("unterm_editor_add_using");
             _edText = Sym<AvBufFn>("unterm_editor_text");
             _edUndo = Sym<AvVoidFn>("unterm_editor_undo");
             _edRedo = Sym<AvVoidFn>("unterm_editor_redo");
@@ -330,6 +337,14 @@ namespace Unterm.Editor
             _edFind = Sym<EdFindFn>("unterm_editor_find");
             _edReplaceSel = Sym<AvStrFn>("unterm_editor_replace_selection");
             _edReplaceAll = Sym<EdReplaceAllFn>("unterm_editor_replace_all");
+            _edWordPrefix = Sym<AvBufFn>("unterm_editor_word_prefix");
+            _edComplete = Sym<EdCompleteFn>("unterm_editor_complete");
+            _edSetCompletions = Sym<EdSetComplFn>("unterm_editor_set_completions");
+            _edCaretOffset = Sym<AvUintGetFn>("unterm_editor_caret_offset");
+            // Native completion popup is macOS-only for now; bind optionally so the
+            // Windows bundle (no such symbols yet) still loads.
+            _popupShow = SymOpt<PopupShowFn>("unterm_popup_show");
+            _popupHide = SymOpt<PopupHideFn>("unterm_popup_hide");
         }
 
         private T Sym<T>(string name) where T : Delegate
@@ -338,6 +353,12 @@ namespace Unterm.Editor
             if (addr == IntPtr.Zero)
                 throw new Exception($"symbol '{name}' not found: {NativeError()}");
             return Marshal.GetDelegateForFunctionPointer<T>(addr);
+        }
+
+        private T SymOpt<T>(string name) where T : Delegate
+        {
+            var addr = NativeSym(_handle, name);
+            return addr == IntPtr.Zero ? null : Marshal.GetDelegateForFunctionPointer<T>(addr);
         }
 
         private static string Utf8(IntPtr p, UIntPtr len) =>
@@ -517,6 +538,7 @@ namespace Unterm.Editor
         public void EditorInsert(ulong id, string text) { if (!string.IsNullOrEmpty(text)) _edInsert(id, text); }
         public void EditorSetPreedit(ulong id, string text) => _edSetPreedit(id, text ?? "");
         public void EditorSetText(ulong id, string text) => _edSetText(id, text ?? string.Empty);
+        public void EditorAddUsing(ulong id, string ns) => _edAddUsing(id, ns ?? string.Empty);
         public string EditorText(ulong id) { var p = _edText(id, out UIntPtr len); return Utf8(p, len); }
         public void EditorUndo(ulong id) => _edUndo(id);
         public void EditorRedo(ulong id) => _edRedo(id);
@@ -540,6 +562,20 @@ namespace Unterm.Editor
         public bool EditorFind(ulong id, string query, bool forward, bool caseSensitive) => _edFind(id, query ?? "", forward, caseSensitive);
         public void EditorReplaceSelection(ulong id, string repl) => _edReplaceSel(id, repl ?? "");
         public uint EditorReplaceAll(ulong id, string query, string repl, bool caseSensitive) => _edReplaceAll(id, query ?? "", repl ?? "", caseSensitive);
+        /// The identifier prefix immediately before the caret (for autocomplete).
+        public string EditorWordPrefix(ulong id) { var p = _edWordPrefix(id, out UIntPtr len); return Utf8(p, len); }
+        /// Accept a completion: replace `prefixLen` chars before the caret with `text`.
+        public void EditorComplete(ulong id, uint prefixLen, string text) => _edComplete(id, prefixLen, text ?? "");
+        /// Set the autocomplete popup items ('\n'-joined; empty hides it) + selection.
+        public void EditorSetCompletions(ulong id, string items, uint selected) => _edSetCompletions(id, items ?? "", selected);
+        /// Show the native completion popup (a non-activating NSPanel) at screen point
+        /// (x,y) in POINTS, top-left origin. No-op where unbound (non-macOS).
+        public bool PopupAvailable => _popupShow != null;
+        public void PopupShow(string items, uint selected, uint scroll, float x, float y, float scale, Color bg, Color32 fg, bool dark) =>
+            _popupShow?.Invoke(items ?? "", selected, scroll, x, y, scale, bg.r, bg.g, bg.b, fg.r, fg.g, fg.b, (byte)(dark ? 1 : 0));
+        public void PopupHide() => _popupHide?.Invoke();
+        /// The caret's absolute character offset in the document (for semantic completion).
+        public int EditorCaretOffset(ulong id) => (int)_edCaretOffset(id);
 
         private static uint Pack(Color32 c) => (uint)((c.r << 16) | (c.g << 8) | c.b);
 
@@ -578,11 +614,12 @@ namespace Unterm.Editor
             _edCreate = null; _edExists = null; _edDestroy = null; _edResize = null; _edSetScale = null; _edSetUndoLimit = null;
             _edSetFont = null; _edSetTheme = null; _edSetLanguage = null; _edRender = null; _edRawTexture = null;
             _edContentHeight = null; _edEditSerial = null; _edCaret = null; _edKey = null; _edInsert = null; _edSetPreedit = null;
-            _edSetText = null; _edText = null; _edUndo = null; _edRedo = null; _edSelectAll = null;
+            _edSetText = null; _edAddUsing = null; _edText = null; _edUndo = null; _edRedo = null; _edSelectAll = null;
             _edCopy = null; _edCut = null; _edMouse = null; _edScroll = null;
             _edSetScroll = null; _edScrollOffset = null; _edScrollH = null; _edIndent = null; _edOutdent = null;
             _edToggleComment = null; _edMoveUp = null; _edMoveDown = null; _edDuplicate = null;
             _edDeleteLine = null; _edGotoLine = null; _edFind = null; _edReplaceSel = null; _edReplaceAll = null;
+            _edWordPrefix = null; _edComplete = null; _edSetCompletions = null; _edCaretOffset = null;
         }
     }
 }

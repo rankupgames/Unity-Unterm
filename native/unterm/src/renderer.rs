@@ -126,7 +126,7 @@ impl Renderer {
 
     /// Load a font file and make its best monospace family the primary one.
     pub fn set_font(&mut self, path: &str) {
-        let mut fs = gpu::font_system().lock().unwrap();
+        let mut fs = gpu::lock_font_system();
         let before = fs.db().faces().count();
         if let Err(e) = fs.db_mut().load_font_file(path) {
             log::warn!("unterm: failed to load font {path}: {e}");
@@ -224,7 +224,7 @@ impl Renderer {
         let font_px = self.font_px();
         let line_h = self.line_height();
         let family = self.family();
-        let mut fs = gpu::font_system().lock().unwrap();
+        let mut fs = gpu::lock_font_system();
         let mut buf = Buffer::new(&mut fs, Metrics::new(font_px, line_h));
         buf.set_size(&mut fs, None, None);
         let sample = "MMMMMMMMMMMMMMMMMMMM"; // 20 cells, averaged for stability
@@ -416,7 +416,7 @@ impl Renderer {
         // advance differs from the cell width can't shift the rest of the row.
         let mut row_buffers: Vec<(Buffer, f32, f32)> = Vec::new();
         {
-            let mut fs = gpu::font_system().lock().unwrap();
+            let mut fs = gpu::lock_font_system();
             for row in 0..rows {
                 let base = row * cols;
                 let top = pad + row as f32 * cell_h;

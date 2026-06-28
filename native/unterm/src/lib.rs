@@ -28,6 +28,8 @@ mod markdown;
 mod mcp;
 mod palette;
 mod panel;
+#[cfg(any(target_os = "macos", windows))]
+mod popup;
 mod pty;
 mod quads;
 mod renderer;
@@ -1433,6 +1435,17 @@ pub unsafe extern "C" fn unterm_editor_set_text(id: u64, text: *const c_char) {
     with_editor(id, (), |e| e.set_text(&text));
 }
 
+/// Add `using <ns>;` near the top of the file if not already imported (one undoable
+/// edit; caret preserved). For completion's auto-import of an unimported type.
+///
+/// # Safety
+/// `ns` is a valid NUL-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_editor_add_using(id: u64, ns: *const c_char) {
+    let ns = cstr(ns);
+    with_editor(id, (), |e| e.add_using(&ns));
+}
+
 /// The editor's current text. Writes the byte length; the pointer is valid until
 /// the next call on this editor.
 ///
@@ -1593,6 +1606,79 @@ pub unsafe extern "C" fn unterm_editor_replace_all(
     let query = cstr(query);
     let repl = cstr(repl);
     with_editor(id, 0, |e| e.replace_all(&query, &repl, case_sensitive))
+}
+
+/// The identifier prefix immediately before the caret (for autocomplete). Writes
+/// the byte length; the pointer is valid until the next call on this editor.
+///
+/// # Safety
+/// `out_len` writable or null.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_editor_word_prefix(id: u64, out_len: *mut usize) -> *const c_char {
+    editor_string(id, out_len, |e| e.word_prefix())
+}
+
+/// Set the autocomplete popup items (`\n`-joined; empty hides it) + selected index.
+/// The Rust side renders the popup over the editor at the caret.
+///
+/// # Safety
+/// `items` must be a valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_editor_set_completions(id: u64, items: *const c_char, selected: u32) {
+    let items = cstr(items);
+    with_editor(id, (), |e| e.set_completions(&items, selected as usize));
+}
+
+/// The caret's absolute character offset in the document (for semantic completion).
+#[no_mangle]
+pub extern "C" fn unterm_editor_caret_offset(id: u64) -> u32 {
+    lock_editors().get(&id).map_or(0, |e| e.caret_offset() as u32)
+}
+
+/// Show/refresh the native completion popup (a non-activating NSPanel) at screen
+/// position (`x`,`y`) in physical px, top-left origin. `items` are '\n'-joined
+/// `kind+label` lines (same encoding as `unterm_editor_set_completions`); `scale`
+/// is pixels-per-point; background is (br,bg,bb) in 0..1 and text is (fr,fg,fb) in
+/// 0..255. macOS only — the host must only call it there.
+#[cfg(any(target_os = "macos", windows))]
+#[no_mangle]
+pub extern "C" fn unterm_popup_show(
+    items: *const c_char,
+    selected: u32,
+    scroll: u32,
+    x: f32,
+    y: f32,
+    scale: f32,
+    br: f32,
+    bg: f32,
+    bb: f32,
+    fr: u8,
+    fg: u8,
+    fb: u8,
+    dark: u8,
+) {
+    let items = cstr(items);
+    let clear = wgpu::Color { r: br as f64, g: bg as f64, b: bb as f64, a: 1.0 };
+    let text = glyphon::Color::rgb(fr, fg, fb);
+    popup::show(&items, selected as usize, scroll as usize, x, y, scale, clear, text, dark != 0);
+}
+
+/// Hide the native completion popup. macOS only.
+#[cfg(any(target_os = "macos", windows))]
+#[no_mangle]
+pub extern "C" fn unterm_popup_hide() {
+    popup::hide();
+}
+
+/// Accept a completion: delete `prefix_len` characters before the caret and insert
+/// `text` in their place.
+///
+/// # Safety
+/// `text` must be a valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_editor_complete(id: u64, prefix_len: u32, text: *const c_char) {
+    let text = cstr(text);
+    with_editor(id, (), |e| e.complete(prefix_len as usize, &text));
 }
 
 // Keep `c_void` referenced so a header generator records the opaque handle type.

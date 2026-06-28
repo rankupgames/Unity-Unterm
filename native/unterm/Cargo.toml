@@ -62,6 +62,13 @@ objc2-metal = { version = "0.3", features = [
     "objc2-io-surface",
 ] }
 objc2-io-surface = "0.3"
+# Native completion popup: a borderless non-activating NSPanel with a CAMetalLayer
+# we render to with wgpu (so the list can overflow the editor window).
+objc2-app-kit = { version = "0.3", features = [
+    "NSResponder", "NSWindow", "NSPanel", "NSView", "NSScreen",
+] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer"] }
+objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
 # IOSurface creation stays on the plain CoreFoundation FFI; the raw pointer is
 # bridged into objc2's `&IOSurfaceRef` for the Metal texture call.
 core-foundation = "0.10"
@@ -83,10 +90,18 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Direct3D12",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    # Native popup window: a layered, no-activate, click-through top-level HWND that
+    # wgpu renders into (the counterpart to the macOS NSPanel popup).
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 # Same crate the macOS side uses; the d3d features pull in the
 # IUnityGraphicsD3D11/D3D12 interfaces for the device capture in unity.rs.
 unity-native-plugin = { version = "0.9", features = ["d3d11", "d3d12"] }
+# Build the wgpu surface from the popup HWND. Pinned to the same major as the
+# raw-window-handle wgpu 29 builds on (0.6).
+raw-window-handle = "0.6"
 
 [dev-dependencies]
 # Headless verification: dump the rendered terminal to a PNG without the Editor.

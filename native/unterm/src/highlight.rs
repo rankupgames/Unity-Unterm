@@ -97,6 +97,15 @@ fn color_for(index: usize, dark: bool) -> Color {
     Color::rgb(r, g, b)
 }
 
+/// The theme color for a highlight name (e.g. "function", "type", "property"),
+/// so other UI (the completion popup) can color tokens like the editor does.
+pub fn color_of(name: &str, dark: bool) -> Color {
+    match HL_NAMES.iter().position(|&n| n == name) {
+        Some(i) => color_for(i, dark),
+        None => Color::rgb(200, 200, 200),
+    }
+}
+
 /// A grammar plus its compiled highlights query, built once and cached for the
 /// process. `cap_color` maps each query capture index to a color-table index.
 struct LangConfig {
