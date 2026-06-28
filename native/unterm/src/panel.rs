@@ -250,6 +250,11 @@ pub struct PanelRenderer {
     plan_max: f32,
     /// The plan box's hit rect (physical px x,y,w,h) for wheel routing, if shown.
     plan_rect: Option<[f32; 4]>,
+    /// The directory the transcript's relative file paths resolve against (the
+    /// agent's working dir). The dotted underline only marks a path token when it
+    /// resolves to an existing file here, so the underline matches what a click
+    /// can actually open.
+    root: std::path::PathBuf,
 
     swash_cache: SwashCache,
     viewport: Viewport,
@@ -295,6 +300,7 @@ impl PanelRenderer {
             plan_scroll: 0.0,
             plan_max: 0.0,
             plan_rect: None,
+            root: std::path::PathBuf::new(),
             buttons: Vec::new(),
             button_rects: Vec::new(),
             laid: Vec::new(),
@@ -341,6 +347,24 @@ impl PanelRenderer {
     /// HiDPI scale (pixels per point). Layout and font sizes scale by this.
     pub fn set_scale(&mut self, scale: f32) {
         self.scale = scale.max(0.5);
+    }
+
+    /// The directory relative file-path tokens resolve against (the agent's cwd),
+    /// used to gate the clickable-path underline on the file actually existing.
+    pub fn set_root(&mut self, root: std::path::PathBuf) {
+        self.root = root;
+    }
+
+    /// Whether `tok` resolves (against `self.root`) to an existing file — i.e. a
+    /// path a click could actually open.
+    fn token_is_file(&self, tok: &str) -> bool {
+        let p = std::path::Path::new(tok);
+        let full = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            self.root.join(p)
+        };
+        full.is_file()
     }
 
     /// Scroll offset in physical px (0 = bottom). Clamped during layout.
@@ -453,6 +477,47 @@ impl PanelRenderer {
         })
     }
 
+    /// The whitespace-delimited token at physical-px (x, y), with surrounding
+    /// brackets/quotes/trailing punctuation trimmed — a candidate file path the host
+    /// can open. None when the point isn't on a token.
+    pub fn token_at(&self, x: f32, y: f32) -> Option<String> {
+        let pos = self.hit_text(x, y)?;
+        let text = &self.laid.get(pos.block)?.text;
+        let n = text.len();
+        let bytes = text.as_bytes();
+        let is_ws = |i: usize| i >= n || bytes[i].is_ascii_whitespace();
+        // Clicking just past a token's end lands on whitespace; step back one.
+        let mut off = pos.offset.min(n);
+        if off > 0 && is_ws(off) {
+            off -= 1;
+        }
+        if is_ws(off) {
+            return None;
+        }
+        let mut start = off;
+        while start > 0 && !bytes[start - 1].is_ascii_whitespace() {
+            start -= 1;
+        }
+        let mut end = off + 1;
+        while end < n && !bytes[end].is_ascii_whitespace() {
+            end += 1;
+        }
+        // Snap to char boundaries (paths are ASCII, but the line may not be).
+        while start > 0 && !text.is_char_boundary(start) {
+            start -= 1;
+        }
+        while end < n && !text.is_char_boundary(end) {
+            end += 1;
+        }
+        let tok = text[start..end]
+            .trim_matches(|c: char| "()[]{}<>,;:\"'`".contains(c));
+        if tok.is_empty() {
+            None
+        } else {
+            Some(tok.to_string())
+        }
+    }
+
     /// Highlight quads for the current selection (physical px, overlay color).
     fn selection_quads(&self, overlay: f32) -> Vec<Quad> {
         let Some((a, b)) = self.sel else {
@@ -489,6 +554,67 @@ impl PanelRenderer {
                         color: [overlay, overlay, overlay, 0.28],
                         radius: 0.0,
                     });
+                }
+            }
+        }
+        quads
+    }
+
+    /// Dotted-underline quads (physical px) under tokens that look like an
+    /// openable file path, so the user can see the path is clickable. The token
+    /// test mirrors the host's `IsEditable` (ends in a known extension) so the
+    /// underline marks exactly what a click opens. Fenced code blocks are skipped
+    /// (their content isn't a clickable reference).
+    fn link_underline_quads(&self) -> Vec<Quad> {
+        let s = self.scale;
+        let th = (1.0 * s).max(1.0);
+        let dash = 3.0 * s;
+        let gap = 2.5 * s;
+        // The link blue the inline-link spans use, slightly translucent.
+        let color = [90.0 / 255.0, 160.0 / 255.0, 250.0 / 255.0, 0.85];
+        let mut quads = Vec::new();
+        for blk in &self.laid {
+            if blk.code_key.is_some() {
+                continue;
+            }
+            let ranges: Vec<_> = path_token_ranges(&blk.text)
+                .into_iter()
+                .filter(|r| self.token_is_file(&blk.text[r.start..r.end]))
+                .collect();
+            if ranges.is_empty() {
+                continue;
+            }
+            let line_starts = line_starts(&blk.buffer);
+            for r in &ranges {
+                for run in blk.buffer.layout_runs() {
+                    let line_off = line_starts.get(run.line_i).copied().unwrap_or(0);
+                    let mut min_x = f32::MAX;
+                    let mut max_x = f32::MIN;
+                    for g in run.glyphs.iter() {
+                        let gs = line_off + g.start;
+                        let ge = line_off + g.end;
+                        if ge > r.start && gs < r.end {
+                            min_x = min_x.min(g.x);
+                            max_x = max_x.max(g.x + g.w);
+                        }
+                    }
+                    if max_x > min_x {
+                        let uy = blk.ty + run.line_top + run.line_height - th - s;
+                        let end_x = blk.tx - blk.hscroll + max_x;
+                        let mut x = blk.tx - blk.hscroll + min_x;
+                        while x < end_x {
+                            let w = dash.min(end_x - x);
+                            quads.push(Quad {
+                                x,
+                                y: uy,
+                                w,
+                                h: th,
+                                color,
+                                radius: 0.0,
+                            });
+                            x += dash + gap;
+                        }
+                    }
                 }
             }
         }
@@ -964,6 +1090,9 @@ impl PanelRenderer {
 
         // Selection highlight (above the cards, below the text).
         quads.extend(self.selection_quads(overlay));
+
+        // Dotted underline under clickable file-path tokens (below the text).
+        quads.extend(self.link_underline_quads());
 
         // Action buttons: placed right after the last block (scrolling with the
         // transcript, not pinned), wrapped into rows (each row right-aligned).
@@ -1632,6 +1761,50 @@ fn line_starts(buffer: &Buffer) -> Vec<usize> {
         off += line.text().len() + 1; // +1 for the '\n' separator
     }
     starts
+}
+
+/// Editable extensions the host (`UntermCodeEditorWindow.IsEditable`) will open.
+/// Kept in sync so the dotted underline marks exactly the tokens a click opens.
+const PATH_EXTS: &[&str] = &[
+    ".cs", ".txt", ".json", ".xml", ".uxml", ".uss", ".shader", ".cginc", ".hlsl", ".compute", ".md",
+    ".markdown", ".yml", ".yaml", ".js", ".ts", ".py", ".rs", ".toml", ".csv", ".log", ".asmdef",
+    ".asmref",
+];
+
+/// Byte ranges (into `text`) of whitespace-delimited tokens that look like an
+/// openable file path: trimmed of the same surrounding brackets/quotes as
+/// `token_at`, and ending in a known editable extension. Used to dotted-underline
+/// clickable paths in the transcript.
+fn path_token_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = text.as_bytes();
+    let n = bytes.len();
+    let trim = |c: u8| b"()[]{}<>,;:\"'`".contains(&c);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < n {
+        while i < n && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let tok_start = i;
+        while i < n && !bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let (mut s, mut e) = (tok_start, i);
+        while s < e && trim(bytes[s]) {
+            s += 1;
+        }
+        while e > s && trim(bytes[e - 1]) {
+            e -= 1;
+        }
+        if s >= e {
+            continue;
+        }
+        let lower = text[s..e].to_ascii_lowercase();
+        if PATH_EXTS.iter().any(|ext| lower.ends_with(ext)) {
+            out.push(s..e);
+        }
+    }
+    out
 }
 
 /// Convert a cosmic-text cursor to a byte offset in the buffer's full text.

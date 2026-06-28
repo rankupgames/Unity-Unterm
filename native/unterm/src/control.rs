@@ -827,6 +827,7 @@ impl Driver {
         self.state.transcript.lock().unwrap().clone()
     }
 
+
     pub fn status(&self) -> String {
         self.state.status.lock().unwrap().clone()
     }

@@ -202,6 +202,19 @@ namespace Unterm.Editor
         private static bool IsEditable(string path) =>
             Array.IndexOf(s_textExt, Path.GetExtension(path).ToLowerInvariant()) >= 0;
 
+        // Open a file the Claude Code agent just edited, when the "open in Unterm"
+        // preference is on. `root` resolves a project-relative path (the agent often
+        // reports paths relative to its working directory). No-op for missing or
+        // non-editable files so the agent touching, say, a binary doesn't pop a tab.
+        public static void OpenFromAgent(string path, string root)
+        {
+            if (!UntermCodeEditorPrefs.HijackDoubleClick || string.IsNullOrEmpty(path)) return;
+            if (!Path.IsPathRooted(path) && !string.IsNullOrEmpty(root))
+                path = Path.Combine(root, path);
+            if (Directory.Exists(path) || !File.Exists(path) || !IsEditable(path)) return;
+            OpenPath(path);
+        }
+
         // Reuse an already-open window for the same file; otherwise a new one.
         private static void OpenPath(string path)
         {

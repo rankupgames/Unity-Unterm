@@ -684,6 +684,14 @@ namespace Unterm.Editor
 
                 case EventType.MouseUp when _selecting:
                     _selecting = false;
+                    // A plain click (no drag-selection) on a file path opens it in the
+                    // code editor. OpenFromAgent no-ops for non-files / when disabled.
+                    if (!_native.AgentviewPanelHasSelection(Vid))
+                    {
+                        string tok = _native.AgentviewPanelTokenAt(Vid, lx, ly);
+                        if (!string.IsNullOrEmpty(tok))
+                            UntermCodeEditorWindow.OpenFromAgent(tok, ProjectRoot);
+                    }
                     e.Use();
                     break;
 

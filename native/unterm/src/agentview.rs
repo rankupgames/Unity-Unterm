@@ -49,6 +49,8 @@ pub struct AgentView {
     mode_snap: CString,
     model_snap: CString,
     host_cmd_snap: CString,
+    /// Cached token under the last click, for the host to open as a file path.
+    token_snap: CString,
 }
 
 impl AgentView {
@@ -74,14 +76,19 @@ impl AgentView {
         let cwd = resume_cwd
             .filter(|c| std::path::Path::new(c).is_dir())
             .unwrap_or(cwd);
+        // The dir the agent runs in: relative file paths in the transcript resolve
+        // against it, so the panel can gate the clickable-path underline on existence.
+        let root = std::path::PathBuf::from(&cwd);
         let (driver, fail) = match Driver::new(cwd, mcp, resume, seed, effort, claude_cmd) {
             Ok(d) => (Some(d), String::new()),
             Err(e) => (None, e.to_string()),
         };
+        let mut panel = PanelRenderer::new(panel_w, panel_h);
+        panel.set_root(root);
         Self {
             driver,
             fail,
-            panel: PanelRenderer::new(panel_w, panel_h),
+            panel,
             input: InputBox::new(input_w, input_h),
             scroll: 0.0,
             pending_ids: Vec::new(),
@@ -99,6 +106,7 @@ impl AgentView {
             mode_snap: CString::default(),
             model_snap: CString::default(),
             host_cmd_snap: CString::default(),
+            token_snap: CString::default(),
         }
     }
 
@@ -286,6 +294,13 @@ impl AgentView {
     pub fn take_host_command(&mut self) -> &CString {
         self.host_cmd_snap = clean(self.pending_host_cmd.take().unwrap_or_default());
         &self.host_cmd_snap
+    }
+
+    /// The whitespace-delimited token under (`x`, `y`) in the transcript, for the
+    /// host to open if it resolves to a file (empty when the click isn't on one).
+    pub fn panel_token_at(&mut self, x: f32, y: f32) -> &CString {
+        self.token_snap = clean(self.panel.token_at(x, y).unwrap_or_default());
+        &self.token_snap
     }
 
     /// The Send/Stop action: interrupt a running turn, else send the composer.

@@ -101,6 +101,7 @@ namespace Unterm.Editor
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void AvFontsFn(ulong id, [MarshalAs(UnmanagedType.LPUTF8Str)] string regular, [MarshalAs(UnmanagedType.LPUTF8Str)] string bold, [MarshalAs(UnmanagedType.LPUTF8Str)] string italic, [MarshalAs(UnmanagedType.LPUTF8Str)] string boldItalic);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr AvPtrFn(ulong id);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr AvBufFn(ulong id, out UIntPtr len);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr AvTokenFn(ulong id, float x, float y, out UIntPtr len);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate float AvFloatFn(ulong id);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate ulong U64IdFn(ulong id);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void AvF1Fn(ulong id, float v);
@@ -149,7 +150,7 @@ namespace Unterm.Editor
         private AvPtrFn _avPanelTexture; private AvPtrFn _avInputTexture;
         private AvFloatFn _avContentHeight; private AvFloatFn _avInputHeight; private AvF1Fn _avSetScroll; private AvCaretFn _avCaret;
         private AvVoidFn _avInterrupt; private AvBufFn _avSessionId; private AvBufFn _avTitle;
-        private AvBufFn _avTakeHostCommand;
+        private AvBufFn _avTakeHostCommand; private AvTokenFn _avPanelTokenAt;
         private AvStrFn _avSetPermissionMode; private AvBufFn _avPermissionMode;
         private AvStrFn _avSetModel; private AvBufFn _avModel;
         private AvUintGetFn _avQueueLen; private AvUintSetFn _avCancelQueued;
@@ -278,6 +279,7 @@ namespace Unterm.Editor
             _avSessionId = Sym<AvBufFn>("unterm_agentview_session_id");
             _avTitle = Sym<AvBufFn>("unterm_agentview_title");
             _avTakeHostCommand = Sym<AvBufFn>("unterm_agentview_take_host_command");
+            _avPanelTokenAt = Sym<AvTokenFn>("unterm_agentview_panel_token_at");
             _avPanelDown = Sym<AvDownFn>("unterm_agentview_panel_down");
             _avPanelDrag = Sym<AvDragFn>("unterm_agentview_panel_drag");
             _avPanelScrollH = Sym<AvScrollHFn>("unterm_agentview_panel_scroll_h");
@@ -490,6 +492,7 @@ namespace Unterm.Editor
         public string AgentviewSessionId(ulong id) { var p = _avSessionId(id, out UIntPtr len); return Utf8(p, len); }
         public string AgentviewTitle(ulong id) { var p = _avTitle(id, out UIntPtr len); return Utf8(p, len); }
         public string AgentviewTakeHostCommand(ulong id) { var p = _avTakeHostCommand(id, out UIntPtr len); return Utf8(p, len); }
+        public string AgentviewPanelTokenAt(ulong id, float x, float y) { var p = _avPanelTokenAt(id, x, y, out UIntPtr len); return Utf8(p, len); }
         /// Transcript mouse-down: resolves permission buttons AND begins selection
         /// internally. Returns 1 if consumed.
         public byte AgentviewPanelDown(ulong id, float x, float y) => _avPanelDown(id, x, y);
@@ -611,7 +614,7 @@ namespace Unterm.Editor
             _avPoll = null; _avRender = null; _avResize = null; _avSetTheme = null; _avSetFonts = null;
             _avPanelTexture = null; _avInputTexture = null;
             _avContentHeight = null; _avInputHeight = null; _avSetScroll = null; _avCaret = null;
-            _avInterrupt = null; _avSessionId = null; _avTitle = null; _avTakeHostCommand = null;
+            _avInterrupt = null; _avSessionId = null; _avTitle = null; _avTakeHostCommand = null; _avPanelTokenAt = null;
             _avSetPermissionMode = null; _avPermissionMode = null; _avSetModel = null; _avModel = null;
             _avQueueLen = null; _avCancelQueued = null;
             _avPanelDown = null; _avPanelDrag = null; _avPanelScrollH = null; _avPanelScrollV = null;

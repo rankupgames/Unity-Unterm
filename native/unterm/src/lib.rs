@@ -949,6 +949,14 @@ pub unsafe extern "C" fn unterm_agentview_take_host_command(id: u64, out_len: *m
     view_string(id, out_len, |v| v.take_host_command())
 }
 
+/// The whitespace-delimited token under (`x`, `y`) in the transcript (physical px),
+/// for the host to open if it resolves to a file. Empty when not on a token.
+/// `out_len` writable or null; pointer valid until the next call on this view.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_panel_token_at(id: u64, x: f32, y: f32, out_len: *mut usize) -> *const c_char {
+    view_string(id, out_len, |v| v.panel_token_at(x, y))
+}
+
 // --- transcript (panel) input ---
 
 /// Mouse-down in the transcript. Returns 1 if consumed.
