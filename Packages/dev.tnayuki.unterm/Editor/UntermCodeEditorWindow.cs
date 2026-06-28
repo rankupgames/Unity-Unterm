@@ -68,6 +68,7 @@ namespace Unterm.Editor
         // this — undo/redo restore versions, so undoing back to the saved state reads
         // clean, with no second copy of the buffer (just this u64).
         [SerializeField] private ulong _savedSerial;
+        private double _lastExtCheck; // throttle for the on-disk change poll
 
         // Editing surface texture (zero-copy wrap of the native MTLTexture).
         private Texture2D _tex;
@@ -1329,6 +1330,13 @@ namespace Unterm.Editor
         private void OnEditorUpdate()
         {
             if (_native == null || _editorId == 0) return;
+            // Pick up external changes (e.g. the Claude Code agent editing the file)
+            // even while this window stays focused — not just on OnFocus. Throttled.
+            if (EditorApplication.timeSinceStartup - _lastExtCheck > 1.0)
+            {
+                _lastExtCheck = EditorApplication.timeSinceStartup;
+                CheckExternalChange();
+            }
             PollSignatureTask();
             // While a hint is shown, re-evaluate whenever the caret moved by ANY means
             // (arrows, click, edits) so it tracks the active parameter and closes once
