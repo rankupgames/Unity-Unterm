@@ -718,6 +718,16 @@ namespace Unterm.Editor
         {
             if (_native == null || Tid == 0) return;
             var cr = CursorPointRect(rect);
+            // Clamp the focused field's cached TextEditor caret to the current buffer:
+            // Unity doesn't re-clamp it when `_imeBuffer` is reset out from under it,
+            // so a stale index throws ArgumentOutOfRange in ReplaceSelection on the
+            // next keystroke.
+            if (GUIUtility.keyboardControl != 0
+                && GUIUtility.GetStateObject(typeof(TextEditor), GUIUtility.keyboardControl) is TextEditor kte)
+            {
+                kte.cursorIndex = Mathf.Min(kte.cursorIndex, _imeBuffer.Length);
+                kte.selectIndex = Mathf.Min(kte.selectIndex, _imeBuffer.Length);
+            }
             GUI.SetNextControlName(InputControl);
             // While composing the field must span to the window edge: the editor IME
             // anchors the candidate window to this field's caret, and a tiny field

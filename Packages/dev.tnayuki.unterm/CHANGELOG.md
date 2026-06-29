@@ -6,6 +6,10 @@
 
 - On macOS, the native plugin now binds Unity's own Metal device in-process — the shadow-copy loader is gone and device/command-queue capture is unified into one cross-platform module shared with Windows.
 
+### Fixed
+
+- IME composition no longer crashes: the terminal IME field clamps its cached caret so a shrunk buffer can't throw out of range, and the agent composer guards its pre-edit input FFI against a reset buffer.
+
 ## [0.3.0] - 2026-06-27
 
 ### Added
