@@ -644,6 +644,20 @@ fn views() -> &'static Mutex<ViewMap> {
     V.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Lock the view map, recovering a poisoned mutex instead of panicking — a panic
+/// caught at the FFI boundary can poison it, and `.unwrap()` would then abort Unity.
+fn lock_views() -> std::sync::MutexGuard<'static, ViewMap> {
+    views().lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Run `f` against the agent view with `id`, returning `default` if absent or if `f`
+/// panics — cosmic-text can panic on a malformed edit (e.g. an IME composition over
+/// a buffer that changed underneath), and letting that unwind across the C ABI would
+/// abort the editor. Mirrors [`with_term`]/`with_editor`.
+fn with_view<R>(id: u64, default: R, f: impl FnOnce(&mut AgentView) -> R) -> R {
+    ffi_guard(None, || lock_views().get_mut(&id).map(|v| f(v))).unwrap_or(default)
+}
+
 /// Create a fresh agent view rooted at `cwd`, wired to the shared MCP server.
 /// `pw/ph` and `iw/ih` are the transcript and composer surface sizes (physical
 /// px). Returns a stable id the host persists to re-adopt across reloads.
@@ -1011,17 +1025,12 @@ pub unsafe extern "C" fn unterm_agentview_panel_selected_text(
 /// if the Send/Stop button was hit (action performed; host should not drag).
 #[no_mangle]
 pub extern "C" fn unterm_agentview_input_down(id: u64, x: f32, y: f32, kind: u8) -> u8 {
-    match views().lock().unwrap().get_mut(&id) {
-        Some(v) => v.input_down(x, y, kind) as u8,
-        None => 0,
-    }
+    with_view(id, 0, |v| v.input_down(x, y, kind) as u8)
 }
 
 #[no_mangle]
 pub extern "C" fn unterm_agentview_input_drag(id: u64, x: f32, y: f32) {
-    if let Some(v) = views().lock().unwrap().get_mut(&id) {
-        v.input_drag(x, y);
-    }
+    with_view(id, (), |v| v.input_drag(x, y));
 }
 
 /// A composer key (Enter sends, Shift+Enter newlines, rest edits).
@@ -1037,9 +1046,7 @@ pub unsafe extern "C" fn unterm_agentview_input_key(
     shift: bool,
 ) {
     let name = cstr(name);
-    if let Some(v) = views().lock().unwrap().get_mut(&id) {
-        v.input_key(&name, ctrl, alt, shift);
-    }
+    with_view(id, (), |v| v.input_key(&name, ctrl, alt, shift));
 }
 
 /// Insert text into the composer (paste / IME commit).
@@ -1049,9 +1056,7 @@ pub unsafe extern "C" fn unterm_agentview_input_key(
 #[no_mangle]
 pub unsafe extern "C" fn unterm_agentview_input_insert(id: u64, text: *const c_char) {
     let text = cstr(text);
-    if let Some(v) = views().lock().unwrap().get_mut(&id) {
-        v.input_insert(&text);
-    }
+    with_view(id, (), |v| v.input_insert(&text));
 }
 
 /// Set the live IME composition shown inline as marked text (empty clears it).
@@ -1061,30 +1066,22 @@ pub unsafe extern "C" fn unterm_agentview_input_insert(id: u64, text: *const c_c
 #[no_mangle]
 pub unsafe extern "C" fn unterm_agentview_input_set_preedit(id: u64, text: *const c_char) {
     let text = cstr(text);
-    if let Some(v) = views().lock().unwrap().get_mut(&id) {
-        v.input_set_preedit(&text);
-    }
+    with_view(id, (), |v| v.input_set_preedit(&text));
 }
 
 #[no_mangle]
 pub extern "C" fn unterm_agentview_input_undo(id: u64) {
-    if let Some(v) = views().lock().unwrap().get_mut(&id) {
-        v.input_undo();
-    }
+    with_view(id, (), |v| v.input_undo());
 }
 
 #[no_mangle]
 pub extern "C" fn unterm_agentview_input_redo(id: u64) {
-    if let Some(v) = views().lock().unwrap().get_mut(&id) {
-        v.input_redo();
-    }
+    with_view(id, (), |v| v.input_redo());
 }
 
 #[no_mangle]
 pub extern "C" fn unterm_agentview_input_select_all(id: u64) {
-    if let Some(v) = views().lock().unwrap().get_mut(&id) {
-        v.input_select_all();
-    }
+    with_view(id, (), |v| v.input_select_all());
 }
 
 /// Copy the composer selection to a snapshot (host writes the OS clipboard).
@@ -1120,7 +1117,7 @@ unsafe fn view_string(
     out_len: *mut usize,
     f: impl FnOnce(&mut AgentView) -> &CString,
 ) -> *const c_char {
-    let mut map = views().lock().unwrap();
+    let mut map = lock_views();
     let Some(v) = map.get_mut(&id) else {
         return std::ptr::null();
     };

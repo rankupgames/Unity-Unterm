@@ -207,6 +207,11 @@ impl InputBox {
         self.editor
             .with_buffer_mut(|b| b.set_text(&mut fs, text, &attrs, Shaping::Advanced, None));
         self.editor.action(&mut fs, Action::Motion(Motion::BufferEnd));
+        // A programmatic buffer replacement invalidates any in-progress IME
+        // composition; drop it so a later clear_preedit can't delete against a stale
+        // anchor that now points past the new buffer (cosmic-text split_off panic).
+        self.preedit.clear();
+        self.preedit_anchor = None;
         self.undo.clear(); // programmatic reset isn't an undoable edit
         self.redo.clear();
     }
@@ -356,12 +361,28 @@ impl InputBox {
         self.editor.insert_string(text, None);
     }
 
+    /// Clamp a cursor to the current buffer's bounds, so a stale position can't
+    /// drive an out-of-range delete (which panics cosmic-text's `split_off`).
+    fn clamp_cursor(&self, c: Cursor) -> Cursor {
+        self.editor.with_buffer(|b| {
+            let last = b.lines.len().saturating_sub(1);
+            let line = c.line.min(last);
+            let len = b.lines.get(line).map(|l| l.text().len()).unwrap_or(0);
+            Cursor::new(line, c.index.min(len))
+        })
+    }
+
     /// Remove the current preedit (if any), restoring the caret to its anchor.
     fn clear_preedit(&mut self) {
         if self.preedit.is_empty() {
             return;
         }
         if let Some(anchor) = self.preedit_anchor.take() {
+            // Clamp both ends defensively: the buffer may have changed under the
+            // composition (send/clear), leaving the anchor past the current text.
+            let anchor = self.clamp_cursor(anchor);
+            let cur = self.clamp_cursor(self.editor.cursor());
+            self.editor.set_cursor(cur);
             self.editor.set_selection(Selection::Normal(anchor));
             self.editor.delete_selection();
         }
