@@ -6,7 +6,7 @@ license = "MIT"
 description = "Native wgpu-rendered terminal emulator for Unity (Unterm)"
 
 # Build a C-ABI dynamic library that Unity loads as a native plugin.
-# On macOS the .dylib is renamed to a .bundle when copied into Assets/Plugins.
+# On macOS Unity loads this .dylib directly as a native plugin (no .bundle rename).
 [lib]
 name = "unterm"
 crate-type = ["cdylib", "rlib"]

@@ -185,6 +185,14 @@ namespace Unterm.Editor
         // so Load() can bind to that same image (see LoadNative). Return value unused.
         [DllImport("unterm")]
         private static extern IntPtr unterm_unity_gfx(out int kind);
+#elif UNITY_EDITOR_OSX
+        // Same trick on macOS: calling a [DllImport] export makes Unity load
+        // unterm.dylib as a native plugin and run UnityPluginLoad, which captures
+        // the editor's MTLDevice (read in-image by gpu.rs). Returns whether the
+        // device was captured, for diagnostics.
+        [DllImport("unterm")]
+        [return: MarshalAs(UnmanagedType.I1)]
+        private static extern bool unterm_unity_metal_init();
 #endif
 
         // GUID of the native plugin's .meta. Resolving by GUID makes the loader
@@ -196,18 +204,21 @@ namespace Unterm.Editor
         private const string PluginFallback = "Unterm/Plugins/Windows/x86_64/unterm.dll";
 #else
         private const string PluginGuid = "54ea61c3e6ad54b688596fae0846fc88";
-        private const string PluginFallback = "Unterm/Plugins/macOS/unterm.bundle";
+        private const string PluginFallback = "Unterm/Plugins/macOS/unterm.dylib";
 #endif
 
         // Ensure Unity has mapped the native plugin — running UnityPluginLoad,
-        // which captures the editor's D3D device on Windows — before a non-terminal
-        // host (the agent window, the MCP server) binds to that same image in its
-        // own Load(). No-op on macOS, where the IOSurface path needs no
-        // Unity-owned device.
+        // which captures the editor's graphics device — before a host (the terminal,
+        // agent window, or MCP server) binds to that same image in its own Load().
         internal static void EnsureNativeImageLoaded()
         {
 #if UNITY_EDITOR_WIN
             unterm_unity_gfx(out int _);
+#elif UNITY_EDITOR_OSX
+            bool captured = unterm_unity_metal_init();
+            if (!captured)
+                Debug.Log("unterm: UnityPluginLoad ran but no MTLDevice captured yet "
+                    + "(or the plugin isn't mapped); renderer will use the default adapter.");
 #endif
         }
 
@@ -340,11 +351,9 @@ namespace Unterm.Editor
         {
             try
             {
-#if UNITY_EDITOR_WIN
                 // Make Unity map the plugin (and run UnityPluginLoad to capture its
-                // D3D device) before we bind to that same image in Load() below.
-                unterm_unity_gfx(out int _);
-#endif
+                // graphics device) before we bind to that same image in Load() below.
+                EnsureNativeImageLoaded();
                 _native = new UntermNative();
                 _native.Load(PluginPath);
 

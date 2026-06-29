@@ -35,7 +35,7 @@ D3D12 texture on Windows. The menu item is registered only on those editors; on
 any other platform the package contributes nothing.
 
 The package ships prebuilt native binaries — a universal (arm64 + x86_64)
-`unterm.bundle` for macOS and an `unterm.dll` for Windows (x86_64). To rebuild
+`unterm.dylib` for macOS and an `unterm.dll` for Windows (x86_64). To rebuild
 from the Rust source, run `native/build-macos.sh` or `native/build-windows.ps1`
 in the [development repository](https://github.com/tnayuki/Unity-Unterm).
 

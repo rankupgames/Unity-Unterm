@@ -53,9 +53,9 @@ any other platform the package contributes nothing.
 ## Repository layout
 
 - `Packages/dev.tnayuki.unterm/` — the distributable UPM package. The native
-  `unterm.bundle` is a build artifact and is **not** tracked here; only its
+  `unterm.dylib` is a build artifact and is **not** tracked here; only its
   `.meta` is. On each release (a `v*` tag) a GitHub Action builds the native
-  binaries — a universal `unterm.bundle` on a macOS runner and `unterm.dll` on a
+  binaries — a universal `unterm.dylib` on a macOS runner and `unterm.dll` on a
   Windows runner — and publishes the package, binaries included, to the `upm`
   branch that the install URL points at, plus a matching `upm/<tag>`.
 - `native/` — the Rust source for the terminal engine. Run

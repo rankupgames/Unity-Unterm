@@ -1,7 +1,7 @@
 name: Build native + publish UPM branch
 
 # The native binaries are NOT tracked in source (they bloat the repo and can't be
-# merged across branches). Instead this workflow builds the macOS .bundle and the
+# merged across branches). Instead this workflow builds the macOS .dylib and the
 # Windows .dll on their respective runners and publishes the package — source
 # files plus the freshly built binaries — to the `upm` branch that the install
 # URL (`...git#upm`) points at.
@@ -90,7 +90,7 @@ jobs:
         run: |
           set -euo pipefail
           PKG="Packages/dev.tnayuki.unterm"
-          test -f "$PKG/Editor/Plugins/macOS/unterm.bundle" || { echo "bundle missing"; exit 1; }
+          test -f "$PKG/Editor/Plugins/macOS/unterm.dylib" || { echo "dylib missing"; exit 1; }
           test -f "$PKG/Editor/Plugins/Windows/x86_64/unterm.dll" || { echo "dll missing"; exit 1; }
 
           # Stage the package contents (including the just-built, un-tracked

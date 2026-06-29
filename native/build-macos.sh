@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Build the Unterm native terminal and install it as a Unity macOS plugin bundle.
+# Build the Unterm native terminal and install it as a Unity macOS plugin.
 #
-# Unity loads native plugins on macOS from a `.bundle`. A cdylib `.dylib` works
-# fine when renamed, so we lipo the per-arch builds into Assets/Plugins.
+# Unity accepts a `.dylib` as a native plugin (and, unlike a flat Mach-O renamed
+# `.bundle`, recognizes it as a real plugin so it runs UnityPluginLoad). We lipo
+# the per-arch cdylibs into a universal `.dylib` under the package's Plugins dir.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -22,10 +23,12 @@ done
 
 echo "==> building unterm ($PROFILE)"
 for arch in "${ARCHS[@]}"; do
-  cargo build -p unterm "${CARGO_FLAGS[@]}" --target "$arch"
+  # Bash 3.2 (macOS) treats "${CARGO_FLAGS[@]}" as unbound under `set -u` when the
+  # array is empty (the debug profile), so expand it guardedly.
+  cargo build -p unterm ${CARGO_FLAGS[@]+"${CARGO_FLAGS[@]}"} --target "$arch"
 done
 
-DEST="../Packages/dev.tnayuki.unterm/Editor/Plugins/macOS/unterm.bundle"
+DEST="../Packages/dev.tnayuki.unterm/Editor/Plugins/macOS/unterm.dylib"
 mkdir -p "$(dirname "$DEST")"
 
 LIBS=()

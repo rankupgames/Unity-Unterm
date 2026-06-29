@@ -179,7 +179,7 @@ namespace Unterm.Editor
             // Windows' bare-name LoadLibrary, macOS dlopen needs the full path.)
             _handle = NativeOpen(bundlePath);
             if (_handle == IntPtr.Zero)
-                throw new Exception($"native load failed (is unterm.bundle built?): {NativeError()}");
+                throw new Exception($"native load failed (is unterm.dylib built?): {NativeError()}");
 #endif
 
             _create = Sym<CreateFn>("unterm_create");

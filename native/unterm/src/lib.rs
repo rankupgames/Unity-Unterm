@@ -1247,5 +1247,13 @@ pub(crate) mod unity_metal {
         }
         None
     }
+
+    /// Touched by the C# loader (`[DllImport]`) to make Unity load this `.dylib`
+    /// as a native plugin and run `UnityPluginLoad` (capturing the editor's
+    /// device) before the renderer binds. Returns whether the device is captured.
+    #[no_mangle]
+    pub extern "C" fn unterm_unity_metal_init() -> bool {
+        unity_device().is_some()
+    }
 }
 
