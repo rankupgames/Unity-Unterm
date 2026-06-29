@@ -14,28 +14,70 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # GPU + text: pinned to what the previous panel verified so the IOSurface
 # zero-copy path (raw MTLDevice/MTLTexture handed to wgpu-hal) keeps matching.
-wgpu = "22"
-glyphon = "0.6"
+wgpu = "29"
+glyphon = "0.11"
 pollster = "0.3"
 bytemuck = "1"
 log = "0.4"
 env_logger = "0.11"
+# Display width of the IME preedit so it can be laid out over the right cells.
+unicode-width = "0.1"
+# System locale detection + the `Script` enum, for a custom cosmic-text `Fallback`
+# that resolves CJK ideographs to the right regional font (see gpu::font_system).
+sys-locale = "0.3"
+unicode-script = "0.5"
 
 # Terminal model + PTY.
 alacritty_terminal = "0.25"
 portable-pty = "0.8"
 
-# IOSurface zero-copy path (macOS). Versions pinned to what wgpu 22 resolves
-# (metal 0.29) so the raw MTLDevice/MTLTexture handed to wgpu-hal matches.
+# Markdown parsing for the agent panel (rendering is done by the panel itself).
+pulldown-cmark = { version = "0.12", default-features = false }
+# Syntax highlighting for fenced code blocks (no `tty`/crossterm; we render).
+syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+
+# In-process MCP server hosted in the plugin so it survives Unity C# domain
+# reloads. No transport/port: the control-protocol driver dispatches the agent's
+# `mcp_message` requests straight in. Tool defs + execution come from the C# side.
+serde_json = "1"
+
+# IOSurface zero-copy path (macOS). Uses the same objc2-metal/objc2-io-surface
+# bindings wgpu-hal 29 builds on, so the raw MTLDevice/MTLTexture handed to
+# wgpu-hal matches.
 [target.'cfg(target_os = "macos")'.dependencies]
-metal = "0.29"
-foreign-types = "0.5"
-objc = "0.2"
+objc2 = "0.6"
+objc2-metal = { version = "0.3", features = [
+    "MTLDevice",
+    "MTLCommandQueue",
+    "MTLTexture",
+    "MTLPixelFormat",
+    "MTLResource",
+    "MTLTypes",
+    "objc2-io-surface",
+] }
+objc2-io-surface = "0.3"
+# IOSurface creation stays on the plain CoreFoundation FFI; the raw pointer is
+# bridged into objc2's `&IOSurfaceRef` for the Metal texture call.
 core-foundation = "0.10"
 core-foundation-sys = "0.8"
+# Capture the editor's MTLDevice when Unity auto-loads the original bundle
+# (UnityPluginLoad). Its `registryID` is bridged to the shadow-copy image so the
+# renderer's wgpu adapter matches Unity's GPU (see gpu.rs / lib.rs).
 unity-native-plugin = { version = "0.9", features = ["metal"] }
-objc2 = "0.6"
-objc2-metal = { version = "0.3", features = ["MTLDevice", "MTLCommandQueue"] }
+
+# Windows zero-copy path: create a shared D3D12 render target on wgpu's device
+# and open it on Unity's D3D11/D3D12 device. Uses the same `windows` (windows-rs)
+# crate wgpu-hal 29 is built on, so the raw ID3D12Resource handed to wgpu-hal
+# matches.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }
 
 [dev-dependencies]
 # Headless verification: dump the rendered terminal to a PNG without the Editor.

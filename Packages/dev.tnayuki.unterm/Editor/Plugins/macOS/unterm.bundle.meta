@@ -6,28 +6,34 @@ PluginImporter:
   iconMap: {}
   executionOrder: {}
   defineConstraints: []
-  isPreloaded: 1
-  isOverridable: 0
+  isPreloaded: 0
+  isOverridable: 1
+  isExplicitlyReferenced: 0
+  validateReferences: 1
   platformData:
-    - first:
-        Any: 0
-      second:
-        enabled: 0
-        excludePlatforms: []
-    - first:
-        Editor: 1
-      second:
-        enabled: 1
-        excludePlatforms: []
-        platform: Editor
-    - first:
-        Standalone: 0
-      second:
-        enabled: 0
-        excludePlatforms: []
-  targets:
-    Editor:
-      CPU: Any
-      OS: OS X
-    Standalone:
-      CPU: Any
+  - first:
+      : Any
+    second:
+      enabled: 0
+      settings:
+        Exclude Editor: 0
+        Exclude Linux64: 1
+        Exclude OSXUniversal: 1
+        Exclude Win: 1
+        Exclude Win64: 1
+  - first:
+      Any:
+    second:
+      enabled: 0
+      settings: {}
+  - first:
+      Editor: Editor
+    second:
+      enabled: 1
+      settings:
+        CPU: AnyCPU
+        DefaultValueInitialized: true
+        OS: OSX
+  userData:
+  assetBundleName:
+  assetBundleVariant:

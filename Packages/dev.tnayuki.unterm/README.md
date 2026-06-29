@@ -1,8 +1,8 @@
 # Unterm
 
-A native terminal window for the Unity Editor on macOS. A real PTY-backed
-shell rendered by a Rust/wgpu engine (zero-copy via IOSurface/Metal) and
-hosted inside an `EditorWindow`.
+A native terminal window for the Unity Editor on macOS and Windows. A real
+PTY-backed shell rendered by a Rust/wgpu engine (zero-copy: IOSurface/Metal on
+macOS, a shared D3D12 texture on Windows) and hosted inside an `EditorWindow`.
 
 ## Why
 
@@ -13,7 +13,7 @@ shell, so `vim`, `tmux`, REPLs, and TUIs all work.
 
 ## Usage
 
-Open **Window ▸ Unterm ▸ New Terminal** (`Cmd+Shift+T`). Each invocation
+Open **Window ▸ Unterm ▸ New Terminal** (`Cmd/Ctrl+Shift+T`). Each invocation
 opens an independent terminal; open as many as you like. New terminals
 start in the project root.
 
@@ -29,13 +29,15 @@ start in the project root.
 
 ## Platform
 
-macOS only. The renderer uses the IOSurface/Metal zero-copy path, so the
-menu item is only registered when the Editor itself runs on macOS. On other
-platforms the package contributes nothing.
+macOS and Windows — the zero-copy display platforms. The renderer hands the
+editor a GPU texture with no CPU copy: an IOSurface (Metal) on macOS, a shared
+D3D12 texture on Windows. The menu item is registered only on those editors; on
+any other platform the package contributes nothing.
 
-The package ships a prebuilt universal (arm64 + x86_64) `unterm.bundle`. To
-rebuild from the Rust source, run `native/build-macos.sh` in the
-[development repository](https://github.com/tnayuki/Unity-Unterm).
+The package ships prebuilt native binaries — a universal (arm64 + x86_64)
+`unterm.bundle` for macOS and an `unterm.dll` for Windows (x86_64). To rebuild
+from the Rust source, run `native/build-macos.sh` or `native/build-windows.ps1`
+in the [development repository](https://github.com/tnayuki/Unity-Unterm).
 
 ## License
 
