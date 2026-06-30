@@ -1,0 +1,7 @@
+# Statically link the MSVC CRT into the Windows cdylib so the published
+# unterm.dll is self-contained: Unity loads it as a native plugin without the
+# user needing the Visual C++ redistributable installed (a missing vcruntime
+# would surface as a 126 ERROR_MOD_NOT_FOUND load failure). macOS/other targets
+# are unaffected.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

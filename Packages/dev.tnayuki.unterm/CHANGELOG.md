@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- The Windows Editor plugin now statically links the MSVC C runtime, so `unterm.dll` loads on machines without the Visual C++ redistributable installed (which otherwise failed with a `126 ERROR_MOD_NOT_FOUND` native load error).
+
 ## [0.4.0] - 2026-06-30
 
 ### Added
