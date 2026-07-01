@@ -70,9 +70,10 @@ jobs:
           path: Packages/dev.tnayuki.unterm/Editor/Plugins/Windows/x86_64
 
       - name: Install cargo-about
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-about
+        # cargo-about gates its binary behind a non-default `cli` feature, so a
+        # source build without it installs no `cargo about` subcommand. Install
+        # from source with the feature enabled so this is deterministic.
+        run: cargo install cargo-about --locked --features cli
 
       - name: Generate third-party license notices (license gate)
         working-directory: native
