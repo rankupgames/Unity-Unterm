@@ -220,17 +220,18 @@ namespace Unterm.Editor
 
                 // Context augmentations (best-effort; never fail the whole completion):
                 // members the position specifically expects, surfaced before scope.
-                try { AddExpectedEnum(result, root, model, position); } catch { }
-                try { AddNamedArguments(result, root, model, position); } catch { }
-                try { AddObjectInitializerMembers(result, root, model, position); } catch { }
+                try { AddExpectedEnum(result, root, model, position); } catch (Exception e) { UntermLog.WarnOnce("completion.expectedEnum", e); }
+                try { AddNamedArguments(result, root, model, position); } catch (Exception e) { UntermLog.WarnOnce("completion.namedArguments", e); }
+                try { AddObjectInitializerMembers(result, root, model, position); } catch (Exception e) { UntermLog.WarnOnce("completion.objectInitializer", e); }
                 // Build the cross-assembly type index once (off the typing path); the
                 // host queries it per keystroke via UnimportedTypesMatching — those
                 // are prefix-dependent, so they can't ride the per-word symbol cache.
-                try { EnsureTypeIndex(comp); } catch { }
+                try { EnsureTypeIndex(comp); } catch (Exception e) { UntermLog.WarnOnce("completion.typeIndex", e); }
                 return result;
             }
-            catch
+            catch (Exception e)
             {
+                UntermLog.WarnOnce("completion.general", e);
                 return null;
             }
         }
@@ -441,7 +442,7 @@ namespace Unterm.Editor
                     }
                 foreach (var child in ns.GetNamespaceMembers()) Walk(child);
             }
-            try { Walk(comp.GlobalNamespace); } catch { }
+            try { Walk(comp.GlobalNamespace); } catch (Exception e) { UntermLog.WarnOnce("completion.typeIndexWalk", e); }
             s_typeIndex = idx;
         }
 

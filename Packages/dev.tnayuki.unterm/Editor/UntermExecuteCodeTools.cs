@@ -100,7 +100,7 @@ namespace Unterm.Editor
             var refs = new List<MetadataReference>();
             void AddType(Type ty)
             {
-                try { refs.Add(MetadataReference.CreateFromFile(ty.Assembly.Location)); } catch { }
+                try { refs.Add(MetadataReference.CreateFromFile(ty.Assembly.Location)); } catch (Exception e) { UntermLog.WarnOnce("executeCode.addType", e); }
             }
             AddType(typeof(object));
             AddType(typeof(Enumerable));
@@ -117,7 +117,7 @@ namespace Unterm.Editor
                 if (ns != null && !string.IsNullOrEmpty(ns.Location))
                     refs.Add(MetadataReference.CreateFromFile(ns.Location));
             }
-            catch { }
+            catch (Exception e) { UntermLog.WarnOnce("executeCode.netstandardRef", e); }
 
             foreach (var a in CompilationPipeline.GetAssemblies(AssembliesType.Editor))
             {
@@ -126,7 +126,7 @@ namespace Unterm.Editor
                     var p = Path.GetFullPath(a.outputPath);
                     if (File.Exists(p)) refs.Add(MetadataReference.CreateFromFile(p));
                 }
-                catch { }
+                catch (Exception e) { UntermLog.WarnOnce("executeCode.projectRef", e); }
             }
 
             return refs.GroupBy(r => r.Display).Select(g => g.First()).ToList();
