@@ -39,6 +39,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 
 use crate::mcp::McpDispatcher;
+use crate::LockRecover;
 
 /// Transcript field separators, mirrored by the C# parser: role-tagged blocks
 /// `role{US}body` joined by `{RS}`. (ASCII record/unit separators.)
@@ -435,12 +436,12 @@ impl State {
     fn write_value(&self, v: &Value) {
         // Serialize before locking; keep the critical section to one line + flush.
         let line = format!("{v}\n");
-        let mut w = self.writer.lock().unwrap();
+        let mut w = self.writer.lock_recover();
         let _ = w.write_all(line.as_bytes()).and_then(|_| w.flush());
     }
 
     fn write_line(&self, line: &str) {
-        let mut w = self.writer.lock().unwrap();
+        let mut w = self.writer.lock_recover();
         let _ = w
             .write_all(line.as_bytes())
             .and_then(|_| w.write_all(b"\n"))
@@ -448,12 +449,12 @@ impl State {
     }
 
     fn sync_transcript(&self) {
-        let c = self.conv.lock().unwrap();
-        *self.transcript.lock().unwrap() = c.serialize();
+        let c = self.conv.lock_recover();
+        *self.transcript.lock_recover() = c.serialize();
     }
 
     fn set_status(&self, s: &str) {
-        *self.status.lock().unwrap() = s.to_string();
+        *self.status.lock_recover() = s.to_string();
     }
 
     /// Reply to a `can_use_tool` request with the user's allow/deny decision.
@@ -650,20 +651,20 @@ impl Driver {
         // "not signed in" note, and `/login` is intercepted by the host.
         // (`initializing` is transient and still buffers — handled below.)
         {
-            let status = self.state.status.lock().unwrap();
+            let status = self.state.status.lock_recover();
             if status.starts_with("init failed") || *status == "closed" {
                 return;
             }
         }
         if self.state.ready.load(Ordering::Relaxed)
-            && *self.state.status.lock().unwrap() == "thinking"
+            && *self.state.status.lock_recover() == "thinking"
         {
-            self.state.conv.lock().unwrap().push_queued(prompt);
+            self.state.conv.lock_recover().push_queued(prompt);
             self.state.sync_transcript();
             return;
         }
         {
-            let mut c = self.state.conv.lock().unwrap();
+            let mut c = self.state.conv.lock_recover();
             c.push_user(prompt);
         }
         self.state.sync_transcript();
@@ -672,7 +673,7 @@ impl Driver {
         if self.state.ready.load(Ordering::Relaxed) {
             self.state.write_line(&line);
         } else {
-            self.state.outbox.lock().unwrap().push(line);
+            self.state.outbox.lock_recover().push(line);
         }
     }
 
@@ -680,7 +681,7 @@ impl Driver {
     /// prompt that's `allow_once`/`allow_always`/`reject_once`/`reject_always`;
     /// for a question it's the chosen option label (or `__skip__`).
     pub fn respond(&self, option_id: &str) {
-        let Some(p) = self.state.pending.lock().unwrap().take() else {
+        let Some(p) = self.state.pending.lock_recover().take() else {
             return;
         };
         match p {
@@ -692,7 +693,7 @@ impl Driver {
             } => {
                 let allow = option_id.starts_with("allow");
                 if option_id.ends_with("always") {
-                    self.state.remembered.lock().unwrap().insert(tool_name, allow);
+                    self.state.remembered.lock_recover().insert(tool_name, allow);
                 }
                 self.state.write_permission(&request_id, allow, &input);
             }
@@ -715,7 +716,7 @@ impl Driver {
                 let next = index + 1;
                 if next < questions.len() {
                     // More questions: re-arm the prompt with the next one.
-                    *self.state.pending.lock().unwrap() = Some(Pending::Question {
+                    *self.state.pending.lock_recover() = Some(Pending::Question {
                         request_id,
                         questions,
                         answers,
@@ -788,19 +789,19 @@ impl Driver {
     /// Set the permission mode (`default`/`plan`/`acceptEdits`/`bypassPermissions`).
     /// Stored, and pushed to the engine now if ready (else applied on init).
     pub fn set_permission_mode(&self, mode: &str) {
-        *self.state.permission_mode.lock().unwrap() = mode.to_string();
+        *self.state.permission_mode.lock_recover() = mode.to_string();
         if self.state.ready.load(Ordering::Relaxed) {
             self.state.send_control("set_permission_mode", "mode", mode);
         }
     }
     pub fn permission_mode(&self) -> String {
-        self.state.permission_mode.lock().unwrap().clone()
+        self.state.permission_mode.lock_recover().clone()
     }
 
     /// Set the model (alias like `opus`/`sonnet`/`haiku`, or empty/`default` to
     /// keep the engine default). Stored, and pushed now if ready (else on init).
     pub fn set_model(&self, model: &str) {
-        *self.state.model.lock().unwrap() = model.to_string();
+        *self.state.model.lock_recover() = model.to_string();
         // The engine rejects an empty model ("String should have at least 1
         // character"); empty/`default` just means "keep the engine default".
         if self.state.ready.load(Ordering::Relaxed) && !model.is_empty() && model != "default" {
@@ -809,39 +810,39 @@ impl Driver {
     }
     /// The active model: a user choice, else the resolved model from `system/init`.
     pub fn model(&self) -> String {
-        self.state.model.lock().unwrap().clone()
+        self.state.model.lock_recover().clone()
     }
 
     /// Number of prompts waiting in the follow-up queue.
     pub fn queue_len(&self) -> u32 {
-        self.state.conv.lock().unwrap().queued_count() as u32
+        self.state.conv.lock_recover().queued_count() as u32
     }
     /// Cancel the `index`-th queued prompt (0-based among queued blocks).
     pub fn cancel_queued(&self, index: u32) {
         {
-            self.state.conv.lock().unwrap().cancel_queued(index as usize);
+            self.state.conv.lock_recover().cancel_queued(index as usize);
         }
         self.state.sync_transcript();
     }
 
     pub fn transcript(&self) -> String {
-        self.state.transcript.lock().unwrap().clone()
+        self.state.transcript.lock_recover().clone()
     }
 
 
     pub fn status(&self) -> String {
-        self.state.status.lock().unwrap().clone()
+        self.state.status.lock_recover().clone()
     }
 
     pub fn session_id(&self) -> String {
-        self.state.session_id.lock().unwrap().clone()
+        self.state.session_id.lock_recover().clone()
     }
 
     /// The pending prompt as `(title, options)` where each option is
     /// `(id, name, kind)`, or None. The C# UI renders the title as a note and the
     /// options as buttons; a click calls back into [`Driver::respond`] with the id.
     pub fn pending_view(&self) -> Option<(String, Vec<(String, String, String)>)> {
-        let guard = self.state.pending.lock().unwrap();
+        let guard = self.state.pending.lock_recover();
         match guard.as_ref()? {
             Pending::Permission { title, detail, .. } => {
                 let body = if detail.is_empty() {
@@ -910,7 +911,7 @@ impl Driver {
     /// The pending plan's Markdown text, if the current prompt is an `ExitPlanMode`
     /// approval — so the host can render it as a Markdown block (not a plain note).
     pub fn pending_plan(&self) -> Option<String> {
-        match self.state.pending.lock().unwrap().as_ref()? {
+        match self.state.pending.lock_recover().as_ref()? {
             Pending::Plan { input, .. } => {
                 let p = input["plan"].as_str().unwrap_or("");
                 (!p.is_empty()).then(|| p.to_string())
@@ -922,7 +923,7 @@ impl Driver {
     /// Drop a pending permission without answering (used on teardown so a waiting
     /// turn doesn't keep a stale prompt up).
     pub fn clear_pending(&self) {
-        *self.state.pending.lock().unwrap() = None;
+        *self.state.pending.lock_recover() = None;
     }
 }
 
@@ -1058,7 +1059,7 @@ fn reader_main(state: Arc<State>, stdout: ChildStdout) {
     // Child exited / stdout closed.
     log::warn!("claude stdout closed — child exited; session -> closed");
     {
-        let mut c = state.conv.lock().unwrap();
+        let mut c = state.conv.lock_recover();
         c.note_closed();
     }
     state.sync_transcript();
@@ -1083,16 +1084,16 @@ fn handle_message(state: &Arc<State>, v: Value) {
                 // Apply settings chosen before the engine was ready (persisted
                 // mode/model the host pushed onto a not-yet-initialized session).
                 {
-                    let mode = state.permission_mode.lock().unwrap().clone();
+                    let mode = state.permission_mode.lock_recover().clone();
                     if !mode.is_empty() && mode != "default" {
                         state.send_control("set_permission_mode", "mode", &mode);
                     }
-                    let model = state.model.lock().unwrap().clone();
+                    let model = state.model.lock_recover().clone();
                     if !model.is_empty() && model != "default" {
                         state.send_control("set_model", "model", &model);
                     }
                 }
-                let buffered = std::mem::take(&mut *state.outbox.lock().unwrap());
+                let buffered = std::mem::take(&mut *state.outbox.lock_recover());
                 let had_prompts = !buffered.is_empty();
                 for line in buffered {
                     state.write_line(&line);
@@ -1108,14 +1109,14 @@ fn handle_message(state: &Arc<State>, v: Value) {
                 log::info!("system/init mcp_servers={}", v["mcp_servers"]);
                 if let Some(sid) = v["session_id"].as_str() {
                     if !sid.is_empty() {
-                        *state.session_id.lock().unwrap() = sid.to_string();
+                        *state.session_id.lock_recover() = sid.to_string();
                     }
                 }
                 // Record the resolved model for display, unless the user already
                 // chose one (don't clobber an explicit selection).
                 if let Some(m) = v["model"].as_str() {
                     if !m.is_empty() {
-                        let mut cur = state.model.lock().unwrap();
+                        let mut cur = state.model.lock_recover();
                         if cur.is_empty() {
                             *cur = m.to_string();
                         }
@@ -1125,14 +1126,14 @@ fn handle_message(state: &Arc<State>, v: Value) {
         }
         Some("assistant") => {
             {
-                let mut c = state.conv.lock().unwrap();
+                let mut c = state.conv.lock_recover();
                 c.apply_message("assistant", &v["message"]["content"]);
             }
             // Capture the resolved model for display (every assistant message
             // carries it), unless the user pinned one (don't clobber a choice).
             if let Some(m) = v["message"]["model"].as_str() {
                 if !m.is_empty() {
-                    let mut cur = state.model.lock().unwrap();
+                    let mut cur = state.model.lock_recover();
                     if cur.is_empty() {
                         *cur = m.to_string();
                     }
@@ -1142,7 +1143,7 @@ fn handle_message(state: &Arc<State>, v: Value) {
         }
         Some("user") => {
             {
-                let mut c = state.conv.lock().unwrap();
+                let mut c = state.conv.lock_recover();
                 c.apply_tool_results(&v["message"]["content"]);
             }
             state.sync_transcript();
@@ -1151,7 +1152,7 @@ fn handle_message(state: &Arc<State>, v: Value) {
             // Turn finished. Send the next queued follow-up prompt as its own turn,
             // else go idle. (An interrupt also ends in a `result`, so the queue
             // survives an interrupt and keeps draining.)
-            let next = state.conv.lock().unwrap().promote_first_queued();
+            let next = state.conv.lock_recover().promote_first_queued();
             if let Some(text) = next {
                 state.sync_transcript();
                 let line = user_line(&text);
@@ -1181,7 +1182,7 @@ fn handle_control_request(state: &Arc<State>, v: &Value) {
                 if questions.is_empty() {
                     state.write_permission(&request_id, true, &input);
                 } else {
-                    *state.pending.lock().unwrap() = Some(Pending::Question {
+                    *state.pending.lock_recover() = Some(Pending::Question {
                         request_id,
                         questions,
                         answers: Vec::new(),
@@ -1195,7 +1196,7 @@ fn handle_control_request(state: &Arc<State>, v: &Value) {
             // "Ready to code?" approval (accept → also set the next permission mode)
             // rather than a generic allow/deny.
             if tool_name == "ExitPlanMode" {
-                *state.pending.lock().unwrap() = Some(Pending::Plan {
+                *state.pending.lock_recover() = Some(Pending::Plan {
                     request_id,
                     input,
                 });
@@ -1209,12 +1210,12 @@ fn handle_control_request(state: &Arc<State>, v: &Value) {
                 .unwrap_or(&tool_name)
                 .to_string();
             // Auto-honor a remembered ("always") decision without bothering the UI.
-            let remembered = state.remembered.lock().unwrap().get(&tool_name).copied();
+            let remembered = state.remembered.lock_recover().get(&tool_name).copied();
             if let Some(allow) = remembered {
                 state.write_permission(&request_id, allow, &input);
             } else {
                 let detail = describe_tool(&input);
-                *state.pending.lock().unwrap() = Some(Pending::Permission {
+                *state.pending.lock_recover() = Some(Pending::Permission {
                     request_id,
                     tool_name,
                     input,

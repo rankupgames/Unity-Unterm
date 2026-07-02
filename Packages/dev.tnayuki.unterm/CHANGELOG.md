@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- The Claude Code agent panel can no longer crash the Editor on a rendering error: its render and poll entry points are now contained at the native boundary the way the terminal's already were, a full glyph atlas skips the frame instead of aborting, and a background-worker panic no longer wedges a session by leaving a mutex poisoned.
+
 ## [0.4.1] - 2026-07-01
 
 ### Documentation

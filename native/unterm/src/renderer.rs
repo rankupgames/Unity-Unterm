@@ -626,17 +626,21 @@ impl Renderer {
             );
             self.quads
                 .prepare(&g.device, &g.queue, (self.width as f32, self.height as f32), &quads);
-            self.text_renderer
-                .prepare(
-                    &g.device,
-                    &g.queue,
-                    &mut fs,
-                    &mut self.atlas,
-                    &self.viewport,
-                    areas,
-                    &mut glyphon::SwashCache::new(),
-                )
-                .expect("unterm: glyphon prepare failed");
+            if let Err(e) = self.text_renderer.prepare(
+                &g.device,
+                &g.queue,
+                &mut fs,
+                &mut self.atlas,
+                &self.viewport,
+                areas,
+                &mut glyphon::SwashCache::new(),
+            ) {
+                // A full glyph atlas (or a transient device error) makes this
+                // frame's text unlayoutable; skip it rather than panic — the next
+                // frame retries after `atlas.trim()`.
+                log::error!("unterm: glyphon prepare failed: {e}");
+                return;
+            }
         }
 
         // --- Encode + submit. ---
@@ -668,9 +672,10 @@ impl Renderer {
                 multiview_mask: None,
             });
             self.quads.render(&mut pass);
-            self.text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)
-                .expect("unterm: glyphon render failed");
+            if let Err(e) = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass) {
+                // Draw the frame without text rather than abort; next frame retries.
+                log::error!("unterm: glyphon render failed: {e}");
+            }
         }
         // Blit the freshly rendered frame into the surface's presented texture.
         // No-op on macOS (the IOSurface is the render target); on Windows it

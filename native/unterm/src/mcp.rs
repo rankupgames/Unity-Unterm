@@ -17,6 +17,8 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use crate::LockRecover;
+
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -75,20 +77,20 @@ impl McpDispatcher {
     /// Replace the advertised tool list (JSON array of {name,description,inputSchema}).
     pub fn set_tools(&self, tools_json: &str) {
         if let Ok(v) = serde_json::from_str::<Value>(tools_json) {
-            *self.shared.tools.lock().unwrap() = v;
+            *self.shared.tools.lock_recover() = v;
         }
     }
 
     /// Pop the next queued tool call as `{id, name, args}` JSON, or None.
     pub fn next_call(&self) -> Option<String> {
-        let mut q = self.shared.pending.lock().unwrap();
+        let mut q = self.shared.pending.lock_recover();
         q.pop_front()
             .map(|c| json!({ "id": c.id, "name": c.name, "args": c.args }).to_string())
     }
 
     /// Answer a tool call by id with a result JSON string (the MCP tool result).
     pub fn respond(&self, id: u64, result_json: &str) {
-        if let Some(tx) = self.shared.responders.lock().unwrap().remove(&id) {
+        if let Some(tx) = self.shared.responders.lock_recover().remove(&id) {
             let _ = tx.send(result_json.to_string());
         }
     }
@@ -111,7 +113,7 @@ fn dispatch(msg: &Value, shared: &Arc<Shared>) -> Option<Value> {
             "serverInfo": { "name": "unterm-unity", "version": "0.1.0" },
         }),
         "ping" => json!({}),
-        "tools/list" => json!({ "tools": shared.tools.lock().unwrap().clone() }),
+        "tools/list" => json!({ "tools": shared.tools.lock_recover().clone() }),
         "tools/call" => call_tool(&msg["params"], shared),
         _ => {
             return Some(json!({
@@ -131,7 +133,7 @@ fn call_tool(params: &Value, shared: &Arc<Shared>) -> Value {
 
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = mpsc::channel::<String>();
-    shared.responders.lock().unwrap().insert(id, tx);
+    shared.responders.lock_recover().insert(id, tx);
     shared
         .pending
         .lock()
@@ -143,7 +145,7 @@ fn call_tool(params: &Value, shared: &Arc<Shared>) -> Value {
             serde_json::from_str::<Value>(&result).unwrap_or_else(|_| text_result(&result, false))
         }
         Err(_) => {
-            shared.responders.lock().unwrap().remove(&id);
+            shared.responders.lock_recover().remove(&id);
             text_result("tool call timed out or the editor was unavailable", true)
         }
     }

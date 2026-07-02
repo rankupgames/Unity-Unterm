@@ -103,6 +103,23 @@ fn lock_registry() -> std::sync::MutexGuard<'static, Registry> {
     registry().lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Lock a mutex, recovering from poisoning instead of panicking — the same policy
+/// [`lock_registry`] applies, reusable on any mutex. A panic in a worker thread
+/// (the agent reader in `control`, the PTY pump, an MCP responder) while it holds
+/// a lock poisons that mutex; without recovery the next `.lock().unwrap()` on the
+/// FFI thread would panic in turn. That panic is contained by [`ffi_guard`] so
+/// Unity survives, but it recurs on *every* later call, permanently wedging the
+/// session. Recovering the poisoned guard keeps the session usable instead.
+pub(crate) trait LockRecover<T> {
+    fn lock_recover(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> LockRecover<T> for std::sync::Mutex<T> {
+    fn lock_recover(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 /// Run `f`, swallowing any panic and returning `default` instead. The exported
 /// `unterm_*` functions are `extern "C"`; letting a Rust panic unwind across the
 /// C ABI into Unity is undefined behavior (and crashes the editor). wgpu panics
@@ -603,7 +620,7 @@ pub unsafe extern "C" fn unterm_mcp_next_call(out_len: *mut usize) -> *const c_c
     let Some(call) = crate::mcp::dispatcher().next_call() else {
         return std::ptr::null();
     };
-    let mut snap = mcp_call_snap().lock().unwrap();
+    let mut snap = mcp_call_snap().lock_recover();
     *snap = CString::new(call).unwrap_or_default();
     if !out_len.is_null() {
         unsafe { *out_len = snap.as_bytes().len() };
@@ -683,7 +700,7 @@ pub unsafe extern "C" fn unterm_agentview_create(
     let mcp = ensure_mcp_dispatcher();
     let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
     let v = AgentView::new(cstr(cwd), mcp, None, pw.max(1), ph.max(1), iw.max(1), ih.max(1), cstr(effort), cstr(claude_cmd));
-    views().lock().unwrap().insert(id, Box::new(v));
+    lock_views().insert(id, Box::new(v));
     id
 }
 
@@ -710,44 +727,51 @@ pub unsafe extern "C" fn unterm_agentview_load(
     };
     let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
     let v = AgentView::new(cstr(cwd), mcp, resume, pw.max(1), ph.max(1), iw.max(1), ih.max(1), cstr(effort), cstr(claude_cmd));
-    views().lock().unwrap().insert(id, Box::new(v));
+    lock_views().insert(id, Box::new(v));
     id
 }
 
 /// Whether a view id is still live (to re-adopt after a reload).
 #[no_mangle]
 pub extern "C" fn unterm_agentview_exists(id: u64) -> bool {
-    views().lock().unwrap().contains_key(&id)
+    lock_views().contains_key(&id)
 }
 
 /// Destroy a view (ends its worker, detaches the subprocess, frees surfaces).
 #[no_mangle]
 pub extern "C" fn unterm_agentview_destroy(id: u64) {
-    views().lock().unwrap().remove(&id);
+    lock_views().remove(&id);
 }
 
 /// Pull driver state and report what changed: bit0 = dirty (render+repaint),
 /// bit1 = animating (keep repainting).
 #[no_mangle]
 pub extern "C" fn unterm_agentview_poll(id: u64) -> u32 {
-    match views().lock().unwrap().get_mut(&id) {
+    // Guard like `unterm_render`/`with_view`: polling advances the driver and can
+    // touch cosmic-text, so a panic must not unwind across the C ABI into Unity.
+    ffi_guard(0, || match lock_views().get_mut(&id) {
         Some(v) => v.poll(),
         None => 0,
-    }
+    })
 }
 
 /// Compose + render both surfaces.
 #[no_mangle]
 pub extern "C" fn unterm_agentview_render(id: u64) {
-    if let Some(v) = views().lock().unwrap().get_mut(&id) {
-        v.render();
-    }
+    // wgpu can panic on a lost/again device and glyphon on a full atlas; contain
+    // it here so the render path matches the guarantee `unterm_render` gives the
+    // terminal (letting it unwind across the C ABI would abort the editor).
+    ffi_guard((), || {
+        if let Some(v) = lock_views().get_mut(&id) {
+            v.render();
+        }
+    });
 }
 
 /// Resize both surfaces and set the HiDPI scale.
 #[no_mangle]
 pub extern "C" fn unterm_agentview_resize(id: u64, pw: u32, ph: u32, iw: u32, ih: u32, scale: f32) {
-    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+    if let Some(v) = lock_views().get_mut(&id) {
         v.resize(pw.max(1), ph.max(1), iw.max(1), ih.max(1), scale);
     }
 }
@@ -764,7 +788,7 @@ pub extern "C" fn unterm_agentview_set_theme(
     fg: u8,
     fb: u8,
 ) {
-    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+    if let Some(v) = lock_views().get_mut(&id) {
         v.set_theme(br, bg, bb, ba, fr, fg, fb);
     }
 }
@@ -781,7 +805,7 @@ pub unsafe extern "C" fn unterm_agentview_set_fonts(
     italic: *const c_char,
     bold_italic: *const c_char,
 ) {
-    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+    if let Some(v) = lock_views().get_mut(&id) {
         v.set_fonts(&cstr(regular), &cstr(bold), &cstr(italic), &cstr(bold_italic));
     }
 }
@@ -789,7 +813,7 @@ pub unsafe extern "C" fn unterm_agentview_set_fonts(
 /// Raw `id<MTLTexture>` of the transcript surface (for Unity zero-copy).
 #[no_mangle]
 pub extern "C" fn unterm_agentview_panel_texture(id: u64) -> *mut c_void {
-    match views().lock().unwrap().get(&id) {
+    match lock_views().get(&id) {
         Some(v) => v.panel_texture(),
         None => std::ptr::null_mut(),
     }
@@ -798,7 +822,7 @@ pub extern "C" fn unterm_agentview_panel_texture(id: u64) -> *mut c_void {
 /// Raw `id<MTLTexture>` of the composer surface.
 #[no_mangle]
 pub extern "C" fn unterm_agentview_input_texture(id: u64) -> *mut c_void {
-    match views().lock().unwrap().get(&id) {
+    match lock_views().get(&id) {
         Some(v) => v.input_texture(),
         None => std::ptr::null_mut(),
     }
@@ -808,19 +832,19 @@ pub extern "C" fn unterm_agentview_input_texture(id: u64) -> *mut c_void {
 /// Transcript content height in physical px (for the host scrollbar).
 #[no_mangle]
 pub extern "C" fn unterm_agentview_content_height(id: u64) -> f32 {
-    views().lock().unwrap().get(&id).map_or(0.0, |v| v.content_height())
+    lock_views().get(&id).map_or(0.0, |v| v.content_height())
 }
 
 /// Composer content height in physical px (for host auto-grow).
 #[no_mangle]
 pub extern "C" fn unterm_agentview_input_height(id: u64) -> f32 {
-    views().lock().unwrap().get(&id).map_or(0.0, |v| v.input_height())
+    lock_views().get(&id).map_or(0.0, |v| v.input_height())
 }
 
 /// Set the vertical transcript scroll (physical px, 0 = latest).
 #[no_mangle]
 pub extern "C" fn unterm_agentview_set_scroll(id: u64, scroll: f32) {
-    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+    if let Some(v) = lock_views().get_mut(&id) {
         v.set_scroll(scroll);
     }
 }
@@ -837,7 +861,7 @@ pub unsafe extern "C" fn unterm_agentview_caret(
     w: *mut f32,
     h: *mut f32,
 ) {
-    if let Some(v) = views().lock().unwrap().get(&id) {
+    if let Some(v) = lock_views().get(&id) {
         let r = v.caret_rect();
         unsafe {
             if !x.is_null() {
@@ -859,7 +883,7 @@ pub unsafe extern "C" fn unterm_agentview_caret(
 /// Interrupt the in-flight turn (no-op if idle).
 #[no_mangle]
 pub extern "C" fn unterm_agentview_interrupt(id: u64) {
-    if let Some(v) = views().lock().unwrap().get(&id) {
+    if let Some(v) = lock_views().get(&id) {
         v.interrupt();
     }
 }
@@ -871,7 +895,7 @@ pub extern "C" fn unterm_agentview_interrupt(id: u64) {
 #[no_mangle]
 pub unsafe extern "C" fn unterm_agentview_set_permission_mode(id: u64, mode: *const c_char) {
     let mode = cstr(mode);
-    if let Some(v) = views().lock().unwrap().get(&id) {
+    if let Some(v) = lock_views().get(&id) {
         v.set_permission_mode(&mode);
     }
 }
@@ -892,7 +916,7 @@ pub unsafe extern "C" fn unterm_agentview_permission_mode(id: u64, out_len: *mut
 #[no_mangle]
 pub unsafe extern "C" fn unterm_agentview_set_model(id: u64, model: *const c_char) {
     let model = cstr(model);
-    if let Some(v) = views().lock().unwrap().get(&id) {
+    if let Some(v) = lock_views().get(&id) {
         v.set_model(&model);
     }
 }
@@ -909,13 +933,13 @@ pub unsafe extern "C" fn unterm_agentview_model(id: u64, out_len: *mut usize) ->
 /// Number of follow-up prompts waiting in the queue.
 #[no_mangle]
 pub extern "C" fn unterm_agentview_queue_len(id: u64) -> u32 {
-    views().lock().unwrap().get(&id).map(|v| v.queue_len()).unwrap_or(0)
+    lock_views().get(&id).map(|v| v.queue_len()).unwrap_or(0)
 }
 
 /// Cancel the `index`-th queued follow-up prompt (0-based).
 #[no_mangle]
 pub extern "C" fn unterm_agentview_cancel_queued(id: u64, index: u32) {
-    if let Some(v) = views().lock().unwrap().get(&id) {
+    if let Some(v) = lock_views().get(&id) {
         v.cancel_queued(index);
     }
 }
@@ -962,7 +986,7 @@ pub unsafe extern "C" fn unterm_agentview_panel_token_at(id: u64, x: f32, y: f32
 /// Mouse-down in the transcript. Returns 1 if consumed.
 #[no_mangle]
 pub extern "C" fn unterm_agentview_panel_down(id: u64, x: f32, y: f32) -> u8 {
-    match views().lock().unwrap().get_mut(&id) {
+    match lock_views().get_mut(&id) {
         Some(v) => v.panel_down(x, y) as u8,
         None => 0,
     }
@@ -970,7 +994,7 @@ pub extern "C" fn unterm_agentview_panel_down(id: u64, x: f32, y: f32) -> u8 {
 
 #[no_mangle]
 pub extern "C" fn unterm_agentview_panel_drag(id: u64, x: f32, y: f32) {
-    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+    if let Some(v) = lock_views().get_mut(&id) {
         v.panel_drag(x, y);
     }
 }
@@ -978,7 +1002,7 @@ pub extern "C" fn unterm_agentview_panel_drag(id: u64, x: f32, y: f32) {
 /// Horizontal scroll of the code block under (x, y). Returns 1 if consumed.
 #[no_mangle]
 pub extern "C" fn unterm_agentview_panel_scroll_h(id: u64, x: f32, y: f32, dx: f32) -> u8 {
-    match views().lock().unwrap().get_mut(&id) {
+    match lock_views().get_mut(&id) {
         Some(v) => v.panel_scroll_h(x, y, dx) as u8,
         None => 0,
     }
@@ -987,7 +1011,7 @@ pub extern "C" fn unterm_agentview_panel_scroll_h(id: u64, x: f32, y: f32, dx: f
 /// Vertical scroll of the capped plan box under (x, y). Returns 1 if consumed.
 #[no_mangle]
 pub extern "C" fn unterm_agentview_panel_scroll_v(id: u64, x: f32, y: f32, dy: f32) -> u8 {
-    match views().lock().unwrap().get_mut(&id) {
+    match lock_views().get_mut(&id) {
         Some(v) => v.panel_scroll_v(x, y, dy) as u8,
         None => 0,
     }
@@ -995,21 +1019,21 @@ pub extern "C" fn unterm_agentview_panel_scroll_v(id: u64, x: f32, y: f32, dy: f
 
 #[no_mangle]
 pub extern "C" fn unterm_agentview_panel_select_all(id: u64) {
-    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+    if let Some(v) = lock_views().get_mut(&id) {
         v.panel_select_all();
     }
 }
 
 #[no_mangle]
 pub extern "C" fn unterm_agentview_panel_select_clear(id: u64) {
-    if let Some(v) = views().lock().unwrap().get_mut(&id) {
+    if let Some(v) = lock_views().get_mut(&id) {
         v.panel_select_clear();
     }
 }
 
 #[no_mangle]
 pub extern "C" fn unterm_agentview_panel_has_selection(id: u64) -> bool {
-    matches!(views().lock().unwrap().get(&id), Some(v) if v.panel_has_selection())
+    matches!(lock_views().get(&id), Some(v) if v.panel_has_selection())
 }
 
 /// Whether a turn is actively running (sent a prompt, agent thinking/replying) —
@@ -1017,7 +1041,7 @@ pub extern "C" fn unterm_agentview_panel_has_selection(id: u64) -> bool {
 /// activity (vs merely opening/switching a session).
 #[no_mangle]
 pub extern "C" fn unterm_agentview_thinking(id: u64) -> bool {
-    matches!(views().lock().unwrap().get(&id), Some(v) if v.is_thinking())
+    matches!(lock_views().get(&id), Some(v) if v.is_thinking())
 }
 
 /// Selected transcript text. Writes the byte length.

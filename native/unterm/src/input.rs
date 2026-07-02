@@ -1662,9 +1662,13 @@ impl InputBox {
                         custom_glyphs: &[],
                     });
                 }
-                text_renderer
-                    .prepare(&g.device, &g.queue, fs, atlas, viewport, areas, swash_cache)
-                    .expect("unterm: input glyphon prepare failed");
+                if let Err(e) =
+                    text_renderer.prepare(&g.device, &g.queue, fs, atlas, viewport, areas, swash_cache)
+                {
+                    // Full atlas / transient device error: log and let the frame
+                    // draw without fresh text rather than panic across the C ABI.
+                    log::error!("unterm: input glyphon prepare failed: {e}");
+                }
             });
         }
 
@@ -1785,9 +1789,12 @@ impl InputBox {
                 default_color: text_color,
                 custom_glyphs: &[],
             };
-            popup_text
-                .prepare(&g.device, &g.queue, fs, atlas, viewport, [area], swash_cache)
-                .expect("unterm: popup glyphon prepare failed");
+            if let Err(e) =
+                popup_text.prepare(&g.device, &g.queue, fs, atlas, viewport, [area], swash_cache)
+            {
+                // Skip the popup's text this frame rather than panic; retried next frame.
+                log::error!("unterm: popup glyphon prepare failed: {e}");
+            }
         }
 
         let mut encoder = g
@@ -1813,14 +1820,15 @@ impl InputBox {
                 multiview_mask: None,
             });
             self.quads.render(&mut pass);
-            self.text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)
-                .expect("unterm: input glyphon render failed");
+            if let Err(e) = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass) {
+                // Draw the frame without text rather than abort; next frame retries.
+                log::error!("unterm: input glyphon render failed: {e}");
+            }
             if popup {
                 self.popup_quads.render(&mut pass);
-                self.popup_text
-                    .render(&self.atlas, &self.viewport, &mut pass)
-                    .expect("unterm: popup glyphon render failed");
+                if let Err(e) = self.popup_text.render(&self.atlas, &self.viewport, &mut pass) {
+                    log::error!("unterm: popup glyphon render failed: {e}");
+                }
             }
         }
         // Blit the freshly rendered frame into the surface's presented texture:

@@ -1177,17 +1177,20 @@ impl PanelRenderer {
         );
         self.quads
             .prepare(&g.device, &g.queue, (width, height), &quads);
-        self.text_renderer
-            .prepare(
-                &g.device,
-                &g.queue,
-                &mut fs,
-                &mut self.atlas,
-                &self.viewport,
-                areas,
-                &mut self.swash_cache,
-            )
-            .expect("unterm: panel glyphon prepare failed");
+        if let Err(e) = self.text_renderer.prepare(
+            &g.device,
+            &g.queue,
+            &mut fs,
+            &mut self.atlas,
+            &self.viewport,
+            areas,
+            &mut self.swash_cache,
+        ) {
+            // Full atlas / transient device error: skip this frame instead of
+            // panicking; the next frame retries after `atlas.trim()`.
+            log::error!("unterm: panel glyphon prepare failed: {e}");
+            return;
+        }
 
         let mut encoder = g
             .device
@@ -1212,9 +1215,10 @@ impl PanelRenderer {
                 multiview_mask: None,
             });
             self.quads.render(&mut pass);
-            self.text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)
-                .expect("unterm: panel glyphon render failed");
+            if let Err(e) = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass) {
+                // Draw the frame without text rather than abort; next frame retries.
+                log::error!("unterm: panel glyphon render failed: {e}");
+            }
         }
         // Blit the freshly rendered frame into the surface's presented texture:
         // no-op on macOS (the IOSurface is the render target); on Windows it copies
