@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The terminal renderer now reuses its per-frame cell scratch buffer instead of reallocating it every repaint, cutting steady allocator churn while a busy shell is streaming output.
+
 ### Fixed
 
 - The Claude Code agent panel can no longer crash the Editor on a rendering error: its render and poll entry points are now contained at the native boundary the way the terminal's already were, a full glyph atlas skips the frame instead of aborting, and a background-worker panic no longer wedges a session by leaving a mutex poisoned.

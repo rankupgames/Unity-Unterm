@@ -64,6 +64,11 @@ pub struct Renderer {
     cell_h: f32,
     metrics_dirty: bool,
 
+    /// Per-frame scratch for the visible grid snapshot, kept across frames so a
+    /// busy terminal (dirty every frame) doesn't allocate cols×rows cells each
+    /// render — only when the window grows.
+    cells: Vec<CellVis>,
+
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
@@ -97,6 +102,7 @@ impl Renderer {
             cell_w: 8.0,
             cell_h: 16.0,
             metrics_dirty: true,
+            cells: Vec::new(),
             viewport,
             atlas,
             text_renderer,
@@ -298,7 +304,8 @@ impl Renderer {
         // Active selection range (grid coords), used to tint selected cells.
         let selection = term.selection.as_ref().and_then(|s| s.to_range(term));
 
-        let mut cells = vec![blank; cols * rows];
+        self.cells.clear();
+        self.cells.resize(cols * rows, blank);
         for indexed in grid.display_iter() {
             let Some(vp) = point_to_viewport(display_offset, indexed.point) else {
                 continue;
@@ -322,7 +329,7 @@ impl Renderer {
             }
             let hidden = flags.contains(Flags::HIDDEN);
             let spacer = flags.contains(Flags::WIDE_CHAR_SPACER);
-            cells[vp.line * cols + vp.column.0] = CellVis {
+            self.cells[vp.line * cols + vp.column.0] = CellVis {
                 ch: if hidden { ' ' } else { cell.c },
                 fg,
                 bg,
@@ -341,8 +348,8 @@ impl Renderer {
             if let Some(p) = cursor_vp {
                 // Invert the glyph under a focused block cursor for contrast.
                 let idx = p.line * cols + p.column.0;
-                cells[idx].fg = theme.bg;
-                cells[idx].bold = false;
+                self.cells[idx].fg = theme.bg;
+                self.cells[idx].bold = false;
             }
         }
 
@@ -350,7 +357,7 @@ impl Renderer {
         let mut quads: Vec<Quad> = Vec::new();
         for row in 0..rows {
             for col in 0..cols {
-                let cv = cells[row * cols + col];
+                let cv = self.cells[row * cols + col];
                 if cv.bg_fill {
                     quads.push(Quad {
                         x: pad + col as f32 * cell_w,
@@ -365,7 +372,7 @@ impl Renderer {
         }
         // The cursor spans two columns when it sits on a wide (CJK) glyph.
         let cursor_cells = |p: &alacritty_terminal::index::Point<usize>| -> f32 {
-            if cells[p.line * cols + p.column.0].wide { cell_w * 2.0 } else { cell_w }
+            if self.cells[p.line * cols + p.column.0].wide { cell_w * 2.0 } else { cell_w }
         };
         if show_cursor {
             if let Some(p) = cursor_vp {
@@ -422,7 +429,7 @@ impl Renderer {
                 let top = pad + row as f32 * cell_h;
                 let mut col = 0usize;
                 while col < cols {
-                    let cv = cells[base + col];
+                    let cv = self.cells[base + col];
                     if cv.spacer {
                         col += 1;
                         continue;
@@ -451,7 +458,7 @@ impl Renderer {
                     let mut runs: Vec<(usize, usize, [u8; 3], bool, bool)> = Vec::new();
                     let mut cur: Option<(usize, [u8; 3], bool, bool)> = None;
                     while col < cols {
-                        let cv = cells[base + col];
+                        let cv = self.cells[base + col];
                         if cv.spacer || cv.wide {
                             break;
                         }
