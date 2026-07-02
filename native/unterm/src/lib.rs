@@ -931,6 +931,17 @@ pub unsafe extern "C" fn unterm_agentview_model(id: u64, out_len: *mut usize) ->
     view_string(id, out_len, |v| v.model())
 }
 
+/// The model roster advertised by the engine's `initialize` reply, as a JSON array
+/// of `{value, displayName, description, ...}` (empty until initialized). Lets the
+/// host build its model picker from what the account is entitled to. Writes the byte length.
+///
+/// # Safety
+/// `out_len` writable or null. Pointer valid until the next call on this view.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_models(id: u64, out_len: *mut usize) -> *const c_char {
+    view_string(id, out_len, |v| v.models())
+}
+
 /// Number of follow-up prompts waiting in the queue.
 #[no_mangle]
 pub extern "C" fn unterm_agentview_queue_len(id: u64) -> u32 {

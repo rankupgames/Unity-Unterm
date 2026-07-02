@@ -1397,9 +1397,60 @@ namespace Unterm.Editor
         };
 
         // Model: just "Default" when not pinned (don't resolve to the running model);
-        // otherwise the chosen alias, capitalized.
-        private string ModelLabel() =>
-            string.IsNullOrEmpty(_modelSelection) ? "Default" : Cap(_modelSelection);
+        // otherwise the engine's own display name for the pinned value (e.g. "Fable"
+        // for "claude-fable-5[1m]"), falling back to the capitalized alias.
+        private string ModelLabel()
+        {
+            if (string.IsNullOrEmpty(_modelSelection)) return "Default";
+            foreach (var mi in Models())
+                if (ModelKey(mi.value) == ModelKey(_modelSelection) && !string.IsNullOrEmpty(mi.displayName))
+                    return mi.displayName;
+            return Cap(_modelSelection);
+        }
+
+        // Match models ignoring a trailing variant suffix like "[1m]": the session log
+        // records only the base id, so a resumed roster drops the suffix a fresh one
+        // carries — without this, a pinned "…[1m]" stops matching its roster entry.
+        private static string ModelKey(string v)
+        {
+            if (string.IsNullOrEmpty(v)) return "";
+            if (v.EndsWith("]"))
+            {
+                int i = v.LastIndexOf('[');
+                if (i >= 0) return v.Substring(0, i);
+            }
+            return v;
+        }
+
+        // One entry of the engine's advertised model roster (extra fields like
+        // supportedEffortLevels are present in the JSON but unused here — JsonUtility
+        // ignores them).
+        [Serializable] private struct ModelInfo { public string value; public string displayName; }
+        [Serializable] private struct ModelList { public ModelInfo[] items; }
+
+        private string _modelsJson;
+        private ModelInfo[] _modelsCache = Array.Empty<ModelInfo>();
+
+        // The model roster the engine advertised in its `initialize` reply, parsed and
+        // cached (re-parsed only when the native JSON string changes). Empty until the
+        // engine is ready — the picker shows a "loading" placeholder in that window.
+        private ModelInfo[] Models()
+        {
+            if (_native == null || _viewId == 0) return Array.Empty<ModelInfo>();
+            string json = _native.AgentviewModels(Vid);
+            if (json != _modelsJson)
+            {
+                _modelsJson = json;
+                _modelsCache = Array.Empty<ModelInfo>();
+                if (!string.IsNullOrEmpty(json))
+                {
+                    // JsonUtility can't parse a bare top-level array — wrap it.
+                    try { _modelsCache = JsonUtility.FromJson<ModelList>("{\"items\":" + json + "}").items ?? Array.Empty<ModelInfo>(); }
+                    catch { _modelsCache = Array.Empty<ModelInfo>(); }
+                }
+            }
+            return _modelsCache;
+        }
 
         private string EffortLabel() =>
             string.IsNullOrEmpty(_effort) ? "Default" : Cap(_effort);
@@ -1422,10 +1473,22 @@ namespace Unterm.Editor
         private void ShowModelMenu()
         {
             var m = new GenericMenu();
-            m.AddItem(new GUIContent("Default"), string.IsNullOrEmpty(_modelSelection), () => SetModelSelection(""));
-            m.AddItem(new GUIContent("Opus"), _modelSelection == "opus", () => SetModelSelection("opus"));
-            m.AddItem(new GUIContent("Sonnet"), _modelSelection == "sonnet", () => SetModelSelection("sonnet"));
-            m.AddItem(new GUIContent("Haiku"), _modelSelection == "haiku", () => SetModelSelection("haiku"));
+            var models = Models();
+            if (models.Length == 0)
+            {
+                // The engine hasn't advertised its roster yet (brief startup window
+                // before `initialize` returns). Show a disabled placeholder rather
+                // than a hardcoded alias list that could mismatch the account.
+                m.AddDisabledItem(new GUIContent("Loading models…"));
+            }
+            foreach (var mi in models)
+            {
+                // The engine reports its default row as value "default"; Unterm
+                // stores the default selection as "" (empty), so map it back.
+                string val = mi.value == "default" ? "" : mi.value;
+                string label = string.IsNullOrEmpty(mi.displayName) ? mi.value : mi.displayName;
+                m.AddItem(new GUIContent(label), ModelKey(_modelSelection) == ModelKey(val), () => SetModelSelection(val));
+            }
             m.ShowAsContext();
         }
 

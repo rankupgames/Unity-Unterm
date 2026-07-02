@@ -155,7 +155,7 @@ namespace Unterm.Editor
         private AvBufFn _avTakeHostCommand; private AvTokenFn _avPanelTokenAt; private AvStampAtFn _avPanelStampAt;
         private FormatRelativeFn _formatRelative;
         private AvStrFn _avSetPermissionMode; private AvBufFn _avPermissionMode;
-        private AvStrFn _avSetModel; private AvBufFn _avModel;
+        private AvStrFn _avSetModel; private AvBufFn _avModel; private AvBufFn _avModels;
         private AvUintGetFn _avQueueLen; private AvUintSetFn _avCancelQueued;
         private AvDownFn _avPanelDown; private AvDragFn _avPanelDrag; private AvScrollHFn _avPanelScrollH; private AvScrollHFn _avPanelScrollV;
         private AvVoidFn _avPanelSelectAll; private AvVoidFn _avPanelSelectClear; private AvBoolFn _avPanelHasSelection; private AvBufFn _avPanelSelectedText;
@@ -277,6 +277,7 @@ namespace Unterm.Editor
             _avPermissionMode = Sym<AvBufFn>("unterm_agentview_permission_mode");
             _avSetModel = Sym<AvStrFn>("unterm_agentview_set_model");
             _avModel = Sym<AvBufFn>("unterm_agentview_model");
+            _avModels = Sym<AvBufFn>("unterm_agentview_models");
             _avQueueLen = Sym<AvUintGetFn>("unterm_agentview_queue_len");
             _avCancelQueued = Sym<AvUintSetFn>("unterm_agentview_cancel_queued");
             _avSessionId = Sym<AvBufFn>("unterm_agentview_session_id");
@@ -491,6 +492,7 @@ namespace Unterm.Editor
         public void AgentviewSetModel(ulong id, string model) { if (id != 0) _avSetModel(id, model ?? string.Empty); }
         /// Active model: the user's choice, else the resolved model from init.
         public string AgentviewModel(ulong id) { var p = _avModel(id, out UIntPtr len); return Utf8(p, len); }
+        public string AgentviewModels(ulong id) { var p = _avModels(id, out UIntPtr len); return Utf8(p, len); }
         /// Number of follow-up prompts waiting in the queue.
         public uint AgentviewQueueLen(ulong id) => id != 0 ? _avQueueLen(id) : 0u;
         /// Cancel the index-th queued follow-up prompt (0-based).

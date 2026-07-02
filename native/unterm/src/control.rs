@@ -527,6 +527,11 @@ struct State {
     // spawn-time CLI flag (see `Driver::new`), not stored here.
     permission_mode: Mutex<String>,
     model: Mutex<String>,
+    /// The model roster the engine advertises in its `initialize` reply (a JSON
+    /// array of `{value, displayName, description, ...}`), captured verbatim so the
+    /// UI can build its picker from what the account is actually entitled to — Fable,
+    /// 1M variants, etc. — instead of a hardcoded list. Empty until initialized.
+    models: Mutex<String>,
 }
 
 impl State {
@@ -719,6 +724,7 @@ impl Driver {
             init_id: init_id.clone(),
             permission_mode: Mutex::new("default".to_string()),
             model: Mutex::new(String::new()),
+            models: Mutex::new(String::new()),
         });
 
         // Declare our in-process MCP server so the engine routes its calls to us.
@@ -912,6 +918,11 @@ impl Driver {
     /// The active model: a user choice, else the resolved model from `system/init`.
     pub fn model(&self) -> String {
         self.state.model.lock_recover().clone()
+    }
+    /// The model roster from the `initialize` reply (JSON array string; empty until
+    /// the engine is ready). Each entry: `{value, displayName, description, ...}`.
+    pub fn models(&self) -> String {
+        self.state.models.lock_recover().clone()
     }
 
     /// Number of prompts waiting in the follow-up queue.
@@ -1204,6 +1215,13 @@ fn handle_message(state: &Arc<State>, v: Value) {
                 }
                 log::info!("initialize ok (engine ready)");
                 state.ready.store(true, Ordering::Relaxed);
+                // The engine advertises its model roster here — entitlement- and
+                // provider-aware (Fable, 1M variants, …). Keep it verbatim so the UI
+                // picker mirrors what's actually available instead of a fixed list.
+                let models = &resp["response"]["models"];
+                if models.is_array() {
+                    *state.models.lock_recover() = models.to_string();
+                }
                 // Apply settings chosen before the engine was ready (persisted
                 // mode/model the host pushed onto a not-yet-initialized session).
                 {

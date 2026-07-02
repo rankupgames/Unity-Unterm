@@ -53,6 +53,7 @@ pub struct AgentView {
     copy_snap: CString,
     mode_snap: CString,
     model_snap: CString,
+    models_snap: CString,
     host_cmd_snap: CString,
     /// Cached token under the last click, for the host to open as a file path.
     token_snap: CString,
@@ -111,6 +112,7 @@ impl AgentView {
             copy_snap: CString::default(),
             mode_snap: CString::default(),
             model_snap: CString::default(),
+            models_snap: CString::default(),
             host_cmd_snap: CString::default(),
             token_snap: CString::default(),
         }
@@ -363,6 +365,11 @@ impl AgentView {
         let s = self.driver.as_ref().map(|d| d.model()).unwrap_or_default();
         self.model_snap = clean(s);
         &self.model_snap
+    }
+    pub fn models(&mut self) -> &CString {
+        let s = self.driver.as_ref().map(|d| d.models()).unwrap_or_default();
+        self.models_snap = clean(s);
+        &self.models_snap
     }
     pub fn queue_len(&self) -> u32 {
         self.driver.as_ref().map(|d| d.queue_len()).unwrap_or(0)
