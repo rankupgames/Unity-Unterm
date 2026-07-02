@@ -942,6 +942,38 @@ pub unsafe extern "C" fn unterm_agentview_models(id: u64, out_len: *mut usize) -
     view_string(id, out_len, |v| v.models())
 }
 
+/// The slash-command roster from the `initialize` reply, as a JSON array of
+/// `{name, description, argumentHint, aliases?}` (empty until initialized). Drives
+/// the composer's `/` completion. Writes the byte length.
+///
+/// # Safety
+/// `out_len` writable or null. Pointer valid until the next call on this view.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_commands(id: u64, out_len: *mut usize) -> *const c_char {
+    view_string(id, out_len, |v| v.commands())
+}
+
+/// The leading `/command` token under the composer caret (with the slash), or empty
+/// when not in slash-command context. Writes the byte length.
+///
+/// # Safety
+/// `out_len` writable or null. Pointer valid until the next call on this view.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_input_slash_prefix(id: u64, out_len: *mut usize) -> *const c_char {
+    view_string(id, out_len, |v| v.input_slash_prefix())
+}
+
+/// Accept a completion in the composer: delete `prefix_len` chars before the caret
+/// and insert `text` in their place.
+///
+/// # Safety
+/// `text` must be a valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_agentview_input_complete(id: u64, prefix_len: u32, text: *const c_char) {
+    let text = cstr(text);
+    with_view(id, (), |v| v.input_complete(prefix_len as usize, &text));
+}
+
 /// Number of follow-up prompts waiting in the queue.
 #[no_mangle]
 pub extern "C" fn unterm_agentview_queue_len(id: u64) -> u32 {
@@ -1738,6 +1770,32 @@ pub extern "C" fn unterm_popup_show(
     let clear = wgpu::Color { r: br as f64, g: bg as f64, b: bb as f64, a: 1.0 };
     let text = glyphon::Color::rgb(fr, fg, fb);
     popup::show(&items, selected as usize, scroll as usize, x, y, scale, clear, text, dark != 0);
+}
+
+/// Like `unterm_popup_show`, but anchored ABOVE the caret (`x`,`y` is the caret TOP
+/// in screen points). For a composer docked at the window bottom. macOS/Windows only.
+#[cfg(any(target_os = "macos", windows))]
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn unterm_popup_show_above(
+    items: *const c_char,
+    selected: u32,
+    scroll: u32,
+    x: f32,
+    y: f32,
+    scale: f32,
+    br: f32,
+    bg: f32,
+    bb: f32,
+    fr: u8,
+    fg: u8,
+    fb: u8,
+    dark: u8,
+) {
+    let items = cstr(items);
+    let clear = wgpu::Color { r: br as f64, g: bg as f64, b: bb as f64, a: 1.0 };
+    let text = glyphon::Color::rgb(fr, fg, fb);
+    popup::show_above(&items, selected as usize, scroll as usize, x, y, scale, clear, text, dark != 0);
 }
 
 /// Hide the native completion popup. macOS only.

@@ -54,6 +54,8 @@ pub struct AgentView {
     mode_snap: CString,
     model_snap: CString,
     models_snap: CString,
+    commands_snap: CString,
+    slash_snap: CString,
     host_cmd_snap: CString,
     /// Cached token under the last click, for the host to open as a file path.
     token_snap: CString,
@@ -113,6 +115,8 @@ impl AgentView {
             mode_snap: CString::default(),
             model_snap: CString::default(),
             models_snap: CString::default(),
+            commands_snap: CString::default(),
+            slash_snap: CString::default(),
             host_cmd_snap: CString::default(),
             token_snap: CString::default(),
         }
@@ -371,6 +375,11 @@ impl AgentView {
         self.models_snap = clean(s);
         &self.models_snap
     }
+    pub fn commands(&mut self) -> &CString {
+        let s = self.driver.as_ref().map(|d| d.commands()).unwrap_or_default();
+        self.commands_snap = clean(s);
+        &self.commands_snap
+    }
     pub fn queue_len(&self) -> u32 {
         self.driver.as_ref().map(|d| d.queue_len()).unwrap_or(0)
     }
@@ -455,6 +464,16 @@ impl AgentView {
     pub fn input_insert(&mut self, text: &str) {
         self.input.insert(text);
         self.panel.selection_clear();
+    }
+    /// The leading `/command` token under the composer caret (with the slash), or
+    /// empty when not in slash-command context. Drives `/` completion.
+    pub fn input_slash_prefix(&mut self) -> &CString {
+        self.slash_snap = clean(self.input.slash_prefix());
+        &self.slash_snap
+    }
+    /// Accept a completion: delete `prefix_len` chars before the caret, insert `text`.
+    pub fn input_complete(&mut self, prefix_len: usize, text: &str) {
+        self.input.complete(prefix_len, text);
     }
     /// Live IME composition shown inline (marked text); empty clears it.
     pub fn input_set_preedit(&mut self, text: &str) {

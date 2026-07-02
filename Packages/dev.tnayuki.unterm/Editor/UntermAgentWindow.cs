@@ -150,6 +150,9 @@ namespace Unterm.Editor
 
         private void OnLostFocus()
         {
+            // The `/`-completion popup is a separate OS window — dismiss it when this
+            // window loses focus so it doesn't linger over other editors.
+            CloseSlash();
 #if UNITY_EDITOR_WIN
             Input.imeCompositionMode = IMECompositionMode.Auto;
 #endif
@@ -157,6 +160,7 @@ namespace Unterm.Editor
 
         private void OnDisable()
         {
+            CloseSlash();
             AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeReload;
             EditorApplication.update -= OnEditorUpdate;
             // On a domain reload keep the native view (and the loaded image) alive
@@ -587,6 +591,22 @@ namespace Unterm.Editor
             var rect = new Rect(0, HeaderHeight, position.width,
                 position.height - HeaderHeight - _inputHeight);
 
+            // While the `/`-completion popup is open, the wheel scrolls the popup list
+            // (host-driven: feed the offset and re-push) instead of the transcript.
+            if (Event.current.type == EventType.ScrollWheel && _slashOpen && _slashItems.Count > 0)
+            {
+                var we = Event.current;
+                if (Mathf.Abs(we.delta.y) > 0.01f)
+                {
+                    int vis = Mathf.Min(_slashItems.Count, SlashRows);
+                    int max = Mathf.Max(0, _slashItems.Count - vis);
+                    _slashScroll = Mathf.Clamp(_slashScroll + (we.delta.y > 0 ? 1 : -1), 0, max);
+                    PushSlash();
+                    we.Use();
+                }
+                return;
+            }
+
             // Mouse-wheel scroll through history (offset is in physical px).
             // Horizontal wheel/swipe over a code block scrolls that block instead.
             if (Event.current.type == EventType.ScrollWheel && rect.Contains(Event.current.mousePosition))
@@ -646,6 +666,9 @@ namespace Unterm.Editor
             // the native input box, then keep it focused for the next keystroke.
             DrawImeField(InputStripRect());
             SyncIme();
+            // Refresh the `/`-command popup from the composer's current caret context
+            // (after DrawImeField cached the anchor and SyncIme flushed typed text).
+            UpdateSlashCompletion();
             if (_refocus && Event.current.type == EventType.Repaint)
             {
                 EditorGUI.FocusTextInControl(InputControl);
@@ -849,6 +872,31 @@ namespace Unterm.Editor
             // Any other key targets the input box, so it takes selection focus:
             // drop the transcript selection so only one highlight is active.
             FocusInput();
+
+            // Slash-command completion popup open: navigate / accept / dismiss before
+            // the keys reach the composer (Enter would otherwise send, arrows move the
+            // caret, Escape would interrupt the agent).
+            if (_slashOpen && _slashItems.Count > 0)
+            {
+                switch (e.keyCode)
+                {
+                    case KeyCode.DownArrow:
+                        _slashSel = (_slashSel + 1) % _slashItems.Count; EnsureSlashVisible(); PushSlash(); e.Use(); return;
+                    case KeyCode.UpArrow:
+                        _slashSel = (_slashSel - 1 + _slashItems.Count) % _slashItems.Count; EnsureSlashVisible(); PushSlash(); e.Use(); return;
+                    case KeyCode.Tab:
+                    case KeyCode.Return:
+                    case KeyCode.KeypadEnter:
+                        AcceptSlash(); e.Use(); return;
+                    case KeyCode.Escape:
+                        CloseSlash(); e.Use(); return;
+                    case KeyCode.LeftArrow:
+                    case KeyCode.RightArrow:
+                    case KeyCode.Home:
+                    case KeyCode.End:
+                        CloseSlash(); break; // fall through to normal caret motion
+                }
+            }
 
             if (e.keyCode == KeyCode.Escape)
             {
@@ -1056,6 +1104,16 @@ namespace Unterm.Editor
             float gx = stripRect.x + cx / ppp;
             float gy = stripRect.y + cy / ppp;
             float gh = Mathf.Max(14f, chh / ppp);
+
+            // Cache the caret TOP in screen points for the native `/`-completion popup,
+            // which anchors ABOVE the composer (it's docked at the window bottom).
+            if (Event.current.type == EventType.Repaint)
+            {
+                var spTop = GUIUtility.GUIToScreenPoint(new Vector2(gx, gy));
+                _popupAnchorX = spTop.x;
+                _popupAnchorTopY = spTop.y;
+                _popupScale = ppp;
+            }
 
             // Unity caches the field's TextEditor by control id and doesn't re-clamp
             // its caret when `_imeBuffer` is reset out from under it (after a commit /
@@ -1454,6 +1512,160 @@ namespace Unterm.Editor
 
         private string EffortLabel() =>
             string.IsNullOrEmpty(_effort) ? "Default" : Cap(_effort);
+
+        // --- Slash-command completion (native popup, host-driven like the editor) ---
+
+        // One entry of the engine's advertised slash-command roster.
+        [Serializable] private struct CmdInfo { public string name; public string description; public string argumentHint; public string[] aliases; }
+        [Serializable] private struct CmdList { public CmdInfo[] items; }
+
+        private string _commandsJson;
+        private CmdInfo[] _commandsCache = Array.Empty<CmdInfo>();
+
+        // The slash-command roster from the engine's `initialize` reply, parsed and
+        // cached (re-parsed only when the native JSON changes). Empty until ready.
+        private CmdInfo[] Commands()
+        {
+            if (_native == null || _viewId == 0) return Array.Empty<CmdInfo>();
+            string json = _native.AgentviewCommands(Vid);
+            if (json != _commandsJson)
+            {
+                _commandsJson = json;
+                _commandsCache = Array.Empty<CmdInfo>();
+                if (!string.IsNullOrEmpty(json))
+                {
+                    try { _commandsCache = JsonUtility.FromJson<CmdList>("{\"items\":" + json + "}").items ?? Array.Empty<CmdInfo>(); }
+                    catch { _commandsCache = Array.Empty<CmdInfo>(); }
+                }
+            }
+            return _commandsCache;
+        }
+
+        private const int SlashRows = 10;
+        private bool _slashOpen;
+        private string _slashToken; // token the current list was built for (null = closed)
+        private List<string> _slashItems = new List<string>();  // command names to insert
+        private List<string> _slashLabels = new List<string>(); // display labels
+        private List<char> _slashKinds = new List<char>();       // 'S' = user skill, ' ' = built-in
+        private int _slashSel, _slashScroll, _slashPrefixLen;
+
+        // The engine tags a command's source in its description — user/project-defined
+        // ones (the user's own skills/commands) end with "(user)"/"(project)"; built-ins
+        // carry no such tag. Used to group and colour them.
+        private static bool IsSkillCommand(CmdInfo c)
+        {
+            string d = c.description?.TrimEnd();
+            return !string.IsNullOrEmpty(d) && (d.EndsWith("(user)") || d.EndsWith("(project)"));
+        }
+        private float _popupAnchorX, _popupAnchorTopY, _popupScale = 1f;
+
+        // Re-evaluate the `/command` popup from the composer's caret context. Cheap;
+        // called every repaint. Rebuilds (and resets selection) only when the typed
+        // token changes — arrow-key nav re-pushes without rebuilding.
+        private void UpdateSlashCompletion()
+        {
+            if (_native == null || _viewId == 0 || !_native.PopupAvailable) { CloseSlash(); return; }
+            // The popup is a separate OS window; OnGUI keeps running (and would re-open
+            // it) while this window is in the background, so gate on focus here rather
+            // than relying on OnLostFocus alone.
+            if (focusedWindow != this) { CloseSlash(); return; }
+            string sp = _native.AgentviewInputSlashPrefix(Vid); // "/token" or ""
+            if (string.IsNullOrEmpty(sp) || sp[0] != '/') { CloseSlash(); return; }
+            string token = sp.Substring(1);
+            if (_slashOpen && token == _slashToken) return; // already showing for this token
+            var cmds = Commands();
+            if (cmds.Length == 0) { CloseSlash(); return; }
+            var matched = new List<CmdInfo>();
+            foreach (var c in cmds)
+                if (SlashMatches(c, token)) matched.Add(c);
+            if (matched.Count == 0) { CloseSlash(); return; }
+            // Group the user's own skills/commands first, then built-ins, each sorted
+            // by name — so the list is predictable and the two kinds stay grouped.
+            matched.Sort((a, b) =>
+            {
+                bool sa = IsSkillCommand(a), sb = IsSkillCommand(b);
+                if (sa != sb) return sa ? -1 : 1;
+                return string.Compare(a.name, b.name, StringComparison.OrdinalIgnoreCase);
+            });
+            var items = new List<string>(matched.Count);
+            var labels = new List<string>(matched.Count);
+            var kinds = new List<char>(matched.Count);
+            foreach (var c in matched)
+            {
+                items.Add(c.name);
+                labels.Add(string.IsNullOrEmpty(c.argumentHint) ? c.name : c.name + "  " + c.argumentHint);
+                kinds.Add(IsSkillCommand(c) ? 'S' : ' '); // 'S' accents user skills; ' ' = built-in default
+            }
+            _slashItems = items;
+            _slashLabels = labels;
+            _slashKinds = kinds;
+            _slashToken = token;
+            _slashPrefixLen = token.Length;
+            _slashSel = 0;
+            _slashScroll = 0;
+            _slashOpen = true;
+            PushSlash();
+        }
+
+        private static bool SlashMatches(CmdInfo c, string token)
+        {
+            if (token.Length == 0) return true;
+            if (!string.IsNullOrEmpty(c.name) && c.name.StartsWith(token, StringComparison.OrdinalIgnoreCase)) return true;
+            if (c.aliases != null)
+                foreach (var a in c.aliases)
+                    if (!string.IsNullOrEmpty(a) && a.StartsWith(token, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        // Push the popup state to the native OS window, anchored above the composer.
+        private void PushSlash()
+        {
+            if (_native == null || _viewId == 0) return;
+            if (!_slashOpen) { _native.PopupHide(); return; }
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < _slashLabels.Count; i++)
+            {
+                if (i > 0) sb.Append('\n');
+                // Leading kind tag colours the row: 'S' accents user skills, ' ' is the
+                // built-in default. Both render a '·' bullet, not a letter badge.
+                sb.Append(i < _slashKinds.Count ? _slashKinds[i] : ' ').Append(_slashLabels[i]);
+            }
+            int vis = Mathf.Min(_slashItems.Count, SlashRows);
+            _slashScroll = Mathf.Clamp(_slashScroll, 0, Mathf.Max(0, _slashItems.Count - vis));
+            bool dark = EditorGUIUtility.isProSkin;
+            Color32 fg = dark ? new Color32(210, 210, 214, 255) : new Color32(32, 32, 32, 255);
+            _native.PopupShowAbove(sb.ToString(), (uint)_slashSel, (uint)_slashScroll,
+                _popupAnchorX, _popupAnchorTopY, _popupScale, GetEditorBackground().linear, fg, dark);
+        }
+
+        private void CloseSlash()
+        {
+            if (!_slashOpen && _slashToken == null) return;
+            _slashOpen = false;
+            _slashToken = null;
+            _slashSel = 0;
+            _slashScroll = 0;
+            if (_native != null) _native.PopupHide();
+        }
+
+        private void EnsureSlashVisible()
+        {
+            int vis = Mathf.Min(_slashItems.Count, SlashRows);
+            if (_slashSel < _slashScroll) _slashScroll = _slashSel;
+            else if (_slashSel >= _slashScroll + vis) _slashScroll = _slashSel - vis + 1;
+        }
+
+        // Insert the selected command with a trailing space, so the popup dismisses
+        // and the caret is ready for arguments.
+        private void AcceptSlash()
+        {
+            if (!_slashOpen || _slashItems.Count == 0) { CloseSlash(); return; }
+            string name = _slashItems[Mathf.Clamp(_slashSel, 0, _slashItems.Count - 1)];
+            _native.AgentviewInputComplete(Vid, (uint)_slashPrefixLen, name + " ");
+            CloseSlash();
+            RenderView();
+            Repaint();
+        }
 
         private static string Cap(string s) =>
             string.IsNullOrEmpty(s) ? s : char.ToUpperInvariant(s[0]) + s.Substring(1);

@@ -692,6 +692,26 @@ impl InputBox {
         })
     }
 
+    /// If the caret sits within a leading `/command` token on the first line, return
+    /// that token *including* the slash (e.g. `/co`, or `/` right after typing the
+    /// slash). Unlike [`word_prefix`], this doesn't stop at hyphens, so it matches
+    /// slash-command names like `code-review`. Empty when not in that context (no
+    /// leading slash, caret past the first whitespace, or not on line 0).
+    pub fn slash_prefix(&self) -> String {
+        let cur = self.editor.cursor();
+        if cur.line != 0 {
+            return String::new();
+        }
+        self.editor.with_buffer(|b| {
+            let line = b.lines.get(0).map(|l| l.text()).unwrap_or("");
+            let before = &line[..cur.index.min(line.len())];
+            if !before.starts_with('/') || before[1..].contains(char::is_whitespace) {
+                return String::new();
+            }
+            before.to_string()
+        })
+    }
+
     /// Accept a completion: delete `prefix_len` characters before the caret and
     /// insert `text` in their place (one undoable change).
     pub fn complete(&mut self, prefix_len: usize, text: &str) {
@@ -1905,6 +1925,7 @@ pub(crate) fn popup_label_attrs(label: &str, kind: char, base: &Attrs, dark: boo
         'N' => "namespace",
         'C' => "constant",
         'K' => "keyword",
+        'S' => "keyword", // slash-command "skill" — accent the user's own commands
         _ => "",
     };
     if name_end > 0 && !capture.is_empty() {

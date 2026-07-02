@@ -12,7 +12,7 @@ use std::cell::RefCell;
 
 use glyphon::{
     Attrs, Buffer, Color, Family, Metrics, Resolution, Shaping, TextArea, TextAtlas, TextBounds,
-    TextRenderer, Viewport,
+    TextRenderer, Viewport, Wrap,
 };
 
 use crate::gpu::{self};
@@ -61,6 +61,9 @@ enum Content<'a> {
         lines: Vec<&'a str>,
         selected: usize,
         scroll: usize,
+        /// Show the 1-char kind tag as a letter badge before each label (editor code
+        /// completion). `false` renders the label alone (slash-command completion).
+        badges: bool,
     },
     Sig {
         line: &'a str,
@@ -453,7 +456,20 @@ pub fn show(items: &str, selected: usize, scroll: usize, x: f32, y: f32, scale: 
         return;
     }
     let lines: Vec<&str> = items.split('\n').collect();
-    show_slot(0, false, Content::List { lines, selected, scroll }, x, y, scale, clear, text_color, dark);
+    show_slot(0, false, Content::List { lines, selected, scroll, badges: true }, x, y, scale, clear, text_color, dark);
+}
+
+/// Like [`show`], but anchored ABOVE the caret (the list's bottom sits just above
+/// `y`, the caret TOP in points). For a composer docked at the window bottom, where
+/// a below-anchored list would fall off-screen.
+#[allow(clippy::too_many_arguments)]
+pub fn show_above(items: &str, selected: usize, scroll: usize, x: f32, y: f32, scale: f32, clear: wgpu::Color, text_color: Color, dark: bool) {
+    if items.is_empty() {
+        hide();
+        return;
+    }
+    let lines: Vec<&str> = items.split('\n').collect();
+    show_slot(0, true, Content::List { lines, selected, scroll, badges: false }, x, y, scale, clear, text_color, dark);
 }
 
 /// Hide the completion list.
@@ -530,7 +546,7 @@ fn kind_badge(kind: char) -> char {
     match kind {
         'X' => 'M',
         'A' | 'L' => 'v',
-        ' ' => '·',
+        ' ' | 'S' => '·', // 'S' = slash-command "skill"; a bullet, not a letter badge
         k => k,
     }
 }
@@ -573,9 +589,12 @@ fn render(
     let base = Attrs::new().family(Family::Monospace).color(text_color);
     let mut buf = Buffer::new(&mut fs, Metrics::new(font_size, row_h));
     buf.set_size(&mut fs, Some(w - pad), Some(h));
+    // Never wrap: one row per item. A wrapped label would spill onto a second visual
+    // line the row/selection math doesn't account for; clip at the panel edge instead.
+    buf.set_wrap(&mut fs, Wrap::None);
 
     match content {
-        Content::List { lines, selected, scroll } => {
+        Content::List { lines, selected, scroll, badges } => {
             // The host owns the scroll offset: the wheel scrolls the view without
             // moving the selection, and arrows move the selection. Clamp defensively.
             let total = lines.len();
@@ -609,8 +628,10 @@ fn render(
                 if i > 0 {
                     joined.push('\n');
                 }
-                joined.push(kind_badge(kind));
-                joined.push(' ');
+                if badges {
+                    joined.push(kind_badge(kind));
+                    joined.push(' ');
+                }
                 joined.push_str(chars.as_str());
             }
             buf.set_text(&mut fs, &joined, &base, Shaping::Advanced, None);

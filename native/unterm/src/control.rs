@@ -532,6 +532,10 @@ struct State {
     /// UI can build its picker from what the account is actually entitled to — Fable,
     /// 1M variants, etc. — instead of a hardcoded list. Empty until initialized.
     models: Mutex<String>,
+    /// The slash-command roster the engine advertises in its `initialize` reply (a
+    /// JSON array of `{name, description, argumentHint, aliases?}`), captured verbatim
+    /// so the composer can offer `/` completion. Empty until initialized.
+    commands: Mutex<String>,
 }
 
 impl State {
@@ -725,6 +729,7 @@ impl Driver {
             permission_mode: Mutex::new("default".to_string()),
             model: Mutex::new(String::new()),
             models: Mutex::new(String::new()),
+            commands: Mutex::new(String::new()),
         });
 
         // Declare our in-process MCP server so the engine routes its calls to us.
@@ -923,6 +928,11 @@ impl Driver {
     /// the engine is ready). Each entry: `{value, displayName, description, ...}`.
     pub fn models(&self) -> String {
         self.state.models.lock_recover().clone()
+    }
+    /// The slash-command roster from the `initialize` reply (JSON array string; empty
+    /// until ready). Each entry: `{name, description, argumentHint, aliases?}`.
+    pub fn commands(&self) -> String {
+        self.state.commands.lock_recover().clone()
     }
 
     /// Number of prompts waiting in the follow-up queue.
@@ -1221,6 +1231,11 @@ fn handle_message(state: &Arc<State>, v: Value) {
                 let models = &resp["response"]["models"];
                 if models.is_array() {
                     *state.models.lock_recover() = models.to_string();
+                }
+                // Same for the slash-command roster — used for `/` completion.
+                let commands = &resp["response"]["commands"];
+                if commands.is_array() {
+                    *state.commands.lock_recover() = commands.to_string();
                 }
                 // Apply settings chosen before the engine was ready (persisted
                 // mode/model the host pushed onto a not-yet-initialized session).

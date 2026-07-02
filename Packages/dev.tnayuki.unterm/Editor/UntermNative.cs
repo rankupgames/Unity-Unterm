@@ -156,6 +156,8 @@ namespace Unterm.Editor
         private FormatRelativeFn _formatRelative;
         private AvStrFn _avSetPermissionMode; private AvBufFn _avPermissionMode;
         private AvStrFn _avSetModel; private AvBufFn _avModel; private AvBufFn _avModels;
+        private AvBufFn _avCommands; private AvBufFn _avInputSlashPrefix; private EdCompleteFn _avInputComplete;
+        private PopupShowFn _popupShowAbove;
         private AvUintGetFn _avQueueLen; private AvUintSetFn _avCancelQueued;
         private AvDownFn _avPanelDown; private AvDragFn _avPanelDrag; private AvScrollHFn _avPanelScrollH; private AvScrollHFn _avPanelScrollV;
         private AvVoidFn _avPanelSelectAll; private AvVoidFn _avPanelSelectClear; private AvBoolFn _avPanelHasSelection; private AvBufFn _avPanelSelectedText;
@@ -278,6 +280,9 @@ namespace Unterm.Editor
             _avSetModel = Sym<AvStrFn>("unterm_agentview_set_model");
             _avModel = Sym<AvBufFn>("unterm_agentview_model");
             _avModels = Sym<AvBufFn>("unterm_agentview_models");
+            _avCommands = Sym<AvBufFn>("unterm_agentview_commands");
+            _avInputSlashPrefix = Sym<AvBufFn>("unterm_agentview_input_slash_prefix");
+            _avInputComplete = Sym<EdCompleteFn>("unterm_agentview_input_complete");
             _avQueueLen = Sym<AvUintGetFn>("unterm_agentview_queue_len");
             _avCancelQueued = Sym<AvUintSetFn>("unterm_agentview_cancel_queued");
             _avSessionId = Sym<AvBufFn>("unterm_agentview_session_id");
@@ -355,6 +360,7 @@ namespace Unterm.Editor
             // Native completion popup is macOS-only for now; bind optionally so the
             // Windows bundle (no such symbols yet) still loads.
             _popupShow = SymOpt<PopupShowFn>("unterm_popup_show");
+            _popupShowAbove = SymOpt<PopupShowFn>("unterm_popup_show_above");
             _popupHide = SymOpt<PopupHideFn>("unterm_popup_hide");
             _popupSigShow = SymOpt<PopupSigShowFn>("unterm_popup_sig_show");
             _popupSigHide = SymOpt<PopupSigHideFn>("unterm_popup_sig_hide");
@@ -493,6 +499,9 @@ namespace Unterm.Editor
         /// Active model: the user's choice, else the resolved model from init.
         public string AgentviewModel(ulong id) { var p = _avModel(id, out UIntPtr len); return Utf8(p, len); }
         public string AgentviewModels(ulong id) { var p = _avModels(id, out UIntPtr len); return Utf8(p, len); }
+        public string AgentviewCommands(ulong id) { var p = _avCommands(id, out UIntPtr len); return Utf8(p, len); }
+        public string AgentviewInputSlashPrefix(ulong id) { var p = _avInputSlashPrefix(id, out UIntPtr len); return Utf8(p, len); }
+        public void AgentviewInputComplete(ulong id, uint prefixLen, string text) { if (id != 0) _avInputComplete(id, prefixLen, text ?? ""); }
         /// Number of follow-up prompts waiting in the queue.
         public uint AgentviewQueueLen(ulong id) => id != 0 ? _avQueueLen(id) : 0u;
         /// Cancel the index-th queued follow-up prompt (0-based).
@@ -594,6 +603,8 @@ namespace Unterm.Editor
         public bool PopupAvailable => _popupShow != null;
         public void PopupShow(string items, uint selected, uint scroll, float x, float y, float scale, Color bg, Color32 fg, bool dark) =>
             _popupShow?.Invoke(items ?? "", selected, scroll, x, y, scale, bg.r, bg.g, bg.b, fg.r, fg.g, fg.b, (byte)(dark ? 1 : 0));
+        public void PopupShowAbove(string items, uint selected, uint scroll, float x, float y, float scale, Color bg, Color32 fg, bool dark) =>
+            _popupShowAbove?.Invoke(items ?? "", selected, scroll, x, y, scale, bg.r, bg.g, bg.b, fg.r, fg.g, fg.b, (byte)(dark ? 1 : 0));
         public void PopupHide() => _popupHide?.Invoke();
         public bool PopupSigAvailable => _popupSigShow != null;
         public void PopupSigShow(string line, uint activeStart, uint activeLen, float x, float y, float scale, Color bg, Color32 fg, bool dark) =>
@@ -630,6 +641,7 @@ namespace Unterm.Editor
             _avInterrupt = null; _avSessionId = null; _avTitle = null; _avTakeHostCommand = null; _avPanelTokenAt = null;
             _avPanelStampAt = null; _formatRelative = null;
             _avSetPermissionMode = null; _avPermissionMode = null; _avSetModel = null; _avModel = null;
+            _avModels = null; _avCommands = null; _avInputSlashPrefix = null; _avInputComplete = null; _popupShowAbove = null;
             _avQueueLen = null; _avCancelQueued = null;
             _avPanelDown = null; _avPanelDrag = null; _avPanelScrollH = null; _avPanelScrollV = null;
             _avPanelSelectAll = null; _avPanelSelectClear = null; _avPanelHasSelection = null; _avPanelSelectedText = null;
