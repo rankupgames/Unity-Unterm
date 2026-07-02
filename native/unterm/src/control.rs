@@ -414,7 +414,14 @@ struct QOption {
 /// UI can snapshot it from another thread without coordination.
 struct State {
     writer: Mutex<ChildStdin>,
-    transcript: Mutex<String>,
+    /// Bumped whenever [`Conv`] changes. The UI polls this (cheap) instead of
+    /// cloning + comparing the full transcript every editor tick, and the
+    /// serialized text is rebuilt lazily in [`Driver::transcript`] — so a
+    /// streaming turn no longer re-serializes the whole conversation on every
+    /// delta, only when the UI actually reads it.
+    transcript_serial: AtomicU64,
+    /// Memoized serialization of `conv`, tagged with the serial it was built at.
+    transcript_cache: Mutex<(u64, String)>,
     status: Mutex<String>,
     pending: Mutex<Option<Pending>>,
     session_id: Mutex<String>,
@@ -448,9 +455,11 @@ impl State {
             .and_then(|_| w.flush());
     }
 
+    /// Mark the transcript changed. Serialization is deferred to
+    /// [`Driver::transcript`], so a burst of streaming deltas costs one bump each
+    /// rather than a full re-serialization of the conversation.
     fn sync_transcript(&self) {
-        let c = self.conv.lock_recover();
-        *self.transcript.lock_recover() = c.serialize();
+        self.transcript_serial.fetch_add(1, Ordering::Release);
     }
 
     fn set_status(&self, s: &str) {
@@ -603,10 +612,12 @@ impl Driver {
         }
         let init_id = format!("unterm-init-{}", NEXT_REQ.fetch_add(1, Ordering::Relaxed));
 
-        let transcript = seed.serialize();
         let state = Arc::new(State {
             writer: Mutex::new(writer),
-            transcript: Mutex::new(transcript),
+            // Serial 1 with a serial-0 cache: the first transcript() read
+            // serializes the seed lazily.
+            transcript_serial: AtomicU64::new(1),
+            transcript_cache: Mutex::new((0, String::new())),
             status: Mutex::new("initializing".to_string()),
             pending: Mutex::new(None),
             session_id: Mutex::new(String::new()),
@@ -825,8 +836,24 @@ impl Driver {
         self.state.sync_transcript();
     }
 
+    /// The serialized transcript, rebuilt from [`Conv`] only when it changed
+    /// since the last read (memoized against [`State::transcript_serial`]).
     pub fn transcript(&self) -> String {
-        self.state.transcript.lock_recover().clone()
+        let serial = self.state.transcript_serial.load(Ordering::Acquire);
+        let mut cache = self.state.transcript_cache.lock_recover();
+        if cache.0 != serial {
+            // A bump between the load and the serialize below just means the next
+            // read re-serializes once more — never a stale result.
+            cache.1 = self.state.conv.lock_recover().serialize();
+            cache.0 = serial;
+        }
+        cache.1.clone()
+    }
+
+    /// Monotonic change counter for the transcript — lets the UI detect "did
+    /// anything change?" per tick without cloning the text (see `AgentView::poll`).
+    pub fn transcript_serial(&self) -> u64 {
+        self.state.transcript_serial.load(Ordering::Acquire)
     }
 
 

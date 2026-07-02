@@ -34,8 +34,10 @@ pub struct AgentView {
     /// Start time, for the indicator's dot animation.
     started: Instant,
 
-    // Change detection for `poll()`.
-    last_transcript: String,
+    // Change detection for `poll()`. The transcript is tracked by the driver's
+    // change serial, not a cloned copy — poll runs every editor tick, and cloning
+    // the full transcript each tick just to compare it scaled with session length.
+    last_transcript_serial: u64,
     last_status: String,
     last_pending_title: String,
     last_dot: usize,
@@ -94,7 +96,7 @@ impl AgentView {
             pending_ids: Vec::new(),
             pending_host_cmd: None,
             started: Instant::now(),
-            last_transcript: String::new(),
+            last_transcript_serial: 0,
             last_status: String::new(),
             last_pending_title: String::new(),
             last_dot: usize::MAX,
@@ -133,9 +135,9 @@ impl AgentView {
     /// Pull driver state, update the buttons/indicator, and report what changed.
     pub fn poll(&mut self) -> u32 {
         let mut flags = 0u32;
-        let (status, transcript, pending) = match &self.driver {
-            Some(d) => (d.status(), d.transcript(), d.pending_view()),
-            None => (self.status(), String::new(), None),
+        let (status, transcript_serial, pending) = match &self.driver {
+            Some(d) => (d.status(), d.transcript_serial(), d.pending_view()),
+            None => (self.status(), 0, None),
         };
 
         // Permission buttons follow the pending prompt's options.
@@ -153,8 +155,8 @@ impl AgentView {
             flags |= FLAG_DIRTY;
         }
 
-        if transcript != self.last_transcript {
-            self.last_transcript = transcript;
+        if transcript_serial != self.last_transcript_serial {
+            self.last_transcript_serial = transcript_serial;
             flags |= FLAG_DIRTY;
         }
         if status != self.last_status {

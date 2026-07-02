@@ -5,6 +5,7 @@
 ### Changed
 
 - The terminal renderer now reuses its per-frame cell scratch buffer instead of reallocating it every repaint, cutting steady allocator churn while a busy shell is streaming output.
+- The Claude Code agent transcript is now serialized lazily and change-tracked by a counter: polling no longer clones the full transcript every editor tick, and a streaming turn no longer re-serializes the whole conversation on every delta — both used to scale with session length.
 
 ### Fixed
 
