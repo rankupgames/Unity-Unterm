@@ -6,6 +6,7 @@
 
 - The terminal renderer now reuses its per-frame cell scratch buffer instead of reallocating it every repaint, cutting steady allocator churn while a busy shell is streaming output.
 - The Claude Code agent transcript is now serialized lazily and change-tracked by a counter: polling no longer clones the full transcript every editor tick, and a streaming turn no longer re-serializes the whole conversation on every delta — both used to scale with session length.
+- The agent panel now skips its full Markdown re-parse and re-layout when nothing it renders from has changed, instead of rebuilding the entire transcript's layout on every repaint request (focus changes, ignored keys, and other no-op events included). When something does change, each block's shaped layout is cached and reused, so a streaming reply re-lays-out only the block that grew instead of the whole conversation.
 
 ### Fixed
 

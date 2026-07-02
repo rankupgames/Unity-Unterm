@@ -21,7 +21,7 @@ use glyphon::{
 use crate::markdown;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
@@ -52,7 +52,7 @@ fn code_family() -> Family<'static> {
     Family::Monospace
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Role {
     User,
     Agent,
@@ -98,7 +98,7 @@ struct Block {
 /// Non-agent blocks produce one; an agent block is expanded into several (one per
 /// Markdown element).
 struct Measured {
-    buffer: Buffer,
+    buffer: Arc<Buffer>,
     text: String, // visible text (must match the buffer, for selection)
     height: f32,
     card_alpha: f32, // 0 = no card background
@@ -120,7 +120,7 @@ struct TableMeasured {
 }
 
 struct TableCell {
-    buffer: Buffer,
+    buffer: Arc<Buffer>,
     text: String,
     dx: f32,
     dy: f32,
@@ -129,7 +129,7 @@ struct TableCell {
 /// A laid-out block kept after render() so mouse hit-testing/selection works
 /// between frames. `tx/ty` is the text top-left in physical px.
 struct LaidBlock {
-    buffer: Buffer,
+    buffer: Arc<Buffer>,
     text: String,
     tx: f32,
     ty: f32,
@@ -256,6 +256,23 @@ pub struct PanelRenderer {
     /// can actually open.
     root: std::path::PathBuf,
 
+    /// Hash of every input the last fully-submitted frame was laid out from
+    /// (text, geometry, scroll, selection, fold state, fonts, colors, target).
+    /// `render` returns early on a match: the target is single-buffered and
+    /// persistent, so the texture still shows exactly this frame — re-parsing
+    /// the whole transcript's Markdown for input events that changed nothing
+    /// (focus churn, keys the panel ignores) was pure waste. `None` until a
+    /// frame completes (early error-outs keep it `None` so the next call redraws).
+    last_frame_key: Option<u64>,
+
+    /// Shaped layout per transcript block from the last frame, keyed by a hash of
+    /// the block's content + every measure input (width, scale, fonts, colors,
+    /// fold state). During a streaming turn only the tail block's text changes,
+    /// so every other block reuses its shaped buffers from here instead of
+    /// re-parsing its Markdown and re-shaping — the measure pass scales with the
+    /// delta, not the transcript length. Buffers are `Arc`-shared with `laid`.
+    block_cache: HashMap<u64, Vec<Measured>>,
+
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
@@ -308,6 +325,8 @@ impl PanelRenderer {
             hscroll: HashMap::new(),
             expanded: HashMap::new(),
             tool_rects: Vec::new(),
+            last_frame_key: None,
+            block_cache: HashMap::new(),
             swash_cache,
             viewport,
             atlas,
@@ -697,12 +716,59 @@ impl PanelRenderer {
         self.shared = shared;
     }
 
+    /// Hash of everything the layout below reads, so an unchanged frame can skip
+    /// the full Markdown re-parse + shape + submit. The one input deliberately
+    /// left out is the filesystem probe behind the clickable-path underlines —
+    /// a path that springs into existence shows underlined on the next content
+    /// change instead of forcing a relayout per repaint.
+    fn frame_key(&self, text: &str) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut h);
+        (self.width, self.height).hash(&mut h);
+        self.scale.to_bits().hash(&mut h);
+        self.scroll.to_bits().hash(&mut h);
+        self.plan_scroll.to_bits().hash(&mut h);
+        (self.clear.r.to_bits(), self.clear.g.to_bits(), self.clear.b.to_bits(), self.clear.a.to_bits())
+            .hash(&mut h);
+        self.text_color.0.hash(&mut h);
+        self.font_family.hash(&mut h);
+        self.font_bold.hash(&mut h);
+        self.font_italic.hash(&mut h);
+        self.font_bold_italic.hash(&mut h);
+        self.buttons.hash(&mut h);
+        self.root.hash(&mut h);
+        if let Some((a, b)) = self.sel {
+            (a.block, a.offset, b.block, b.offset).hash(&mut h);
+        }
+        // The fold / horizontal-scroll maps iterate in arbitrary order; sort for a
+        // stable hash.
+        let mut expanded: Vec<(u64, bool)> = self.expanded.iter().map(|(k, v)| (*k, *v)).collect();
+        expanded.sort_unstable();
+        expanded.hash(&mut h);
+        let mut hscroll: Vec<(u64, u32)> =
+            self.hscroll.iter().map(|(k, v)| (*k, v.to_bits())).collect();
+        hscroll.sort_unstable();
+        hscroll.hash(&mut h);
+        // The render target's identity: resize and the Windows placeholder→shared
+        // upgrade both hand out a new texture that must be drawn to.
+        (self.shared.raw_texture() as usize).hash(&mut h);
+        h.finish()
+    }
+
     /// Render the role-tagged transcript as stacked, optionally-carded blocks
     /// (Zed-like). Newest content is bottom-anchored so it stays in view.
     pub fn render(&mut self, text: &str) {
         // Self-heal a placeholder surface once Unity's device is available (no-op on
-        // macOS, and after the first real frame).
+        // macOS, and after the first real frame). Before the skip check, so the
+        // upgraded target (a new texture, hence a new key) always gets a real frame.
         self.shared.begin_frame();
+        let key = self.frame_key(text);
+        if self.last_frame_key == Some(key) {
+            // Single-buffered persistent target: the texture still shows exactly
+            // this frame, so re-laying out the whole transcript would be a no-op.
+            return;
+        }
+        self.last_frame_key = None; // invalid until this frame fully submits
         let g = gpu::gpu();
         let mut fs = gpu::lock_font_system();
 
@@ -749,43 +815,79 @@ impl PanelRenderer {
 
         // First pass: shape + measure each block. Non-agent blocks render plain;
         // agent blocks are parsed as Markdown and expanded into styled items.
-        let mut measured: Vec<Measured> = Vec::new();
+        //
+        // Per-block cache: a block whose content and measure inputs are unchanged
+        // since the last frame reuses its shaped items from `block_cache` — during
+        // a streaming turn only the tail block misses, so the pass costs the delta,
+        // not the whole transcript. The measure inputs shared by every block are
+        // folded into one hash the per-block key builds on.
+        let measure_params = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            content_w.to_bits().hash(&mut h);
+            s.to_bits().hash(&mut h);
+            self.font_family.hash(&mut h);
+            self.font_bold.hash(&mut h);
+            self.font_italic.hash(&mut h);
+            self.font_bold_italic.hash(&mut h);
+            self.text_color.0.hash(&mut h);
+            (lum < 0.5).hash(&mut h);
+            h.finish()
+        };
+        let mut old_cache = std::mem::take(&mut self.block_cache);
+        // (key, shaped items) per block, in transcript order.
+        let mut groups: Vec<(u64, Vec<Measured>)> = Vec::with_capacity(blocks.len());
         // Tool fold keys seen this frame, to GC `expanded` for tools that scrolled
         // out of the (capped) transcript reconstruction.
         let mut live_tool_keys: Vec<u64> = Vec::new();
-        // The contiguous run of measured items produced by the plan block, if any.
+        // The contiguous run of measured items produced by the plan block, if any
+        // (indices into the flattened item list).
         let mut plan_range: Option<(usize, usize)> = None;
+        let mut flat_len = 0usize;
         // The plan box reserves `card_pad` of inner padding on each side, so its
         // Markdown is measured (wrapped) at a narrower width.
         let plan_w = (content_w - card_pad * 2.0).max(1.0);
         for b in &blocks {
-            if (b.role == Role::Agent || b.role == Role::Plan) && !b.text.is_empty() {
-                let start = measured.len();
+            // Fold state first: it's a measure input (an unfolded tool shapes its
+            // detail), so it participates in the cache key.
+            let has_detail = !b.tool_detail.is_empty();
+            let fold_key =
+                (b.role == Role::Tool).then(|| b.tool_id.as_deref().filter(|_| has_detail).map(hash_str)).flatten();
+            if let Some(k) = fold_key {
+                live_tool_keys.push(k);
+            }
+            let unfolded = fold_key
+                .map(|k| self.expanded.get(&k).copied().unwrap_or(false))
+                .unwrap_or(false);
+
+            let key = {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                measure_params.hash(&mut h);
+                b.role.hash(&mut h);
+                b.text.hash(&mut h);
+                b.tool_id.hash(&mut h);
+                b.tool_preview.hash(&mut h);
+                b.tool_detail.hash(&mut h);
+                unfolded.hash(&mut h);
+                h.finish()
+            };
+
+            let items = if let Some(items) = old_cache.remove(&key) {
+                items // unchanged since last frame: reuse the shaped buffers
+            } else if (b.role == Role::Agent || b.role == Role::Plan) && !b.text.is_empty() {
                 let w = if b.role == Role::Plan { plan_w } else { content_w };
-                for mb in markdown::parse(&b.text) {
-                    if let Some(m) = build_md(
-                        &mut fs, &mb, w, font_size, line_height, card_pad, faces, text_color,
-                        lum < 0.5,
-                    ) {
-                        measured.push(m);
-                    }
-                }
-                if b.role == Role::Plan {
-                    plan_range = Some((start, measured.len()));
-                }
+                markdown::parse(&b.text)
+                    .iter()
+                    .filter_map(|mb| {
+                        build_md(
+                            &mut fs, mb, w, font_size, line_height, card_pad, faces, text_color,
+                            lum < 0.5,
+                        )
+                    })
+                    .collect()
             } else if b.role == Role::Tool {
                 // A tool block folds: the header line always shows; the detail (full
                 // input + result output) shows only when unfolded. The whole thing is
                 // one card that grows, keyed for click-to-toggle by the toolUseId.
-                let has_detail = !b.tool_detail.is_empty();
-                // Only a tool with content to reveal is foldable/clickable.
-                let key = b.tool_id.as_deref().filter(|_| has_detail).map(hash_str);
-                if let Some(k) = key {
-                    live_tool_keys.push(k);
-                }
-                let unfolded = key
-                    .map(|k| self.expanded.get(&k).copied().unwrap_or(false))
-                    .unwrap_or(false);
                 // The fold state shows as a disclosure triangle pinned to the header's
                 // right edge (drawn in the placement pass), so reserve space for it and
                 // keep it out of the flowed text.
@@ -804,16 +906,26 @@ impl PanelRenderer {
                         font_size, line_height, card_pad, faces.regular, text_color,
                     );
                 }
-                m.tool_key = key;
+                m.tool_key = fold_key;
                 m.header_h = header_h;
-                measured.push(m);
+                vec![m]
             } else {
-                measured.push(build_plain(
+                vec![build_plain(
                     &mut fs, b, content_w, font_size, line_height, card_pad, faces.regular, text_color,
-                ));
+                )]
+            };
+
+            if b.role == Role::Plan {
+                plan_range = Some((flat_len, flat_len + items.len()));
             }
+            flat_len += items.len();
+            groups.push((key, items));
         }
+        drop(old_cache); // anything not reused this frame is stale
         self.expanded.retain(|k, _| live_tool_keys.contains(k));
+        // The placement pass below reads the items in flattened transcript order;
+        // `groups` itself is kept intact to become the next frame's cache.
+        let measured: Vec<&Measured> = groups.iter().flat_map(|(_, v)| v).collect();
 
         // Measure the action-button labels and pack them into rows that fit the
         // width, so a narrow panel wraps the buttons instead of overflowing; the
@@ -920,7 +1032,7 @@ impl PanelRenderer {
         self.plan_rect = None;
         let mut plan_box_top = 0.0_f32; // y of the plan box's top (set at its first item)
         let mut plan_y = 0.0_f32; // running y inside the plan box (offset by plan_scroll)
-        for (idx, m) in measured.into_iter().enumerate() {
+        for (idx, m) in measured.iter().copied().enumerate() {
             // Plan items: lay out inside a capped box that scrolls internally, so a
             // long plan can't push the rest off-screen. Clip every item to the box
             // and offset by `plan_scroll`; the box advances `y` by its capped height.
@@ -946,16 +1058,16 @@ impl PanelRenderer {
                     let bottom = (plan_box_top + plan_box_h - card_pad).min(self.height as f32);
                     let clip = [pad + card_pad, top, plan_w, (bottom - top).max(0.0)];
                     let tx = pad + card_pad + m.indent;
-                    if let Some(tbl) = m.table {
-                        for c in tbl.cells {
+                    if let Some(tbl) = &m.table {
+                        for c in &tbl.cells {
                             self.laid.push(LaidBlock {
-                                buffer: c.buffer, text: c.text, tx: tx + c.dx, ty: plan_y + c.dy,
+                                buffer: c.buffer.clone(), text: c.text.clone(), tx: tx + c.dx, ty: plan_y + c.dy,
                                 hscroll: 0.0, clip: Some(clip), code_key: None, max_hscroll: 0.0,
                             });
                         }
                     } else {
                         self.laid.push(LaidBlock {
-                            buffer: m.buffer, text: m.text, tx, ty: plan_y,
+                            buffer: m.buffer.clone(), text: m.text.clone(), tx, ty: plan_y,
                             hscroll: 0.0, clip: Some(clip), code_key: None, max_hscroll: 0.0,
                         });
                     }
@@ -979,7 +1091,7 @@ impl PanelRenderer {
             }
             // A table draws its own grid + header background, then places each
             // cell buffer as its own laid block (so selection still works).
-            if let Some(tbl) = m.table {
+            if let Some(tbl) = &m.table {
                 let x0 = pad + m.indent;
                 quads.push(Quad {
                     x: x0,
@@ -999,10 +1111,10 @@ impl PanelRenderer {
                         radius: 0.0,
                     });
                 }
-                for c in tbl.cells {
+                for c in &tbl.cells {
                     self.laid.push(LaidBlock {
-                        buffer: c.buffer,
-                        text: c.text,
+                        buffer: c.buffer.clone(),
+                        text: c.text.clone(),
                         tx: x0 + c.dx,
                         ty: y + c.dy,
                         hscroll: 0.0,
@@ -1075,8 +1187,8 @@ impl PanelRenderer {
                 (0.0, None, None, 0.0)
             };
             self.laid.push(LaidBlock {
-                buffer: m.buffer,
-                text: m.text,
+                buffer: m.buffer.clone(),
+                text: m.text.clone(),
                 tx,
                 ty,
                 hscroll,
@@ -1229,6 +1341,9 @@ impl PanelRenderer {
         // texture (the zero-copy path has no readback to force completion).
         self.shared.present();
         self.atlas.trim();
+        self.last_frame_key = Some(key);
+        // Keep this frame's shaped blocks for the next one (see `block_cache`).
+        self.block_cache = groups.into_iter().collect();
     }
 
 }
@@ -1349,7 +1464,7 @@ fn build_plain(
     };
     let height = if carded { text_h + card_pad * 2.0 } else { text_h };
     Measured {
-        buffer,
+        buffer: Arc::new(buffer),
         text: b.text.clone(),
         height,
         card_alpha,
@@ -1411,7 +1526,7 @@ fn build_tool(
     let text: String = texts.concat();
     let height = measure_height(&buffer) + card_pad * 2.0;
     Measured {
-        buffer,
+        buffer: Arc::new(buffer),
         text,
         height,
         card_alpha: 0.06,
@@ -1495,7 +1610,7 @@ fn build_md(
             let (buffer, text) =
                 shape_spans(fs, spans, content_w, font_size, line_height, false, text_color, faces);
             let height = measure_height(&buffer);
-            Some(Measured { buffer, text, height, card_alpha: 0.0, indent: 0.0, code: false, natural_w: 0.0, table: None, tool_key: None, header_h: 0.0 })
+            Some(Measured { buffer: Arc::new(buffer), text, height, card_alpha: 0.0, indent: 0.0, code: false, natural_w: 0.0, table: None, tool_key: None, header_h: 0.0 })
         }
         MB::Heading { level, spans } => {
             let scale = match level {
@@ -1515,7 +1630,7 @@ fn build_md(
                 faces,
             );
             let height = measure_height(&buffer);
-            Some(Measured { buffer, text, height, card_alpha: 0.0, indent: 0.0, code: false, natural_w: 0.0, table: None, tool_key: None, header_h: 0.0 })
+            Some(Measured { buffer: Arc::new(buffer), text, height, card_alpha: 0.0, indent: 0.0, code: false, natural_w: 0.0, table: None, tool_key: None, header_h: 0.0 })
         }
         MB::Code { text, lang, diff } => {
             // Code is rendered unwrapped and clipped to the card; the panel
@@ -1577,7 +1692,7 @@ fn build_md(
             let height = measure_height(&buf) + card_pad * 2.0;
             let natural_w = measure_width(&buf);
             Some(Measured {
-                buffer: buf,
+                buffer: Arc::new(buf),
                 text: text.clone(),
                 height,
                 card_alpha: 0.08,
@@ -1608,7 +1723,7 @@ fn build_md(
                 faces,
             );
             let height = measure_height(&buffer);
-            Some(Measured { buffer, text, height, card_alpha: 0.0, indent, code: false, natural_w: 0.0, table: None, tool_key: None, header_h: 0.0 })
+            Some(Measured { buffer: Arc::new(buffer), text, height, card_alpha: 0.0, indent, code: false, natural_w: 0.0, table: None, tool_key: None, header_h: 0.0 })
         }
         MB::Quote(spans) => {
             let indent = font_size;
@@ -1623,7 +1738,7 @@ fn build_md(
                 faces,
             );
             let height = measure_height(&buffer);
-            Some(Measured { buffer, text, height, card_alpha: 0.0, indent, code: false, natural_w: 0.0, table: None, tool_key: None, header_h: 0.0 })
+            Some(Measured { buffer: Arc::new(buffer), text, height, card_alpha: 0.0, indent, code: false, natural_w: 0.0, table: None, tool_key: None, header_h: 0.0 })
         }
         MB::Table { headers, rows } => {
             build_table(fs, headers, rows, content_w, font_size, line_height, faces, text_color)
@@ -1721,7 +1836,7 @@ fn build_table(
         let mut cx = border;
         for (i, (buf, text, _)) in cells_grid[r].drain(..).enumerate() {
             cells.push(TableCell {
-                buffer: buf,
+                buffer: Arc::new(buf),
                 text,
                 dx: cx + pad_x,
                 dy: cy,
@@ -1733,7 +1848,7 @@ fn build_table(
     lines.push([0.0, hy, total_w, border]); // bottom
 
     Some(Measured {
-        buffer: Buffer::new(fs, Metrics::new(font_size, line_height)),
+        buffer: Arc::new(Buffer::new(fs, Metrics::new(font_size, line_height))),
         text: String::new(),
         height: total_h,
         card_alpha: 0.0,
