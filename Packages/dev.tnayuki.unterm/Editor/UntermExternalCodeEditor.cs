@@ -78,8 +78,39 @@ namespace Unterm.Editor
                 return true;
             }
             if (!File.Exists(filePath)) return false;
+            // Only claim files we consider code/text. Scenes, prefabs, materials and
+            // other binary/asset opens Unity routes through here must fall through
+            // (return false) so Unity's own handler opens them — otherwise a scene
+            // double-click would land in the text editor.
+            if (!HandlesExtension(filePath)) return false;
             UntermCodeEditorWindow.OpenPath(filePath, line);
             return true;
+        }
+
+        // Decides which double-clicked assets Unterm claims: the extensions Unity
+        // treats as project code — its C# project-generation set plus whatever the
+        // user added under Project Settings &gt; Editor — together with the few text
+        // formats Unity's own VSCode/Rider packages force-add. Anything else — scenes,
+        // prefabs, materials, other assets — is declined so Unity opens it with its
+        // native handler. Shared with the transcript path-click flow in
+        // <see cref="UntermCodeEditorWindow.OpenFromAgent"/>.
+        internal static bool HandlesExtension(string filePath)
+        {
+            string ext = Path.GetExtension(filePath).TrimStart('.').ToLowerInvariant();
+            if (ext.Length == 0) return false;
+            if (ext == "json" || ext == "asmdef" || ext == "asmref" || ext == "log")
+                return true;
+            return HasExtension(EditorSettings.projectGenerationBuiltinExtensions, ext)
+                || HasExtension(EditorSettings.projectGenerationUserExtensions, ext);
+        }
+
+        private static bool HasExtension(string[] extensions, string ext)
+        {
+            if (extensions == null) return false;
+            foreach (var e in extensions)
+                if (string.Equals(e, ext, System.StringComparison.OrdinalIgnoreCase))
+                    return true;
+            return false;
         }
     }
 }

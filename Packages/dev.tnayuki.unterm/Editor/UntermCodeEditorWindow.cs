@@ -179,17 +179,6 @@ namespace Unterm.Editor
             return !string.IsNullOrEmpty(path) && File.Exists(path) && !Directory.Exists(path);
         }
 
-        // Text files we'll open (don't open binary assets in a text editor).
-        private static readonly string[] s_textExt =
-        {
-            ".cs", ".txt", ".json", ".xml", ".uxml", ".uss", ".shader", ".cginc",
-            ".hlsl", ".compute", ".md", ".markdown", ".yml", ".yaml", ".js", ".ts",
-            ".py", ".rs", ".toml", ".csv", ".log", ".asmdef", ".asmref", ".cs.txt",
-        };
-
-        private static bool IsEditable(string path) =>
-            Array.IndexOf(s_textExt, Path.GetExtension(path).ToLowerInvariant()) >= 0;
-
         // Open a file path clicked in the Claude Code transcript. `root` resolves a
         // project-relative path (the agent often reports paths relative to its
         // working directory). Routes through the configured script editor: when Unterm
@@ -200,7 +189,8 @@ namespace Unterm.Editor
             if (string.IsNullOrEmpty(path)) return;
             if (!Path.IsPathRooted(path) && !string.IsNullOrEmpty(root))
                 path = Path.Combine(root, path);
-            if (Directory.Exists(path) || !File.Exists(path) || !IsEditable(path)) return;
+            if (Directory.Exists(path) || !File.Exists(path) ||
+                !UntermExternalCodeEditor.HandlesExtension(path)) return;
             CodeEditor.Editor.CurrentCodeEditor?.OpenProject(Path.GetFullPath(path), -1, -1);
         }
 
