@@ -1584,11 +1584,23 @@ namespace Unterm.Editor
         // is the picker's known (ai-)title for it; set it on the tab right away,
         // since resuming reuses an id we already hold so the per-tick title sync
         // (gated on the id changing) wouldn't fire.
+        // Leaving the current conversation destroys its `claude` process. If a turn
+        // is mid-flight, that stops it — confirm first so it isn't lost silently.
+        private bool ConfirmLeaveRunningTurn()
+        {
+            if (_native == null || _viewId == 0 || !_native.AgentviewThinking(Vid)) return true;
+            return EditorUtility.DisplayDialog(
+                "Turn in progress",
+                "This conversation is still running. Leaving it will stop the current turn. Continue?",
+                "Leave", "Stay");
+        }
+
         private void SwitchTo(string id, string title = null)
         {
             if (_native == null || string.IsNullOrEmpty(id)) return;
             // Selecting the session already open just leaves the browser.
             if (id == _claudeSessionId) { ExitBrowse(); return; }
+            if (!ConfirmLeaveRunningTurn()) return;
             // The destroyed view takes its browser with it; the fresh one below
             // starts on the transcript. (Opening an archived session unarchives
             // it natively — see the browser's resume path.)
@@ -1609,6 +1621,7 @@ namespace Unterm.Editor
         private void NewSession()
         {
             if (_native == null) return;
+            if (!ConfirmLeaveRunningTurn()) return;
             _browsing = false; // the destroyed view takes its browser with it
             if (_viewId != 0) _native.AgentviewDestroy(Vid);
             _claudeSessionId = "";
