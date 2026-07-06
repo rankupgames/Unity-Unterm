@@ -38,15 +38,19 @@ use std::num::NonZeroIsize;
 #[cfg(windows)]
 use windows::core::w;
 #[cfg(windows)]
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 #[cfg(windows)]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 #[cfg(windows)]
+use windows::Win32::System::Threading::GetCurrentProcessId;
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetLayeredWindowAttributes,
-    SetWindowPos, ShowWindow, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE,
-    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-    WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, EnumWindows, GetWindow, GetWindowLongPtrW,
+    GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, RegisterClassW,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetWindowPos, ShowWindow, GWL_EXSTYLE,
+    GW_OWNER, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE,
+    WM_LBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 const ROW: f32 = 18.0; // logical row height (scaled)
@@ -54,8 +58,8 @@ const PAD: f32 = 6.0;
 const MAX_ROWS: usize = 10; // visible rows; the list scrolls past this
 const GAP: f64 = 2.0; // points between the caret and an above-anchored panel
 
-/// What a panel draws: a selectable completion list, or a single signature line
-/// with one parameter highlighted.
+/// What a panel draws: a selectable completion list, a single signature line with
+/// one parameter highlighted, or a two-line notification card (title + subtitle).
 enum Content<'a> {
     List {
         lines: Vec<&'a str>,
@@ -70,7 +74,24 @@ enum Content<'a> {
         active: (usize, usize), // (char start, char len) of the active parameter
         accent: Color,
     },
+    Notify {
+        title: &'a str,
+        body: &'a str,
+        accent: Color,
+    },
 }
+
+/// Where a panel is placed on screen.
+enum Placement {
+    /// Anchored to the caret at screen point (`x`, `y`) in points (top-left origin);
+    /// `above` hangs it above the caret instead of below.
+    Caret { x: f32, y: f32, above: bool },
+    /// Top-right of the main screen's visible area — the OS-notification corner.
+    ScreenTopRight,
+}
+
+/// Margin (points/px) from the screen edge for a top-right notification.
+const NOTIFY_MARGIN: f64 = 14.0;
 
 struct Popup {
     #[cfg(target_os = "macos")]
@@ -94,30 +115,39 @@ struct Popup {
 }
 
 // The window handles are OS objects (!Send/!Sync) and the popups are only ever
-// touched on the main (UI) thread, so they live in thread-local storage. Two
-// slots: 0 = completion list, 1 = signature help.
+// touched on the main (UI) thread, so they live in thread-local storage. Three
+// slots: 0 = completion list, 1 = signature help, 2 = agent notification.
 thread_local! {
     static P_LIST: RefCell<Option<Popup>> = const { RefCell::new(None) };
     static P_SIG: RefCell<Option<Popup>> = const { RefCell::new(None) };
+    static P_NOTIFY: RefCell<Option<Popup>> = const { RefCell::new(None) };
 }
 
 fn with_slot<R>(slot: u8, f: impl FnOnce(&RefCell<Option<Popup>>) -> R) -> R {
-    if slot == 0 {
-        P_LIST.with(f)
-    } else {
-        P_SIG.with(f)
+    match slot {
+        0 => P_LIST.with(f),
+        1 => P_SIG.with(f),
+        _ => P_NOTIFY.with(f),
     }
 }
 
 // ------------------------------------------------------------------ macOS backend
 
 #[cfg(target_os = "macos")]
-fn create() -> Option<Popup> {
+fn create(notify: bool) -> Option<Popup> {
     let mtm = MainThreadMarker::new()?; // must be the main (AppKit) thread
     let g = gpu::gpu();
 
-    // A borderless, non-activating panel that floats above other windows.
-    let style = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
+    // A borderless panel that floats above other windows. The caret popups are
+    // NonactivatingPanels so they never steal the editor's key focus; the
+    // notification is a plain borderless panel so that CLICKING it brings the
+    // (background) editor to the front — a NonactivatingPanel would swallow that.
+    // It still can't become key (borderless), so showing it never steals focus.
+    let style = if notify {
+        NSWindowStyleMask::Borderless
+    } else {
+        NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel
+    };
     let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(200.0, 100.0));
     let alloc = NSPanel::alloc(mtm);
     let panel: Retained<NSPanel> = NSPanel::initWithContentRect_styleMask_backing_defer(
@@ -131,6 +161,15 @@ fn create() -> Option<Popup> {
     panel.setHasShadow(true);
     panel.setLevel(objc2_app_kit::NSPopUpMenuWindowLevel);
     panel.setHidesOnDeactivate(false);
+    if notify {
+        // Follow the user across Spaces (like a system notification) and show over
+        // other apps' full-screen windows, instead of staying pinned to the Space it
+        // was created on. NSWindowCollectionBehavior CanJoinAllSpaces | FullScreenAuxiliary.
+        let behavior: usize = (1 << 0) | (1 << 8);
+        unsafe {
+            let _: () = msg_send![&*panel, setCollectionBehavior: behavior];
+        }
+    }
     // Let mouse/scroll events pass through to the editor window beneath.
     panel.setIgnoresMouseEvents(true);
     unsafe {
@@ -174,12 +213,13 @@ fn create() -> Option<Popup> {
 
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
-fn show_inner(p: &mut Popup, above: bool, content: Content, x: f32, y: f32, scale: f32, clear: wgpu::Color, text_color: Color, dark: bool) {
+fn show_inner(p: &mut Popup, placement: Placement, content: Content, scale: f32, clear: wgpu::Color, text_color: Color, dark: bool) {
     let s = scale.max(0.5);
     let font_size = 14.0 * s;
     let row_h = ROW * s;
     let pad = PAD * s;
     let (wpx, hpx) = content_size(&content, font_size, row_h, pad);
+    let is_notify = matches!(placement, Placement::ScreenTopRight);
 
     // Disable implicit CALayer animations so the panel doesn't animate its size
     // when the content changes between keystrokes.
@@ -187,26 +227,41 @@ fn show_inner(p: &mut Popup, above: bool, content: Content, x: f32, y: f32, scal
     let _: () = unsafe { msg_send![txn, begin] };
     let _: () = unsafe { msg_send![txn, setDisableActions: true] };
 
-    // Position/size in POINTS FIRST. `x`/`y` are the caret's screen position in
-    // points, top-left origin (Unity's GUIToScreenPoint); AppKit windows use points
-    // with a bottom-left origin, so the y is flipped. A below-anchored panel hangs
-    // from the caret bottom; an above-anchored one sits with its bottom just above
-    // the caret top. Setting the layer's bounds makes CAMetalLayer recompute
-    // drawableSize from bounds×contentsScale, so configure() runs AFTERWARDS.
+    // Position/size in POINTS FIRST. AppKit windows use points with a bottom-left
+    // origin. For a caret anchor, `x`/`y` are the caret's screen position in points
+    // (top-left origin, from Unity's GUIToScreenPoint) so the y is flipped: a
+    // below-anchored panel hangs from the caret bottom, an above-anchored one sits
+    // with its bottom just above the caret top. A notification sits in the screen's
+    // top-right visible corner. Setting the layer's bounds makes CAMetalLayer
+    // recompute drawableSize from bounds×contentsScale, so configure() runs AFTER.
     if let Some(mtm) = MainThreadMarker::new() {
-        let screen_h = NSScreen::mainScreen(mtm)
-            .map(|sc| sc.frame().size.height)
-            .unwrap_or(0.0);
         let w_pts = wpx as f64 / s as f64;
         let h_pts = hpx as f64 / s as f64;
         p.panel.setContentSize(NSSize::new(w_pts, h_pts));
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w_pts, h_pts));
         let _: () = unsafe { msg_send![&*p.layer, setFrame: frame] };
-        let origin_x = x as f64;
-        let origin_y = if above {
-            screen_h - y as f64 + GAP
-        } else {
-            screen_h - y as f64 - h_pts
+        let (origin_x, origin_y) = match placement {
+            Placement::Caret { x, y, above } => {
+                let screen_h = NSScreen::mainScreen(mtm)
+                    .map(|sc| sc.frame().size.height)
+                    .unwrap_or(0.0);
+                let oy = if above {
+                    screen_h - y as f64 + GAP
+                } else {
+                    screen_h - y as f64 - h_pts
+                };
+                (x as f64, oy)
+            }
+            Placement::ScreenTopRight => {
+                let vf = NSScreen::mainScreen(mtm).map(|sc| sc.visibleFrame());
+                match vf {
+                    Some(vf) => (
+                        vf.origin.x + vf.size.width - w_pts - NOTIFY_MARGIN,
+                        vf.origin.y + vf.size.height - h_pts - NOTIFY_MARGIN,
+                    ),
+                    None => (0.0, 0.0),
+                }
+            }
         };
         p.panel.setFrameOrigin(NSPoint::new(origin_x, origin_y));
     }
@@ -220,6 +275,12 @@ fn show_inner(p: &mut Popup, above: bool, content: Content, x: f32, y: f32, scal
     let presented = render(p, content, font_size, row_h, pad, clear, text_color, dark);
     if presented {
         p.panel.setAlphaValue(1.0);
+        // While the notification is visible, let it take clicks so clicking it
+        // activates the (background) editor. Restored to click-through on hide, so
+        // it never eats clicks in the top-right corner while invisible.
+        if is_notify {
+            p.panel.setIgnoresMouseEvents(false);
+        }
     }
 
     let _: () = unsafe { msg_send![txn, commit] };
@@ -230,6 +291,9 @@ fn hide_slot(slot: u8) {
     with_slot(slot, |cell| {
         if let Some(p) = cell.borrow().as_ref() {
             p.panel.setAlphaValue(0.0);
+            if slot == 2 {
+                p.panel.setIgnoresMouseEvents(true);
+            }
         }
     });
 }
@@ -243,7 +307,66 @@ fn disable_on_error(p: &Popup) {
 
 #[cfg(windows)]
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    // Only the notification window receives clicks (the caret popups are
+    // WS_EX_TRANSPARENT). A click brings the editor's main window to the front —
+    // the counterpart to macOS activating the app when its window is clicked.
+    if msg == WM_LBUTTONUP {
+        if let Some(main) = unity_main_window() {
+            if IsIconic(main).as_bool() {
+                let _ = ShowWindow(main, SW_RESTORE);
+            }
+            let _ = SetForegroundWindow(main);
+        }
+        return LRESULT(0);
+    }
     DefWindowProcW(h, msg, wp, lp)
+}
+
+// EnumWindows accumulator: the largest visible, unowned, non-tool-window of our
+// own process — i.e. the Unity editor's main window (our popups are tool windows,
+// excluded), picked by area so it's never a small auxiliary window.
+#[cfg(windows)]
+struct MainWinSearch {
+    pid: u32,
+    best: Option<HWND>,
+    best_area: i64,
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn enum_main_window(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+    let search = &mut *(lparam.0 as *mut MainWinSearch);
+    let mut wpid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut wpid));
+    let owned = GetWindow(hwnd, GW_OWNER).map(|o| !o.0.is_null()).unwrap_or(false);
+    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+    let is_tool = ex & WS_EX_TOOLWINDOW.0 != 0;
+    if wpid == search.pid && !owned && !is_tool && IsWindowVisible(hwnd).as_bool() {
+        let mut rc = RECT::default();
+        if GetWindowRect(hwnd, &mut rc).is_ok() {
+            let area = (rc.right - rc.left) as i64 * (rc.bottom - rc.top) as i64;
+            if area > search.best_area {
+                search.best_area = area;
+                search.best = Some(hwnd);
+            }
+        }
+    }
+    true.into() // keep enumerating
+}
+
+#[cfg(windows)]
+fn unity_main_window() -> Option<HWND> {
+    let mut search = MainWinSearch {
+        pid: unsafe { GetCurrentProcessId() },
+        best: None,
+        best_area: 0,
+    };
+    let _ = unsafe {
+        EnumWindows(
+            Some(enum_main_window),
+            LPARAM(&mut search as *mut _ as isize),
+        )
+    };
+    search.best
 }
 
 #[cfg(windows)]
@@ -264,16 +387,25 @@ fn register_class(hinstance: HINSTANCE) {
 }
 
 #[cfg(windows)]
-fn create() -> Option<Popup> {
+fn create(notify: bool) -> Option<Popup> {
+    // Windows has no Spaces; the notification is a normal top-most window already.
     let g = gpu::gpu();
     unsafe {
         let hmod = GetModuleHandleW(None).ok()?;
         let hinstance = HINSTANCE(hmod.0);
         register_class(hinstance);
 
-        // A layered, no-activate, click-through, always-on-top popup with no frame.
+        // A layered, no-activate, always-on-top popup with no frame. The caret
+        // popups are click-through (WS_EX_TRANSPARENT); the notification is NOT, so
+        // it can take a click to bring the editor forward (handled in `wndproc`).
+        // It hides via SW_HIDE, so it only intercepts clicks while actually shown.
+        let ex = if notify {
+            WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST
+        } else {
+            WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_TRANSPARENT
+        };
         let hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_TRANSPARENT,
+            ex,
             w!("UntermPopupClass"),
             w!("UntermPopup"),
             WS_POPUP,
@@ -311,23 +443,46 @@ fn create() -> Option<Popup> {
 
 #[cfg(windows)]
 #[allow(clippy::too_many_arguments)]
-fn show_inner(p: &mut Popup, above: bool, content: Content, x: f32, y: f32, scale: f32, clear: wgpu::Color, text_color: Color, dark: bool) {
+fn show_inner(p: &mut Popup, placement: Placement, content: Content, scale: f32, clear: wgpu::Color, text_color: Color, dark: bool) {
     let s = scale.max(0.5);
     let font_size = 14.0 * s;
     let row_h = ROW * s;
     let pad = PAD * s;
     let (wpx, hpx) = content_size(&content, font_size, row_h, pad);
 
-    // `x`/`y` are the caret's screen position in points (Unity's GUIToScreenPoint,
-    // top-left origin); Win32 screen coordinates are physical pixels, so scale by
-    // pixels-per-point. The window is sized to the physical drawable. A below-
-    // anchored panel hangs from the caret bottom; an above-anchored one sits with
-    // its bottom just above the caret top.
-    let px = (x * s) as i32;
-    let py = if above {
-        (y * s) as i32 - hpx as i32 - GAP as i32
-    } else {
-        (y * s) as i32
+    // Win32 screen coordinates are physical pixels. For a caret anchor, `x`/`y` are
+    // the caret's screen position in points (Unity's GUIToScreenPoint, top-left
+    // origin), scaled by pixels-per-point: a below-anchored panel hangs from the
+    // caret bottom, an above-anchored one sits with its bottom just above the caret
+    // top. A notification sits in the top-right of the desktop work area (excluding
+    // the taskbar). The window is sized to the physical drawable.
+    let (px, py) = match placement {
+        Placement::Caret { x, y, above } => {
+            let px = (x * s) as i32;
+            let py = if above {
+                (y * s) as i32 - hpx as i32 - GAP as i32
+            } else {
+                (y * s) as i32
+            };
+            (px, py)
+        }
+        Placement::ScreenTopRight => {
+            let mut rc = windows::Win32::Foundation::RECT::default();
+            let ok = unsafe {
+                windows::Win32::UI::WindowsAndMessaging::SystemParametersInfoW(
+                    windows::Win32::UI::WindowsAndMessaging::SPI_GETWORKAREA,
+                    0,
+                    Some(&mut rc as *mut _ as *mut core::ffi::c_void),
+                    windows::Win32::UI::WindowsAndMessaging::SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+                )
+            };
+            let margin = NOTIFY_MARGIN as i32;
+            if ok.is_ok() {
+                (rc.right - wpx as i32 - margin, rc.top + margin)
+            } else {
+                (margin, margin)
+            }
+        }
     };
     unsafe {
         let _ = SetWindowPos(p.hwnd, Some(HWND_TOPMOST), px, py, wpx as i32, hpx as i32, SWP_NOACTIVATE);
@@ -456,7 +611,7 @@ pub fn show(items: &str, selected: usize, scroll: usize, x: f32, y: f32, scale: 
         return;
     }
     let lines: Vec<&str> = items.split('\n').collect();
-    show_slot(0, false, Content::List { lines, selected, scroll, badges: true }, x, y, scale, clear, text_color, dark);
+    show_slot(0, Placement::Caret { x, y, above: false }, Content::List { lines, selected, scroll, badges: true }, scale, clear, text_color, dark);
 }
 
 /// Like [`show`], but anchored ABOVE the caret (the list's bottom sits just above
@@ -469,7 +624,7 @@ pub fn show_above(items: &str, selected: usize, scroll: usize, x: f32, y: f32, s
         return;
     }
     let lines: Vec<&str> = items.split('\n').collect();
-    show_slot(0, true, Content::List { lines, selected, scroll, badges: false }, x, y, scale, clear, text_color, dark);
+    show_slot(0, Placement::Caret { x, y, above: true }, Content::List { lines, selected, scroll, badges: false }, scale, clear, text_color, dark);
 }
 
 /// Hide the completion list.
@@ -487,7 +642,7 @@ pub fn show_sig(line: &str, active_start: usize, active_len: usize, x: f32, y: f
         return;
     }
     let accent = if dark { Color::rgb(120, 170, 255) } else { Color::rgb(0, 90, 200) };
-    show_slot(1, true, Content::Sig { line, active: (active_start, active_len), accent }, x, y, scale, clear, text_color, dark);
+    show_slot(1, Placement::Caret { x, y, above: true }, Content::Sig { line, active: (active_start, active_len), accent }, scale, clear, text_color, dark);
 }
 
 /// Hide the signature-help hint.
@@ -495,19 +650,40 @@ pub fn hide_sig() {
     hide_slot(1);
 }
 
+/// Show/refresh the agent notification card (slot 2, top-right of the screen):
+/// `title` (the session) over `body` (why it wants you). Colours follow the
+/// editor theme via `dark`. Non-activating and top-most like the other panels.
+pub fn show_notify(title: &str, body: &str, scale: f32, dark: bool) {
+    if title.is_empty() && body.is_empty() {
+        hide_notify();
+        return;
+    }
+    let (clear, text_color, accent) = if dark {
+        (wgpu::Color { r: 0.13, g: 0.13, b: 0.15, a: 1.0 }, Color::rgb(232, 232, 238), Color::rgb(120, 170, 255))
+    } else {
+        (wgpu::Color { r: 0.97, g: 0.97, b: 0.98, a: 1.0 }, Color::rgb(28, 28, 34), Color::rgb(0, 100, 210))
+    };
+    show_slot(2, Placement::ScreenTopRight, Content::Notify { title, body, accent }, scale, clear, text_color, dark);
+}
+
+/// Hide the agent notification card.
+pub fn hide_notify() {
+    hide_slot(2);
+}
+
 #[allow(clippy::too_many_arguments)]
-fn show_slot(slot: u8, above: bool, content: Content, x: f32, y: f32, scale: f32, clear: wgpu::Color, text_color: Color, dark: bool) {
+fn show_slot(slot: u8, placement: Placement, content: Content, scale: f32, clear: wgpu::Color, text_color: Color, dark: bool) {
     with_slot(slot, |cell| {
         let mut guard = cell.borrow_mut();
         if guard.is_none() {
-            *guard = create();
+            *guard = create(slot == 2);
         }
         let Some(p) = guard.as_mut() else { return };
         // Catch wgpu validation errors instead of letting the default handler
         // abort() the whole Unity process; on error, disable this panel.
         let g = gpu::gpu();
         let scope = g.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        show_inner(p, above, content, x, y, scale, clear, text_color, dark);
+        show_inner(p, placement, content, scale, clear, text_color, dark);
         if let Some(err) = pollster::block_on(scope.pop()) {
             log::error!("unterm: native popup disabled after GPU error: {err}");
             disable_on_error(p);
@@ -530,6 +706,16 @@ fn content_size(content: &Content, font_size: f32, row_h: f32, pad: f32) -> (u32
             let chars = line.chars().count();
             let pw = ((chars as f32) * font_size * 0.6 + pad * 2.0).clamp(80.0, 1200.0);
             let ph = row_h + pad;
+            (pw.ceil() as u32, ph.ceil() as u32)
+        }
+        Content::Notify { title, body, .. } => {
+            let chars = title.chars().count().max(body.chars().count());
+            // Room for the left accent bar + text inset. Bounds scale with font_size
+            // (= 14×DPI scale), so on a Retina display — where these are PHYSICAL px,
+            // ~2× the logical width — the card isn't clamped too narrow and clipped.
+            let pw = ((chars as f32) * font_size * 0.62 + pad * 4.0)
+                .clamp(font_size * 17.0, font_size * 46.0);
+            let ph = row_h * 2.0 + pad * 2.0;
             (pw.ceil() as u32, ph.ceil() as u32)
         }
     }
@@ -584,6 +770,11 @@ fn render(
         ],
         radius: if cfg!(windows) { 0.0 } else { 4.0 * (font_size / 14.0) },
     });
+
+    // A notification insets its text past the left accent bar and pads the top so
+    // the two lines sit centred; the caret panels hug the top-left.
+    let is_notify = matches!(&content, Content::Notify { .. });
+    let (text_left, text_top) = if is_notify { (pad * 1.8, pad) } else { (pad * 0.5, pad * 0.5) };
 
     let mut fs = gpu::lock_font_system();
     let base = Attrs::new().family(Family::Monospace).color(text_color);
@@ -656,6 +847,31 @@ fn render(
                 }
             }
         }
+        Content::Notify { title, body, accent } => {
+            // A slim left accent bar so the card reads as a notification.
+            let bar_w = 3.5 * (font_size / 14.0);
+            quads.push(Quad {
+                x: 0.0,
+                y: 0.0,
+                w: bar_w,
+                h,
+                color: [
+                    accent.r() as f32 / 255.0,
+                    accent.g() as f32 / 255.0,
+                    accent.b() as f32 / 255.0,
+                    1.0,
+                ],
+                radius: 0.0,
+            });
+            // Title in the primary text colour, subtitle a touch softer on the second
+            // line — but still high-contrast against the card so it stays readable.
+            let dim = if dark { Color::rgb(206, 206, 214) } else { Color::rgb(74, 74, 84) };
+            let joined = format!("{title}\n{body}");
+            buf.set_text(&mut fs, &joined, &base, Shaping::Advanced, None);
+            if let Some(bl) = buf.lines.get_mut(1) {
+                bl.set_attrs_list(glyphon::AttrsList::new(&base.clone().color(dim)));
+            }
+        }
     }
     buf.shape_until_scroll(&mut fs, false);
 
@@ -671,8 +887,8 @@ fn render(
             &p.viewport,
             [TextArea {
                 buffer: &buf,
-                left: pad * 0.5,
-                top: pad * 0.5,
+                left: text_left,
+                top: text_top,
                 scale: 1.0,
                 bounds,
                 default_color: text_color,

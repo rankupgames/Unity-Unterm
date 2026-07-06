@@ -63,6 +63,13 @@ pub struct AgentView {
     last_status: String,
     last_pending_title: String,
     last_dot: usize,
+    /// Whether a permission/decision prompt was up last `poll` (edge-detect a new
+    /// one, which — unlike a finished turn — doesn't change the status string).
+    had_pending: bool,
+    /// One-shot "the session now needs the user" signal for the host to act on
+    /// (chime + notification): 0 none, 1 turn finished, 2 waiting on a decision.
+    /// Drained once by `take_attention`.
+    attention: u32,
     /// Claude Code's generated title (`ai-title`) for this session, read from its
     /// jsonl so the tab/header matches the session picker. Empty until known;
     /// refreshed (throttled) as the conversation grows.
@@ -147,6 +154,8 @@ impl AgentView {
             last_status: String::new(),
             last_pending_title: String::new(),
             last_dot: usize::MAX,
+            had_pending: false,
+            attention: 0,
             ai_title: String::new(),
             ai_title_read: 0,
             resume_id,
@@ -332,6 +341,18 @@ impl AgentView {
                 flags |= FLAG_DIRTY;
             }
         }
+        // Fire a one-shot attention signal when the session starts needing the
+        // user: a finished turn (thinking→ready), or a freshly raised decision
+        // prompt — which keeps the status at "thinking", so it needs its own edge.
+        // The host chimes / notifies on it when the window is in the background.
+        // Checked before `last_status` is updated below (it reads the prior value).
+        let now_pending = pending.is_some();
+        if self.last_status == "thinking" && status == "ready" {
+            self.attention = 1;
+        } else if now_pending && !self.had_pending {
+            self.attention = 2;
+        }
+        self.had_pending = now_pending;
         if status != self.last_status {
             self.last_status = status.clone();
             flags |= FLAG_DIRTY;
@@ -349,6 +370,12 @@ impl AgentView {
             }
         }
         flags
+    }
+
+    /// Drain the one-shot attention signal (see the `attention` field): 0 none,
+    /// 1 turn finished, 2 waiting on a decision. Consume-once.
+    pub fn take_attention(&mut self) -> u32 {
+        std::mem::replace(&mut self.attention, 0)
     }
 
     /// Compose the panel text: transcript + pending note + animated indicator.

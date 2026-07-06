@@ -37,6 +37,8 @@ mod quads;
 mod renderer;
 mod sessions;
 mod shell;
+#[cfg(any(target_os = "macos", windows))]
+mod sound;
 mod surface;
 mod term;
 mod unity;
@@ -1242,6 +1244,25 @@ pub extern "C" fn unterm_agentview_thinking(id: u64) -> bool {
     matches!(lock_views().get(&id), Some(v) if v.is_thinking())
 }
 
+/// Drain the one-shot "needs the user" signal: 0 none, 1 turn finished, 2 waiting
+/// on a permission/decision. Consume-once — the host polls it each tick and, when
+/// non-zero and the editor is backgrounded, chimes + notifies.
+#[no_mangle]
+pub extern "C" fn unterm_agentview_take_attention(id: u64) -> u32 {
+    with_view(id, 0, |v| v.take_attention())
+}
+
+/// Play the bundled "agent done" chime. The host calls this when a turn finishes
+/// while the window is in the background (it owns focus/visibility); no-op on
+/// platforms without an audio backend.
+#[no_mangle]
+pub extern "C" fn unterm_play_agent_done() {
+    ffi_guard((), || {
+        #[cfg(any(target_os = "macos", windows))]
+        sound::play_agent_done();
+    });
+}
+
 /// Selected transcript text. Writes the byte length.
 ///
 /// # Safety
@@ -1971,6 +1992,28 @@ pub extern "C" fn unterm_popup_sig_show(
 #[no_mangle]
 pub extern "C" fn unterm_popup_sig_hide() {
     popup::hide_sig();
+}
+
+/// Show the agent notification card (top-right of the screen): `title` (the
+/// session) over `body`. `scale` is pixels-per-point; `dark` picks the theme.
+/// The host calls this when a turn finishes / a permission is raised while the
+/// editor is backgrounded, and `unterm_notify_hide` once it's foregrounded again.
+///
+/// # Safety
+/// `title` and `body` must be valid C strings or null.
+#[cfg(any(target_os = "macos", windows))]
+#[no_mangle]
+pub unsafe extern "C" fn unterm_notify_show(title: *const c_char, body: *const c_char, scale: f32, dark: u8) {
+    let title = cstr(title);
+    let body = cstr(body);
+    popup::show_notify(&title, &body, scale, dark != 0);
+}
+
+/// Hide the agent notification card.
+#[cfg(any(target_os = "macos", windows))]
+#[no_mangle]
+pub extern "C" fn unterm_notify_hide() {
+    popup::hide_notify();
 }
 
 /// Accept a completion: delete `prefix_len` characters before the caret and insert

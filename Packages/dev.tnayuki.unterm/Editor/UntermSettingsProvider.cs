@@ -40,7 +40,7 @@ namespace Unterm.Editor
                 keywords = new HashSet<string>
                 {
                     "unterm", "claude", "claude code", "agent", "terminal", "download",
-                    "code editor", "undo", "history",
+                    "code editor", "undo", "history", "sound", "notify", "notification", "chime",
                 },
             };
         }
@@ -97,6 +97,18 @@ namespace Unterm.Editor
                 curLimit);
             if (nextLimit != curLimit)
                 UntermCodeEditorPrefs.UndoLimit = nextLimit;
+
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Agent", EditorStyles.boldLabel);
+            bool notify = UntermAgentPrefs.NotifySoundEnabled;
+            bool nextNotify = EditorGUILayout.Toggle(
+                new GUIContent("Notify when idle",
+                    "Play a chime and show an OS notification when the agent finishes a turn " +
+                    "or needs a permission — but only while the Unity Editor is in the " +
+                    "background, so you're only interrupted when you're away."),
+                notify);
+            if (nextNotify != notify)
+                UntermAgentPrefs.NotifySoundEnabled = nextNotify;
         }
 
         private static void DrawAction()

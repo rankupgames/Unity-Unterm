@@ -7,6 +7,22 @@ using UnityEngine;
 namespace Unterm.Editor
 {
     /// <summary>
+    /// User preferences for the agent panel (persisted in <see cref="EditorPrefs"/>).
+    /// </summary>
+    internal static class UntermAgentPrefs
+    {
+        private const string NotifySoundKey = "Unterm.Agent.NotifySound";
+
+        /// Chime + OS notification when a turn finishes or a permission is raised
+        /// while the Editor is backgrounded. On by default.
+        public static bool NotifySoundEnabled
+        {
+            get => EditorPrefs.GetBool(NotifySoundKey, true);
+            set => EditorPrefs.SetBool(NotifySoundKey, value);
+        }
+    }
+
+    /// <summary>
     /// The Claude Code agent panel. A single native "AgentView" object (see the
     /// `agentview` module) owns the agent session, the transcript panel, and the
     /// input composer; this <see cref="EditorWindow"/> is a thin host that only
@@ -39,6 +55,21 @@ namespace Unterm.Editor
         private bool _prevComposing;
         private bool _composeJustEnded;
         private bool _refocus;
+        // The (global, single-slot) notification card's live state. Static because the
+        // card is one screen-level window shared by every agent window.
+        private static bool s_cardUp;
+        private static string s_cardTitle;
+        private static string s_cardBody;
+        private static float s_cardScale;
+        private static bool s_cardDark;
+        private static double s_cardShownAt;
+        // Keep re-rendering the card for this long after it's raised: the window is
+        // ordered in while the editor is backgrounded, so the compositor can report
+        // the very first frame occluded and the reveal is skipped — repainting a few
+        // frames replaces it with a presented one. Also the minimum time it stays up
+        // once the editor is foregrounded again, so a quick return still shows it.
+        private const double NotifyRepaintFor = 0.7;
+        private const double NotifyMinShow = 2.5;
         private GUIStyle _imeStyle;
         private GUIStyle _imeHidden; // transparent style so the IME field stays at the caret unseen
         private Texture2D _imeBgTex;
@@ -250,6 +281,49 @@ namespace Unterm.Editor
             bool dirty = (f & 1) != 0;
             if (dirty) { RenderView(measureInput: false); Repaint(); }
             else if ((f & 2) != 0) Repaint();
+
+            // The session started needing the user (turn finished, or it's waiting
+            // on a permission/decision). Chime + show a notification card top-right —
+            // but only while the Unity Editor is in the background: when it's the
+            // active app the user is already here and will see it, so stay silent and
+            // dismiss any card a background turn raised. Each window drains its own
+            // signal, so the card names the session that raised it.
+            uint attn = _native.AgentviewTakeAttention(Vid);
+            bool appActive = UnityEditorInternal.InternalEditorUtility.isApplicationActive;
+            if (attn != 0 && UntermAgentPrefs.NotifySoundEnabled && !appActive)
+            {
+                _native.PlayAgentDone();
+                string title = titleContent != null && !string.IsNullOrEmpty(titleContent.text)
+                    ? titleContent.text : "Claude Code";
+                // Name the project so it's clear which editor/session it's from — a
+                // single-slot card can't coordinate across Unity processes, so each
+                // card self-identifies instead of trying to stack.
+                string status = attn == 2 ? "Waiting for your response" : "Finished responding";
+                string project = System.IO.Path.GetFileName(ProjectRoot);
+                s_cardTitle = title;
+                s_cardBody = string.IsNullOrEmpty(project) ? status : project + " · " + status;
+                s_cardScale = EditorGUIUtility.pixelsPerPoint;
+                s_cardDark = EditorGUIUtility.isProSkin;
+                s_cardUp = true;
+                s_cardShownAt = EditorApplication.timeSinceStartup;
+                _native.NotifyShow(s_cardTitle, s_cardBody, s_cardScale, s_cardDark);
+            }
+            else if (s_cardUp)
+            {
+                double age = EditorApplication.timeSinceStartup - s_cardShownAt;
+                if (appActive && age >= NotifyMinShow)
+                {
+                    _native.NotifyHide();
+                    s_cardUp = false;
+                }
+                else if (!appActive && age < NotifyRepaintFor)
+                {
+                    // Repaint the freshly-raised card so a first frame reported
+                    // occluded (window just ordered in while backgrounded) is
+                    // replaced by a presented one — otherwise it stays invisible.
+                    _native.NotifyShow(s_cardTitle, s_cardBody, s_cardScale, s_cardDark);
+                }
+            }
 
             // A built-in command the agent panel can't run over stream-json — it
             // needs a real TTY (/login's OAuth/browser flow). Launch it in an

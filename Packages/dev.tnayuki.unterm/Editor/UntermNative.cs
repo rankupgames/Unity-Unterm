@@ -139,6 +139,9 @@ namespace Unterm.Editor
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void PopupHideFn();
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void PopupSigShowFn([MarshalAs(UnmanagedType.LPUTF8Str)] string line, uint activeStart, uint activeLen, float x, float y, float scale, float br, float bg, float bb, byte fr, byte fg, byte fb, byte dark);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void PopupSigHideFn();
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void PlayAgentDoneFn();
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void NotifyShowFn([MarshalAs(UnmanagedType.LPUTF8Str)] string title, [MarshalAs(UnmanagedType.LPUTF8Str)] string body, float scale, byte dark);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void NotifyHideFn();
 
         private IntPtr _handle;
 
@@ -173,6 +176,10 @@ namespace Unterm.Editor
         private AvDownFn _avPanelDown; private AvDragFn _avPanelDrag; private AvScrollHFn _avPanelScrollH; private AvScrollHFn _avPanelScrollV;
         private AvVoidFn _avPanelSelectAll; private AvVoidFn _avPanelSelectClear; private AvBoolFn _avPanelHasSelection; private AvBufFn _avPanelSelectedText;
         private AvBoolFn _avThinking;
+        private AvPollFn _avTakeAttention;
+        private PlayAgentDoneFn _playAgentDone;
+        private NotifyShowFn _notifyShow;
+        private NotifyHideFn _notifyHide;
         private AvInputDownFn _avInputDown; private AvDragFn _avInputDrag; private AvInputKeyFn _avInputKey; private SetFocusFn _avSetFocus;
         private AvStrFn _avInputInsert; private AvStrFn _avInputSetPreedit; private AvVoidFn _avInputUndo; private AvVoidFn _avInputRedo; private AvVoidFn _avInputSelectAll;
         private AvBufFn _avInputCopy; private AvBufFn _avInputCut; private AvBufFn _avInputText;
@@ -318,6 +325,10 @@ namespace Unterm.Editor
             _avPanelSelectClear = Sym<AvVoidFn>("unterm_agentview_panel_select_clear");
             _avPanelHasSelection = Sym<AvBoolFn>("unterm_agentview_panel_has_selection");
             _avThinking = Sym<AvBoolFn>("unterm_agentview_thinking");
+            _avTakeAttention = Sym<AvPollFn>("unterm_agentview_take_attention");
+            _playAgentDone = Sym<PlayAgentDoneFn>("unterm_play_agent_done");
+            _notifyShow = Sym<NotifyShowFn>("unterm_notify_show");
+            _notifyHide = Sym<NotifyHideFn>("unterm_notify_hide");
             _avPanelSelectedText = Sym<AvBufFn>("unterm_agentview_panel_selected_text");
             _avInputDown = Sym<AvInputDownFn>("unterm_agentview_input_down");
             _avInputDrag = Sym<AvDragFn>("unterm_agentview_input_drag");
@@ -576,6 +587,14 @@ namespace Unterm.Editor
         public void AgentviewPanelSelectClear(ulong id) => _avPanelSelectClear(id);
         public bool AgentviewPanelHasSelection(ulong id) => _avPanelHasSelection(id);
         public bool AgentviewThinking(ulong id) => _avThinking != null && _avThinking(id);
+        /// Drain the one-shot attention signal: 0 none, 1 turn done, 2 needs a decision.
+        public uint AgentviewTakeAttention(ulong id) => _avTakeAttention != null ? _avTakeAttention(id) : 0;
+        /// Play the bundled "agent done" chime (host gates on app-active/settings).
+        public void PlayAgentDone() { if (_playAgentDone != null) _playAgentDone(); }
+        /// Show the agent notification card, top-right of the screen (host gates as above).
+        public void NotifyShow(string title, string body, float scale, bool dark) { if (_notifyShow != null) _notifyShow(title, body, scale, (byte)(dark ? 1 : 0)); }
+        /// Hide the agent notification card (once the editor is foregrounded).
+        public void NotifyHide() { if (_notifyHide != null) _notifyHide(); }
         public string AgentviewPanelSelectedText(ulong id) { var s = _avPanelSelectedText(id, out UIntPtr len); return Utf8(s, len); }
         /// Input mouse-down. kind: 0 click, 2 double, 3 triple. Returns 1 if the
         /// Send/Stop button was hit (action done; do NOT start a drag).
@@ -700,6 +719,10 @@ namespace Unterm.Editor
             _avPanelDown = null; _avPanelDrag = null; _avPanelScrollH = null; _avPanelScrollV = null;
             _avPanelSelectAll = null; _avPanelSelectClear = null; _avPanelHasSelection = null; _avPanelSelectedText = null;
             _avThinking = null;
+            _avTakeAttention = null;
+            _playAgentDone = null;
+            _notifyShow = null;
+            _notifyHide = null;
             _avInputDown = null; _avInputDrag = null; _avInputKey = null; _avSetFocus = null;
             _avInputInsert = null; _avInputSetPreedit = null; _avInputUndo = null; _avInputRedo = null; _avInputSelectAll = null;
             _avInputCopy = null; _avInputCut = null; _avInputText = null;

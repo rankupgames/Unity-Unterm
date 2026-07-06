@@ -109,6 +109,8 @@ windows = { version = "0.62", features = [
     # Native popup window: a layered, no-activate, click-through top-level HWND that
     # wgpu renders into (the counterpart to the macOS NSPanel popup).
     "Win32_Graphics_Gdi",
+    # Play the embedded "agent done" WAV from memory (PlaySoundW + SND_MEMORY).
+    "Win32_Media_Audio",
     "Win32_System_LibraryLoader",
     # Probe whether a `claude` pid from the session registry is still alive.
     "Win32_System_Threading",
