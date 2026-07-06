@@ -514,18 +514,18 @@ namespace Unterm.Editor
 
             bool repaint = false;
 
-            string title = _native.Title(Tid);
-            _alive = _native.IsAlive(Tid);
-            string want = string.IsNullOrEmpty(title) ? "Terminal" : title;
-            if (!_alive) want += " (exited)";
-            if (titleContent.text != want)
-            {
-                titleContent = new GUIContent(want);
-                repaint = true;
-            }
-
             if (_native.Dirty(Tid) || _tex == null)
             {
+                // Title / liveness changes always arrive with the dirty flag (their
+                // native events set it), so they're synced here rather than
+                // marshaling a fresh title string every idle tick just to compare.
+                string title = _native.Title(Tid);
+                _alive = _native.IsAlive(Tid);
+                string want = string.IsNullOrEmpty(title) ? "Terminal" : title;
+                if (!_alive) want += " (exited)";
+                if (titleContent.text != want)
+                    titleContent = new GUIContent(want);
+
                 // _tex == null means the shared texture isn't ready yet (Windows:
                 // Unity's D3D device wasn't captured when this terminal was built,
                 // e.g. a window restored at editor startup). Keep re-rendering so

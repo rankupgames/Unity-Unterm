@@ -79,11 +79,15 @@ impl EventListener for EventProxy {
                 if let Ok(mut g) = self.shared.title.lock() {
                     *g = t;
                 }
+                // A title-only OSC damages no cells, so flag it ourselves: the
+                // host reads the title on dirty ticks instead of every tick.
+                self.shared.dirty.store(true, Ordering::Relaxed);
             }
             Event::ResetTitle => {
                 if let Ok(mut g) = self.shared.title.lock() {
                     g.clear();
                 }
+                self.shared.dirty.store(true, Ordering::Relaxed);
             }
             Event::ChildExit(_) | Event::Exit => {
                 self.shared.child_exited.store(true, Ordering::Relaxed);

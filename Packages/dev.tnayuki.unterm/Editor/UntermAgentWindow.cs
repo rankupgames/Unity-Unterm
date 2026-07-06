@@ -327,26 +327,38 @@ namespace Unterm.Editor
 
             // A built-in command the agent panel can't run over stream-json — it
             // needs a real TTY (/login's OAuth/browser flow). Launch it in an
-            // interactive terminal; refocusing this window then reconnects.
-            string hostCmd = _native.AgentviewTakeHostCommand(Vid);
-            if (!string.IsNullOrEmpty(hostCmd)) RunHostCommand(hostCmd);
-
-            // Keep the mode dropdown in sync with the engine: approving ExitPlanMode
-            // switches the permission mode native-side, so mirror it back here.
-            string nativeMode = _native.AgentviewPermissionMode(Vid);
-            if (!string.IsNullOrEmpty(nativeMode) && nativeMode != _permissionMode)
+            // interactive terminal; refocusing this window then reconnects. Gated
+            // on the poll bit so the string only marshals when one is pending.
+            if ((f & 4) != 0)
             {
-                _permissionMode = nativeMode;
-                Repaint();
+                string hostCmd = _native.AgentviewTakeHostCommand(Vid);
+                if (!string.IsNullOrEmpty(hostCmd)) RunHostCommand(hostCmd);
             }
 
-            // Record the Claude session id once established. The transcripts are
-            // Claude Code's own storage; the picker lists them directly, and "open
-            // elsewhere" greying comes from Claude Code's session registry (which
-            // includes this window's own `claude` process), not a local set.
-            string sid = _native.AgentviewSessionId(Vid);
-            if (!string.IsNullOrEmpty(sid) && sid != _claudeSessionId)
-                _claudeSessionId = sid;
+            // The poll reports permission-mode / session-id changes as a flag bit,
+            // so the strings are only marshaled on ticks they actually changed
+            // (they used to allocate two fresh strings every idle tick).
+            if ((f & 8) != 0)
+            {
+                // Keep the mode dropdown in sync with the engine: approving
+                // ExitPlanMode switches the permission mode native-side, so mirror
+                // it back here. (At attach the flow is the reverse —
+                // ApplyAgentSettings pushes this window's persisted mode down.)
+                string nativeMode = _native.AgentviewPermissionMode(Vid);
+                if (!string.IsNullOrEmpty(nativeMode) && nativeMode != _permissionMode)
+                {
+                    _permissionMode = nativeMode;
+                    Repaint();
+                }
+
+                // Record the Claude session id once established. The transcripts are
+                // Claude Code's own storage; the picker lists them directly, and "open
+                // elsewhere" greying comes from Claude Code's session registry (which
+                // includes this window's own `claude` process), not a local set.
+                string sid = _native.AgentviewSessionId(Vid);
+                if (!string.IsNullOrEmpty(sid) && sid != _claudeSessionId)
+                    _claudeSessionId = sid;
+            }
 
             // Keep the tab title following the conversation's live (ai-)title — the
             // native side regenerates it as the chat grows, so gating this on the id

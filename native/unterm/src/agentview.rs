@@ -18,6 +18,8 @@ use crate::panel::PanelRenderer;
 /// `poll()` result flags.
 pub const FLAG_DIRTY: u32 = 1; // something changed; host should render + repaint
 pub const FLAG_ANIMATING: u32 = 2; // an indicator is animating; keep repainting
+pub const FLAG_HOST_CMD: u32 = 4; // a host command is pending; drain take_host_command
+pub const FLAG_META: u32 = 8; // permission mode / session id changed; re-read them
 
 pub struct AgentView {
     driver: Option<Driver>,
@@ -66,6 +68,10 @@ pub struct AgentView {
     /// Whether a permission/decision prompt was up last `poll` (edge-detect a new
     /// one, which — unlike a finished turn — doesn't change the status string).
     had_pending: bool,
+    /// Last permission mode / session id reported via `FLAG_META`, so the host
+    /// only marshals those strings across the FFI on ticks they changed.
+    last_mode: String,
+    last_sid: String,
     /// One-shot "the session now needs the user" signal for the host to act on
     /// (chime + notification): 0 none, 1 turn finished, 2 waiting on a decision.
     /// Drained once by `take_attention`.
@@ -155,6 +161,8 @@ impl AgentView {
             last_pending_title: String::new(),
             last_dot: usize::MAX,
             had_pending: false,
+            last_mode: String::new(),
+            last_sid: String::new(),
             attention: 0,
             ai_title: String::new(),
             ai_title_read: 0,
@@ -279,6 +287,10 @@ impl AgentView {
 
     /// Pull driver state, update the buttons/indicator, and report what changed.
     pub fn poll(&mut self) -> u32 {
+        // Reported in every mode — the session browser raises host commands too
+        // (opening a session from it routes through one). The host drains the
+        // string only on ticks this bit is set.
+        let host_flag = if self.pending_host_cmd.is_some() { FLAG_HOST_CMD } else { 0 };
         // Browser mode: the composer text is the live search query.
         if self.browsing {
             let query = self.input.text();
@@ -286,9 +298,9 @@ impl AgentView {
                 Some(b) => b.poll(query.trim()),
                 None => false,
             };
-            return if dirty { FLAG_DIRTY } else { 0 };
+            return host_flag | if dirty { FLAG_DIRTY } else { 0 };
         }
-        let mut flags = 0u32;
+        let mut flags = host_flag;
         let (status, transcript_serial, pending) = match &self.driver {
             Some(d) => (d.status(), d.transcript_serial(), d.pending_view()),
             None => (self.status(), 0, None),
@@ -330,6 +342,18 @@ impl AgentView {
                     flags |= FLAG_DIRTY;
                 }
             }
+        }
+        // Session id / permission mode are cheap to compare here, but marshaling
+        // them over the FFI allocates host-side — report changes as FLAG_META so
+        // the host re-reads them only then.
+        if sid != self.last_sid {
+            self.last_sid = sid;
+            flags |= FLAG_META;
+        }
+        let mode = self.driver.as_ref().map(|d| d.permission_mode()).unwrap_or_default();
+        if mode != self.last_mode {
+            self.last_mode = mode;
+            flags |= FLAG_META;
         }
         // While a now-relative time separator is visible, repaint on minute
         // ticks so its "12 min ago" label follows the clock; otherwise the

@@ -19,6 +19,7 @@
 - The native quad and mesh renderers (terminal cell backgrounds, cursor, selection, popup chrome and icons) now write each frame's vertices into one persistent, grow-only GPU buffer instead of allocating a fresh buffer — and discarding the old one — on every rendered frame.
 - The terminal now caches each row's shaped glyph layout across frames by content, so streaming output re-shapes only the rows that actually changed instead of every visible row on every frame (scrolled rows stay cache hits, as does a selection sweeping over them), and its glyph rasterization cache is persisted across frames instead of being rebuilt per frame.
 - The code editor no longer re-sends its size and theme to the native view — nor re-resolves Unity's internal background-color method via reflection — on every keystroke, drag, and scroll; both are pushed only when they actually change.
+- The Claude Code agent and terminal windows no longer allocate fresh managed strings on every idle editor tick: the agent's permission mode, session id, and pending host command are read only on ticks the native poll flags them changed, and the terminal's title only on dirty ticks (a title-only OSC change now marks the surface dirty so none are missed).
 
 ## [0.5.1] - 2026-07-04
 
