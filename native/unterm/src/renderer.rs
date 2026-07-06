@@ -20,7 +20,10 @@ use crate::surface::{IOSurfaceRef, SharedSurface};
 use crate::palette::{self, Theme};
 use crate::quads::{Quad, QuadRenderer};
 use crate::term::EventProxy;
+use std::collections::hash_map::{DefaultHasher, Entry};
+use std::collections::HashMap;
 use std::ffi::c_void;
+use std::hash::{Hash, Hasher};
 use unicode_width::UnicodeWidthChar;
 
 /// Padding inside the window edge, in points (scaled to physical px).
@@ -42,6 +45,37 @@ struct CellVis {
     spacer: bool,
     /// Whether `bg` differs from the default and needs a fill quad.
     bg_fill: bool,
+}
+
+/// One cached shaped row: its segments as (shaped Buffer, left px). `top` is
+/// applied at TextArea build time, so a row that merely scrolled vertically is
+/// still a cache hit. Blank rows cache an empty segment list.
+struct ShapedRow {
+    segs: Vec<(Buffer, f32)>,
+    last_used: u64,
+}
+
+/// Content hash of one row over exactly what shaping depends on: the params
+/// hash (font/scale) plus each cell's char, fg, and style flags. Backgrounds
+/// are excluded — they're drawn as quads, so a selection sweeping over a row
+/// (bg-only change) keeps its shaped text a cache hit.
+fn row_hash(params: u64, cells: &[CellVis]) -> u64 {
+    let mut h = DefaultHasher::new();
+    h.write_u64(params);
+    for cv in cells {
+        let flags = (cv.bold as u64)
+            | (cv.italic as u64) << 1
+            | (cv.wide as u64) << 2
+            | (cv.spacer as u64) << 3;
+        // char (21 bits) | fg | flags packed into one write per cell.
+        let packed = (cv.ch as u64) << 32
+            | (cv.fg[0] as u64) << 24
+            | (cv.fg[1] as u64) << 16
+            | (cv.fg[2] as u64) << 8
+            | flags;
+        h.write_u64(packed);
+    }
+    h.finish()
 }
 
 pub struct Renderer {
@@ -68,6 +102,18 @@ pub struct Renderer {
     /// busy terminal (dirty every frame) doesn't allocate cols×rows cells each
     /// render — only when the window grows.
     cells: Vec<CellVis>,
+
+    /// Shaped rows cached across frames by content hash (see [`row_hash`]), so
+    /// a streaming terminal re-shapes only the rows that actually changed.
+    row_cache: HashMap<u64, ShapedRow>,
+    /// Monotonic render counter stamping cache entries for eviction.
+    frame: u64,
+    /// Bumped whenever `set_font` loads new faces: fallback shaping can change
+    /// even under an unchanged family name, so it re-keys every cached row.
+    font_generation: u64,
+    /// Glyph rasterization cache, persisted so glyphs scrolling back into view
+    /// after an atlas trim don't re-rasterize from scratch.
+    swash: glyphon::SwashCache,
 
     viewport: Viewport,
     atlas: TextAtlas,
@@ -103,6 +149,10 @@ impl Renderer {
             cell_h: 16.0,
             metrics_dirty: true,
             cells: Vec::new(),
+            row_cache: HashMap::new(),
+            frame: 0,
+            font_generation: 0,
+            swash: glyphon::SwashCache::new(),
             viewport,
             atlas,
             text_renderer,
@@ -164,6 +214,7 @@ impl Renderer {
             Some(name) => self.font_family = Some(name),
             None => log::warn!("unterm: no addressable monospace family in {path}"),
         }
+        self.font_generation += 1; // new faces can change fallback shaping
         self.metrics_dirty = true;
     }
 
@@ -418,15 +469,48 @@ impl Renderer {
                 .style(if italic { Style::Italic } else { Style::Normal })
         };
 
-        // (buffer, left_px, top_px). Segments are anchored at their starting
-        // column rather than continuously shaped, so a wide (CJK) glyph whose
-        // advance differs from the cell width can't shift the rest of the row.
-        let mut row_buffers: Vec<(Buffer, f32, f32)> = Vec::new();
+        // Shaping is the dominant CPU cost while output streams, so shaped rows
+        // are cached across frames by content hash: only rows that actually
+        // changed re-shape, and a row that merely scrolled is a hit (its top is
+        // applied at TextArea build time, not baked into the Buffer). `params`
+        // folds in everything shaping depends on besides content, so a font or
+        // scale change re-keys every row and the old entries age out on their
+        // own — no explicit invalidation.
+        let params = {
+            let mut h = DefaultHasher::new();
+            font_px.to_bits().hash(&mut h);
+            line_h.to_bits().hash(&mut h);
+            self.scale.to_bits().hash(&mut h); // pad/left depend on it beyond font_px
+            font_family.hash(&mut h);
+            self.font_generation.hash(&mut h);
+            h.finish()
+        };
+        self.frame += 1;
+        let frame = self.frame;
+        self.row_cache.retain(|_, e| frame - e.last_used <= 2);
+        // One (hash, top) per visible row; duplicate rows share a cache entry.
+        let mut frame_rows: Vec<(u64, f32)> = Vec::with_capacity(rows);
+        // IME preedit overlay buffers, shaped fresh each frame (transient, tiny).
+        let mut overlay: Vec<(Buffer, f32, f32)> = Vec::new();
         {
             let mut fs = gpu::lock_font_system();
             for row in 0..rows {
                 let base = row * cols;
                 let top = pad + row as f32 * cell_h;
+                let hash = row_hash(params, &self.cells[base..base + cols]);
+                frame_rows.push((hash, top));
+                let entry = match self.row_cache.entry(hash) {
+                    Entry::Occupied(e) => {
+                        e.into_mut().last_used = frame;
+                        continue;
+                    }
+                    Entry::Vacant(v) => v,
+                };
+                // Miss: shape this row into (buffer, left_px) segments. Segments
+                // are anchored at their starting column rather than continuously
+                // shaped, so a wide (CJK) glyph whose advance differs from the
+                // cell width can't shift the rest of the row.
+                let mut segs: Vec<(Buffer, f32)> = Vec::new();
                 let mut col = 0usize;
                 while col < cols {
                     let cv = self.cells[base + col];
@@ -447,7 +531,7 @@ impl Renderer {
                                 None,
                             );
                             buf.shape_until_scroll(&mut fs, false);
-                            row_buffers.push((buf, pad + col as f32 * cell_w, top));
+                            segs.push((buf, pad + col as f32 * cell_w));
                         }
                         col += 1; // the trailing spacer cell is skipped above
                         continue;
@@ -494,8 +578,9 @@ impl Renderer {
                     });
                     buf.set_rich_text(&mut fs, spans, &Attrs::new().family(family), Shaping::Advanced, None);
                     buf.shape_until_scroll(&mut fs, false);
-                    row_buffers.push((buf, pad + seg_start as f32 * cell_w, top));
+                    segs.push((buf, pad + seg_start as f32 * cell_w));
                 }
+                entry.insert(ShapedRow { segs, last_used: frame });
             }
 
             // --- IME preedit overlay: the in-progress composition at the cursor. ---
@@ -559,7 +644,7 @@ impl Renderer {
                                     None,
                                 );
                                 buf.shape_until_scroll(&mut fs, false);
-                                row_buffers.push((buf, pad + c as f32 * cell_w, y));
+                                overlay.push((buf, pad + c as f32 * cell_w, y));
                                 c += cw;
                                 i += 1;
                             } else {
@@ -579,7 +664,7 @@ impl Renderer {
                                     buf.set_size(&mut fs, None, Some(line_h));
                                     buf.set_text(&mut fs, &run, &attrs_of(theme.fg, false, false), Shaping::Advanced, None);
                                     buf.shape_until_scroll(&mut fs, false);
-                                    row_buffers.push((buf, pad + run_col as f32 * cell_w, y));
+                                    overlay.push((buf, pad + run_col as f32 * cell_w, y));
                                 }
                             }
                         }
@@ -610,9 +695,23 @@ impl Renderer {
                 bottom: self.height as i32,
             };
             let default_color = Color::rgb(theme.fg[0], theme.fg[1], theme.fg[2]);
-            let areas: Vec<TextArea> = row_buffers
-                .iter()
-                .map(|(buf, left, top)| TextArea {
+            let row_cache = &self.row_cache;
+            let mut areas: Vec<TextArea> = Vec::new();
+            for &(hash, top) in &frame_rows {
+                for (buf, left) in &row_cache[&hash].segs {
+                    areas.push(TextArea {
+                        buffer: buf,
+                        left: *left,
+                        top,
+                        scale: 1.0,
+                        bounds,
+                        default_color,
+                        custom_glyphs: &[],
+                    });
+                }
+            }
+            for (buf, left, top) in &overlay {
+                areas.push(TextArea {
                     buffer: buf,
                     left: *left,
                     top: *top,
@@ -620,8 +719,8 @@ impl Renderer {
                     bounds,
                     default_color,
                     custom_glyphs: &[],
-                })
-                .collect();
+                });
+            }
 
             let g = gpu::gpu();
             self.viewport.update(
@@ -640,7 +739,7 @@ impl Renderer {
                 &mut self.atlas,
                 &self.viewport,
                 areas,
-                &mut glyphon::SwashCache::new(),
+                &mut self.swash,
             ) {
                 // A full glyph atlas (or a transient device error) makes this
                 // frame's text unlayoutable; skip it rather than panic — the next

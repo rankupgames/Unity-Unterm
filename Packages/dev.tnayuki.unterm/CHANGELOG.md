@@ -17,6 +17,7 @@
 - The Claude Code agent composer now honours the same caret-navigation shortcuts as the code editor — word-wise motion (⌥←/→, Ctrl+←/→ on Windows/Linux), line and document ends (⌘←/→, ⌘↑/↓, Home/End), and word / line deletion (⌥/⌘+Backspace, ⌥+Delete) — which were already wired up in the editor but had been missed in the composer.
 - The text caret in the agent composer and the code editor is now hidden while the window lacks keyboard focus, instead of leaving a blinking insertion bar (and a stray thin IME text-cursor line) on a background window.
 - The native quad and mesh renderers (terminal cell backgrounds, cursor, selection, popup chrome and icons) now write each frame's vertices into one persistent, grow-only GPU buffer instead of allocating a fresh buffer — and discarding the old one — on every rendered frame.
+- The terminal now caches each row's shaped glyph layout across frames by content, so streaming output re-shapes only the rows that actually changed instead of every visible row on every frame (scrolled rows stay cache hits, as does a selection sweeping over them), and its glyph rasterization cache is persisted across frames instead of being rebuilt per frame.
 
 ## [0.5.1] - 2026-07-04
 
