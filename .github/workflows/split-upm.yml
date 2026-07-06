@@ -3,20 +3,33 @@ name: Build native + publish UPM branch
 # The native binaries are NOT tracked in source (they bloat the repo and can't be
 # merged across branches). Instead this workflow builds the macOS .dylib and the
 # Windows .dll on their respective runners and publishes the package — source
-# files plus the freshly built binaries — to the `upm` branch that the install
-# URL (`...git#upm`) points at.
+# files plus the freshly built binaries — to a distribution branch.
 #
 # Structure: two symmetric, parallel build jobs (one per platform) each upload
 # their binary as an artifact, then a single platform-neutral `publish` job
-# assembles them, runs the license gate, and pushes the `upm` branch.
+# assembles them, runs the license gate, and pushes the channel branch.
+#
+# Two channels:
+#   - stable  (v* tags)     -> `upm` branch, pinned per release with an `upm/<tag>`.
+#   - preview (main pushes)  -> `upm-preview` branch, a rolling channel that advances
+#                              on every push with a machine-computed prerelease
+#                              version (see the publish step) and no human bump.
 
 on:
   push:
     tags: ['v*']
+    branches: ['main']
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  # One group per ref: rapid main pushes cancel superseded preview builds, while
+  # each tag (a distinct ref) gets its own group so a release is never cancelled
+  # by — nor cancels — an in-flight preview.
+  group: upm-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-macos:
@@ -72,12 +85,15 @@ jobs:
 
   publish:
     needs: [build-macos, build-windows]
-    # Only publish on version tags. Manual runs build both platforms (and the
-    # license gate) without touching the upm distribution branch.
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags: the preview channel derives its version from the
+          # latest stable tag, so it needs every `v*` tag visible. The checkout
+          # also carries the tracked plugin .meta files that the downloaded
+          # binaries land next to.
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -111,11 +127,11 @@ jobs:
           # --fail: exit non-zero on a license that isn't in about.toml's
           # `accepted` list (e.g. a GPL/AGPL/LGPL dependency that slips in), or
           # one we can't resolve at all. Failing here aborts before the publish
-          # step — nothing reaches the `upm` branch.
+          # step — nothing reaches a distribution branch.
           cargo about generate about.hbs --fail \
             -o "../Packages/dev.tnayuki.unterm/Third Party Notices.md"
 
-      - name: Publish package to upm branch
+      - name: Publish package to UPM branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -124,26 +140,58 @@ jobs:
           test -f "$PKG/Editor/Plugins/macOS/unterm.dylib" || { echo "dylib missing"; exit 1; }
           test -f "$PKG/Editor/Plugins/Windows/x86_64/unterm.dll" || { echo "dll missing"; exit 1; }
 
+          # Route by ref: version tags publish the stable channel, main publishes
+          # the rolling preview channel, anything else (e.g. workflow_dispatch) is
+          # a build + license-gate dry run that never touches a distribution branch.
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            BRANCH="upm"
+            PIN_TAG="upm/${GITHUB_REF##*/}"
+            VERSION=""   # stable ships package.json as committed (bumped alongside the tag)
+          elif [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            BRANCH="upm-preview"
+            PIN_TAG=""
+            # The preview is a prerelease of the NEXT version, derived from the
+            # latest stable tag so cutting a release *is* the version bump: once
+            # v0.6.0 ships it becomes the newest tag and previews roll to
+            # 0.7.0-preview.*. The run number is the monotonic prerelease counter.
+            LATEST="$(git tag -l 'v*' --sort=-v:refname | grep -vE -- '-' | head -n1)"
+            LATEST="${LATEST:-v0.0.0}"
+            BASE="${LATEST#v}"
+            IFS=. read -r MAJ MIN _PAT <<< "$BASE"
+            VERSION="${MAJ}.$((MIN + 1)).0-preview.${GITHUB_RUN_NUMBER}"
+          else
+            echo "Ref $GITHUB_REF is not publishable; build + license gate only."
+            exit 0
+          fi
+
           # Stage the package contents (including the just-downloaded, un-tracked
-          # binaries) as the root of a fresh orphan commit. The upm branch is a
-          # machine-generated distribution branch, so history is disposable.
+          # binaries) as the root of a fresh orphan commit. Distribution branches
+          # are machine-generated, so history is disposable.
           STAGE="$(mktemp -d)"
           rsync -a "$PKG/" "$STAGE/"
 
+          # Preview: stamp the machine-computed version so the channel advances on
+          # every main push with no human bump. Stable keeps the committed version.
+          if [[ -n "$VERSION" ]]; then
+            jq --arg v "$VERSION" '.version = $v' "$STAGE/package.json" > "$STAGE/package.json.tmp"
+            mv "$STAGE/package.json.tmp" "$STAGE/package.json"
+            echo "Preview version: $VERSION"
+          fi
+
           cd "$STAGE"
           git init -q
-          git checkout -q -b upm
+          git checkout -q -b "$BRANCH"
           git add -A
           git -c user.name="github-actions[bot]" \
               -c user.email="github-actions[bot]@users.noreply.github.com" \
-              commit -q -m "Publish ${GITHUB_SHA} ($(basename "${GITHUB_REF}"))"
+              commit -q -m "Publish ${GITHUB_SHA} (${BRANCH})"
 
           REMOTE="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          TAG="${GITHUB_REF##*/}"
 
-          # The floating `upm` branch always points at the latest release, and
-          # `upm/<tag>` pins this specific one. Publishing only on version tags
-          # keeps both honest about the package version they ship.
-          git push --force "$REMOTE" upm:refs/heads/upm
-          git tag "upm/${TAG}"
-          git push "$REMOTE" "upm/${TAG}"
+          # The floating channel branch always points at the latest publish; the
+          # stable channel additionally pins each release with an `upm/<tag>`.
+          git push --force "$REMOTE" "${BRANCH}:refs/heads/${BRANCH}"
+          if [[ -n "$PIN_TAG" ]]; then
+            git tag "$PIN_TAG"
+            git push "$REMOTE" "$PIN_TAG"
+          fi
