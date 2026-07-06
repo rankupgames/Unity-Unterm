@@ -42,6 +42,13 @@ tree-sitter = "0.25"
 tree-sitter-c-sharp = "0.23"
 streaming-iterator = "0.1" # consume tree-sitter 0.25's QueryCursor::captures
 
+# Git-diff gutter markers for the code editor: `git2` reads the index (stage-0)
+# version of the open file (default-features off = no https/ssh, just local repo
+# reads), `similar` line-diffs it against the live buffer. Both keep the Windows
+# cross-check no worse than today (already blocked by tree-sitter's cc step).
+git2 = { version = "0.20", default-features = false }
+similar = "2"
+
 # In-process MCP server hosted in the plugin so it survives Unity C# domain
 # reloads. No transport/port: the control-protocol driver dispatches the agent's
 # `mcp_message` requests straight in. Tool defs + execution come from the C# side.

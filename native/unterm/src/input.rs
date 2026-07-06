@@ -26,6 +26,22 @@ struct GutterCache {
     pos: Vec<(f32, f32)>,
 }
 
+/// A git-diff "peek" tooltip: the original (base) lines of the hunk under the
+/// pointer, floated as a card near the cursor so the removed / pre-edit content is
+/// readable on hover (no click needed).
+struct Peek {
+    /// The hunk (by index into `diff_hunks`) currently shown, so hover only rebuilds
+    /// when the pointer moves onto a different hunk.
+    hunk_i: usize,
+    /// Pointer position (surface px) where the tooltip opened; the card's top-left is
+    /// placed near it and stays fixed there (no cursor-follow).
+    at: (f32, f32),
+    /// The hunk as a unified diff: `(added, text)` per row — removed base lines (red,
+    /// `false`) first, then the added current lines (green, `true`). A pure deletion
+    /// has only removed rows; a modification shows both, so they read apart.
+    lines: Vec<(bool, String)>,
+}
+
 /// Inner padding (logical px, scaled) around the text.
 const PAD: f32 = 6.0;
 
@@ -116,6 +132,32 @@ pub struct InputBox {
     /// steady-state frames skip the whole-document attrs loop.
     attrs_dirty: bool,
 
+    /// Git HEAD and index versions of the file, fetched by the host via `set_diff`.
+    /// The gutter diffs the buffer against HEAD (VS Code/Zed-style, so staged changes
+    /// stay marked until committed), falling back to the index before the first
+    /// commit; both together drive the staged detection (diff-of-diffs). None/None =
+    /// untracked / diff off. `diff_markers` is recomputed against the live buffer
+    /// once per edit (gated by `diff_gen`, mirroring `hl_gen`).
+    diff_head: Option<String>,
+    diff_index: Option<String>,
+    /// diff(HEAD → index): the staged blocks, recomputed per fetch (not per edit).
+    diff_index_hunks: Vec<crate::diff::Hunk>,
+    diff_gen: u64,
+    /// Per-logical-line marker bits (see [`crate::diff`]); empty when diff is off.
+    diff_markers: Vec<u8>,
+    /// The changed blocks for the current buffer (parallel to `diff_markers`), so a
+    /// gutter-marker click can recover a hunk's original lines to peek.
+    diff_hunks: Vec<crate::diff::Hunk>,
+    /// Which of `diff_hunks` are already staged (parallel), for hollow markers and
+    /// the host's Stage/Unstage menu choice.
+    diff_staged: Vec<bool>,
+    /// For staged-ONLY hunks (the change lives in the index but the buffer is back
+    /// at HEAD): the index's new-range, so the peek can show the staged content
+    /// (parallel to `diff_hunks`; None for ordinary buffer hunks).
+    diff_index_new: Vec<Option<(usize, usize)>>,
+    /// Open inline peek of a hunk's original lines (click a gutter marker to toggle).
+    peek: Option<Peek>,
+
     /// Autocomplete popup items + selected index (code mode). The host computes
     /// the list; this draws it (on top of the text) anchored at the caret.
     completions: Vec<String>,
@@ -130,6 +172,10 @@ pub struct InputBox {
     /// GPU buffers — re-preparing the main ones for a second draw would race).
     popup_text: TextRenderer,
     popup_quads: QuadRenderer,
+    /// Own renderers for the inline diff peek, drawn on top like the popup (and
+    /// independent of it, since a peek can be open with no completion list).
+    peek_text: TextRenderer,
+    peek_quads: QuadRenderer,
 }
 
 impl InputBox {
@@ -148,6 +194,9 @@ impl InputBox {
         let popup_text =
             TextRenderer::new(&mut atlas, &g.device, wgpu::MultisampleState::default(), None);
         let popup_quads = QuadRenderer::new(&g.device, FORMAT);
+        let peek_text =
+            TextRenderer::new(&mut atlas, &g.device, wgpu::MultisampleState::default(), None);
+        let peek_quads = QuadRenderer::new(&g.device, FORMAT);
 
         let editor = {
             let mut fs = gpu::lock_font_system();
@@ -197,6 +246,15 @@ impl InputBox {
             hl_cache: Vec::new(),
             highlighter: None,
             attrs_dirty: true,
+            diff_head: None,
+            diff_index: None,
+            diff_index_hunks: Vec::new(),
+            diff_gen: u64::MAX,
+            diff_markers: Vec::new(),
+            diff_hunks: Vec::new(),
+            diff_staged: Vec::new(),
+            diff_index_new: Vec::new(),
+            peek: None,
             completions: Vec::new(),
             compl_sel: 0,
             swash_cache,
@@ -206,6 +264,8 @@ impl InputBox {
             quads,
             popup_text,
             popup_quads,
+            peek_text,
+            peek_quads,
         }
     }
 
@@ -282,21 +342,237 @@ impl InputBox {
         self.gutter = on;
     }
 
+    /// Set the git HEAD and index versions of the file (both None clears the
+    /// markers). Returns true when they actually changed — the host refreshes on a
+    /// 1s poll, so an unchanged delivery is a no-op that must NOT drop the peek or
+    /// force a recompute. The markers recompute on the next render when changed.
+    pub fn set_diff(&mut self, head: Option<String>, index: Option<String>) -> bool {
+        if self.diff_head == head && self.diff_index == index {
+            return false;
+        }
+        // diff(HEAD → index) — the staged blocks — changes only per fetch, so
+        // compute it here rather than per edit.
+        self.diff_index_hunks = match (head.as_deref(), index.as_deref()) {
+            (Some(h), Some(i)) => crate::diff::hunks(h, i),
+            _ => Vec::new(),
+        };
+        self.diff_head = head;
+        self.diff_index = index;
+        self.diff_gen = u64::MAX; // force a recompute next render
+        self.peek = None; // hunks may have shifted; drop any open peek
+        true
+    }
+
+    /// The text the gutter diffs the buffer against: HEAD, or the index before the
+    /// first commit (so a freshly-added file still gets markers).
+    fn diff_base_text(&self) -> Option<&str> {
+        self.diff_head.as_deref().or(self.diff_index.as_deref())
+    }
+
+    /// Whether hunk `hunk_i`'s change is already staged in the index (exact match).
+    pub fn hunk_staged(&self, hunk_i: usize) -> bool {
+        self.diff_staged.get(hunk_i).copied().unwrap_or(false)
+    }
+
+    /// Whether hunk `hunk_i` is staged-ONLY: the change lives in the index while the
+    /// buffer is back at HEAD. Reverting the buffer is a no-op there, so the host's
+    /// menu offers just Unstage.
+    pub fn hunk_staged_only(&self, hunk_i: usize) -> bool {
+        self.diff_index_new.get(hunk_i).copied().flatten().is_some()
+    }
+
+    /// Whether ANY staged block overlaps hunk `hunk_i`'s HEAD range. True also for a
+    /// partially staged region (staged, then edited further): `hunk_staged` is false
+    /// there, but an Unstage would still drop the staged version, so the host offers
+    /// both Stage (update) and Unstage (drop).
+    pub fn hunk_has_staged(&self, hunk_i: usize) -> bool {
+        let Some(h) = self.diff_hunks.get(hunk_i) else { return false };
+        crate::diff::overlaps_staged(&self.diff_index_hunks, (h.old_start, h.old_start + h.old_len))
+    }
+
+    /// Logical line at surface `y` (px), from the last render's layout. None past the
+    /// end of the visible text.
+    fn line_at_y(&self, y: f32) -> Option<usize> {
+        let target = y - PAD * self.scale;
+        self.editor.with_buffer(|b| {
+            for run in b.layout_runs() {
+                if target >= run.line_top && target < run.line_top + run.line_height {
+                    return Some(run.line_i);
+                }
+            }
+            None
+        })
+    }
+
+    /// Index of the hunk a hover on `line` should peek — any changed span or a
+    /// pure-deletion boundary (VS Code's quick-diff peek opens on every marker
+    /// kind; a pure addition shows just its `+` lines). `n` is the buffer line
+    /// count. The hunk's rows are padded by one line on each side so a hover near
+    /// a thin marker (especially a deletion wedge) still lands.
+    fn peekable_hunk_for_line(&self, line: usize, n: usize) -> Option<usize> {
+        self.diff_hunks.iter().position(|h| {
+            let (lo, hi) = if h.new_len > 0 {
+                (h.new_start, h.new_start + h.new_len) // [lo, hi)
+            } else {
+                let b = if h.new_start < n { h.new_start } else { n.saturating_sub(1) };
+                (b, b + 1)
+            };
+            // ±1 line of slack so a click near the marker still lands.
+            line >= lo.saturating_sub(1) && line < hi + 1
+        })
+    }
+
+    /// Index of ANY hunk at `line` (added / modified / deleted), for stage/revert —
+    /// unlike `peekable_hunk_for_line` this includes pure additions (which have no
+    /// removed content to peek but are still actionable). ±1 line of slack.
+    fn hunk_index_for_line(&self, line: usize, n: usize) -> Option<usize> {
+        self.diff_hunks.iter().position(|h| {
+            let (lo, hi) = if h.new_len > 0 {
+                (h.new_start, h.new_start + h.new_len)
+            } else {
+                let b = if h.new_start < n { h.new_start } else { n.saturating_sub(1) };
+                (b, b + 1)
+            };
+            line >= lo.saturating_sub(1) && line < hi + 1
+        })
+    }
+
+    /// The hunk a click at surface (`x`, `y`) targets, or None when the click isn't in
+    /// the gutter lane or no hunk is there. Drives the gutter-click Stage/Revert menu.
+    pub fn hunk_at(&self, x: f32, y: f32) -> Option<usize> {
+        let pad = PAD * self.scale;
+        if !self.gutter || x >= pad + self.gutter_px + 4.0 * self.scale {
+            return None;
+        }
+        let line = self.line_at_y(y)?;
+        let n = self.editor.with_buffer(|b| b.lines.len());
+        self.hunk_index_for_line(line, n)
+    }
+
+    /// Revert hunk `hunk_i` to its git-base (HEAD) content, as one undoable edit
+    /// (marks the buffer dirty; the base is unchanged so the marker clears on the
+    /// next render).
+    pub fn revert_hunk(&mut self, hunk_i: usize) {
+        let Some(h) = self.diff_hunks.get(hunk_i).copied() else { return };
+        let Some(base) = self.diff_base_text() else { return };
+        let base_old: Vec<String> =
+            base.split('\n').skip(h.old_start).take(h.old_len).map(str::to_string).collect();
+        let n = self.line_count();
+        if h.new_len > 0 {
+            // Modified/added span: replace the current lines with the base lines
+            // (empty base_old for a pure addition → deletes the added lines).
+            let l0 = h.new_start.min(n.saturating_sub(1));
+            let l1 = (h.new_start + h.new_len - 1).min(n.saturating_sub(1));
+            self.splice_lines(l0, l1, &base_old, (l0, 0), None);
+        } else if !base_old.is_empty() {
+            // Pure deletion: re-insert the removed base lines at the boundary.
+            if h.new_start < n {
+                let mut repl = base_old;
+                repl.push(self.line_text(h.new_start)); // keep the line it sat above
+                self.splice_lines(h.new_start, h.new_start, &repl, (h.new_start, 0), None);
+            } else {
+                let last = n.saturating_sub(1);
+                let mut repl = vec![self.line_text(last)];
+                repl.extend(base_old);
+                self.splice_lines(last, last, &repl, (last, 0), None);
+            }
+        }
+    }
+
+    /// The new index content (LF) that stages hunk `hunk_i`: the current index with
+    /// just this hunk's buffer change applied, so hunks staged earlier are kept.
+    /// None when the file isn't in the index or there's nothing to stage there.
+    pub fn stage_hunk_content(&self, hunk_i: usize) -> Option<String> {
+        let h = self.diff_hunks.get(hunk_i).copied()?;
+        let index = self.diff_index.as_deref()?;
+        let cur = self.text();
+        crate::diff::stage_apply(index, &cur, (h.new_start, h.new_start + h.new_len))
+    }
+
+    /// The new index content (LF) that UNstages hunk `hunk_i`: the current index
+    /// with this hunk's staged block reverted to its HEAD lines. None when there's
+    /// no commit yet / nothing staged there.
+    pub fn unstage_hunk_content(&self, hunk_i: usize) -> Option<String> {
+        let h = self.diff_hunks.get(hunk_i).copied()?;
+        let head = self.diff_head.as_deref()?;
+        let index = self.diff_index.as_deref()?;
+        crate::diff::unstage_apply(head, index, (h.old_start, h.old_start + h.old_len))
+    }
+
+    /// Pointer moved to surface (`x`, `y`): show the diff-peek tooltip when hovering a
+    /// gutter marker whose hunk has removed content, else hide it. Returns true when
+    /// the tooltip is showing or its position/target changed, so the host repaints.
+    pub fn hover(&mut self, x: f32, y: f32) -> bool {
+        let pad = PAD * self.scale;
+        let over_gutter = self.gutter && x < pad + self.gutter_px + 4.0 * self.scale;
+        let target = if over_gutter {
+            self.line_at_y(y).and_then(|line| {
+                let n = self.editor.with_buffer(|b| b.lines.len());
+                self.peekable_hunk_for_line(line, n)
+            })
+        } else {
+            None
+        };
+        match target {
+            Some(hi) => {
+                // Already showing this hunk: keep the card fixed where it first opened
+                // (no cursor-follow) and skip the repaint.
+                if self.peek.as_ref().map(|p| p.hunk_i) == Some(hi) {
+                    return false;
+                }
+                let h = self.diff_hunks[hi];
+                // Unified diff: removed base lines (red), then added current lines
+                // (green). For a staged-ONLY hunk the change lives in the index, so
+                // the added side comes from the index's lines instead of the buffer.
+                let mut lines: Vec<(bool, String)> = match self.diff_base_text() {
+                    Some(base) => base
+                        .split('\n')
+                        .skip(h.old_start)
+                        .take(h.old_len)
+                        .map(|s| (false, s.to_string()))
+                        .collect(),
+                    None => Vec::new(),
+                };
+                if let Some((is, il)) = self.diff_index_new.get(hi).copied().flatten() {
+                    if let Some(index) = self.diff_index.as_deref() {
+                        lines.extend(index.split('\n').skip(is).take(il).map(|s| (true, s.to_string())));
+                    }
+                } else if h.new_len > 0 {
+                    self.editor.with_buffer(|b| {
+                        for l in b.lines.iter().skip(h.new_start).take(h.new_len) {
+                            lines.push((true, l.text().to_string()));
+                        }
+                    });
+                }
+                if lines.is_empty() {
+                    return self.peek.take().is_some();
+                }
+                self.peek = Some(Peek { hunk_i: hi, at: (x, y), lines });
+                true
+            }
+            // Left every marker: hide the tooltip (repaint once to clear it).
+            None => self.peek.take().is_some(),
+        }
+    }
+
     /// Scroll vertically by `dy` physical px (wheel). Clamped on the next render.
     pub fn scroll_by(&mut self, dy: f32) {
         self.scroll_v = (self.scroll_v + dy).max(0.0);
+        self.peek = None; // the hover position is stale once content moves
     }
 
     /// Scroll horizontally by `dx` physical px (wheel/trackpad). Clamped on the
     /// next render to the longest line.
     pub fn scroll_h_by(&mut self, dx: f32) {
         self.scroll_h = (self.scroll_h + dx).max(0.0);
+        self.peek = None;
     }
 
     /// Mark the text as changed so the highlight cache recomputes next render.
     fn bump(&mut self) {
         self.edit_gen = self.edit_gen.wrapping_add(1);
         self.caret_dirty = true;
+        self.peek = None; // an edit shifts hunks; drop the peek
     }
 
     /// Record a new undoable edit: push the change and advance the version mark to a
@@ -883,6 +1159,7 @@ impl InputBox {
         self.button != 0 && x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]
     }
 
+
     pub fn raw_texture(&self) -> *mut c_void {
         self.shared.raw_texture()
     }
@@ -1305,7 +1582,10 @@ impl InputBox {
         let line_count = self.editor.with_buffer(|b| b.lines.len()).max(1);
         let gutter_w = if self.gutter {
             let digits = ((line_count as f32).log10().floor() as usize + 1).max(2);
-            (digits as f32 * font_size * 0.6 + pad * 1.5).ceil()
+            // digits + a right gap for the numbers + a left lane for the diff markers.
+            // The whole gutter is the click target for the peek, so the marker lane
+            // also gives that a comfortable width.
+            (digits as f32 * font_size * 0.6 + pad * 2.0 + 8.0 * s).ceil()
         } else {
             0.0
         };
@@ -1313,18 +1593,39 @@ impl InputBox {
         let text_left = pad + gutter_w;
         let inner_w = (width - text_left - pad - reserve).max(1.0);
 
-        // Recompute the tree-sitter highlight cache only when the text changed
-        // (once per edit, not per frame) — and that recompute reparses only the
-        // changed region via the incremental highlighter.
-        if self.hl_gen != self.edit_gen {
-            let dark = self.highlight_dark;
+        // Recompute the tree-sitter highlight cache and git-diff markers only when
+        // the text changed (once per edit, not per frame). Both need the full buffer
+        // text, so build it once and share it. The highlight recompute reparses only
+        // the changed region via the incremental highlighter.
+        if self.hl_gen != self.edit_gen || self.diff_gen != self.edit_gen {
             let text = self.text();
-            self.hl_cache = match self.highlighter.as_mut() {
-                Some(hl) => hl.highlight(&text, dark),
-                None => Vec::new(),
-            };
-            self.hl_gen = self.edit_gen;
-            self.attrs_dirty = true; // spans (or the edited lines) changed
+            if self.hl_gen != self.edit_gen {
+                let dark = self.highlight_dark;
+                self.hl_cache = match self.highlighter.as_mut() {
+                    Some(hl) => hl.highlight(&text, dark),
+                    None => Vec::new(),
+                };
+                self.hl_gen = self.edit_gen;
+                self.attrs_dirty = true; // spans (or the edited lines) changed
+            }
+            if self.diff_gen != self.edit_gen {
+                // Buffer-vs-HEAD hunks with staged flags, plus synthesized hunks for
+                // changes that exist only in the index (staged then reverted /
+                // unsaved) — so the editor never disagrees with `git diff --cached`.
+                let display = crate::diff::display_hunks(
+                    self.diff_head.as_deref(),
+                    self.diff_index.as_deref(),
+                    &self.diff_index_hunks,
+                    &text,
+                );
+                self.diff_hunks = display.iter().map(|d| d.hunk).collect();
+                self.diff_staged = display.iter().map(|d| d.staged).collect();
+                self.diff_index_new = display.iter().map(|d| d.index_new).collect();
+                let n = text.split('\n').count();
+                self.diff_markers = crate::diff::markers_from_hunks(&self.diff_hunks, n);
+                crate::diff::apply_staged_bits(&mut self.diff_markers, &self.diff_hunks, &self.diff_staged);
+                self.diff_gen = self.edit_gen;
+            }
         }
         let use_hl = self.highlighter.is_some() && !self.hl_cache.is_empty();
 
@@ -1586,6 +1887,77 @@ impl InputBox {
                     }
                 }
             });
+
+            // Git-diff markers: a colored bar at the gutter's left edge per changed
+            // line (added/modified), plus a short wedge at a deletion boundary. Keyed
+            // by logical line, so it lines up with `diff_markers` (both LF line-space).
+            // Staged hunks draw HOLLOW (an inner cut of the gutter background), the
+            // Zed idiom, so what's already staged reads apart from working changes.
+            if !self.diff_markers.is_empty() {
+                use crate::diff::{ADDED, DELETED_ABOVE, DELETED_BELOW, MODIFIED, STAGED, STAGED_DEL};
+                let dark = self.highlight_dark;
+                // Opaque (alpha 1) + a small radius: the quad SDF leaves a radius-0
+                // interior at half alpha, which washed these out. Bars overlap by the
+                // radius so consecutive changed lines read as one continuous mark.
+                let added = if dark { [0.24, 0.64, 0.36, 1.0] } else { [0.18, 0.56, 0.30, 1.0] };
+                let modified = if dark { [0.13, 0.54, 0.72, 1.0] } else { [0.10, 0.50, 0.80, 1.0] };
+                let deleted = if dark { [0.86, 0.22, 0.22, 1.0] } else { [0.82, 0.12, 0.12, 1.0] };
+                // The gutter strip's own color, for the hollow inner cut.
+                let gbg = [
+                    (c.r as f32 + shade).min(1.0),
+                    (c.g as f32 + shade).min(1.0),
+                    (c.b as f32 + shade).min(1.0),
+                    1.0,
+                ];
+                let bar_w = (4.0 * s).max(3.0);
+                let wedge_w = (8.0 * s).max(4.0);
+                let wedge_h = (3.0 * s).max(2.0);
+                let rr = 1.5 * s;
+                let inset = (1.2 * s).max(1.0);
+                for (li, top) in &tops {
+                    let m = self.diff_markers.get(*li).copied().unwrap_or(0);
+                    if m == 0 {
+                        continue;
+                    }
+                    let y = pad + *top;
+                    if m & (ADDED | MODIFIED) != 0 {
+                        let color = if m & MODIFIED != 0 { modified } else { added };
+                        quads.push(Quad { x: 0.0, y: y - rr, w: bar_w, h: line_height + rr * 2.0, color, radius: rr });
+                        if m & STAGED != 0 {
+                            // Hollow: cut the bar's interior back to the gutter color,
+                            // leaving a frame (per-line cuts, so a staged line next to
+                            // an unstaged one still reads correctly).
+                            quads.push(Quad {
+                                x: inset,
+                                y: y - rr + inset,
+                                w: (bar_w - inset * 2.0).max(1.0),
+                                h: line_height + rr * 2.0 - inset * 2.0,
+                                color: gbg,
+                                radius: (rr - inset * 0.5).max(0.0),
+                            });
+                        }
+                    }
+                    for (bit, wy) in [
+                        (DELETED_ABOVE, y - wedge_h * 0.5),
+                        (DELETED_BELOW, y + line_height - wedge_h * 0.5),
+                    ] {
+                        if m & bit != 0 {
+                            quads.push(Quad { x: 0.0, y: wy, w: wedge_w, h: wedge_h, color: deleted, radius: wedge_h * 0.5 });
+                            if m & STAGED_DEL != 0 {
+                                quads.push(Quad {
+                                    x: inset,
+                                    y: wy + inset * 0.5,
+                                    w: (wedge_w - inset * 2.0).max(1.0),
+                                    h: (wedge_h - inset).max(1.0),
+                                    color: gbg,
+                                    radius: (wedge_h - inset) * 0.5,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
             let nc = self.text_color;
             let key = {
                 let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1828,6 +2200,125 @@ impl InputBox {
             }
         }
 
+        // Diff peek tooltip: the hovered hunk as a unified diff — removed base lines
+        // (red, `−`) then added current lines (green, `+`) — floated in a bordered,
+        // drop-shadowed card near the pointer (own renderers, on top of the editor).
+        // Per-row tints + signs make deletions (red-only) read apart from modifications
+        // (red + green).
+        let mut peek_buf: Option<Buffer> = None;
+        let mut peek_text_pos = (0.0_f32, 0.0_f32);
+        let mut peek_bounds = bounds;
+        let mut has_peek = false;
+        if let Some(pk) = self.peek.as_ref() {
+            {
+                let dark = self.highlight_dark;
+                let vpad = pad * 0.5;
+                let sign_w = font_size * 0.6 * 2.0; // "− " / "+ " column (monospace)
+
+                // Card fits the content (monospace estimate), capped to what fits.
+                let max_rows = (((height - pad * 2.0) / line_height).floor() as usize).max(1);
+                let visible = pk.lines.len().min(max_rows);
+                let longest = pk.lines[..visible]
+                    .iter()
+                    .map(|(_, t)| t.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                let text_w = (longest as f32 * font_size * 0.6).ceil();
+                let card_w = (text_w + sign_w + pad * 2.0).clamp(60.0, (width - pad * 2.0).max(60.0));
+                let card_h = visible as f32 * line_height + vpad * 2.0;
+
+                // Top-left just below-right of the pointer — snug, like an OS tooltip
+                // (just enough to clear the arrow cursor) — flipping / clamping so the
+                // whole card stays on the surface.
+                let (ptr_x, ptr_y) = pk.at;
+                let ox = 4.0 * s;
+                let oy = 8.0 * s;
+                let mut card_x = ptr_x + ox;
+                if card_x + card_w > width - pad {
+                    card_x = ptr_x - ox - card_w; // flip to the pointer's left
+                }
+                card_x = card_x.clamp(pad, (width - pad - card_w).max(pad));
+                let mut card_y = ptr_y + oy;
+                if card_y + card_h > height - pad {
+                    card_y = ptr_y - oy - card_h; // flip above the pointer
+                }
+                card_y = card_y.clamp(pad, (height - pad - card_h).max(pad));
+
+                let shadow = [0.0, 0.0, 0.0, if dark { 0.5 } else { 0.25 }];
+                let border = if dark { [0.34, 0.34, 0.36, 1.0] } else { [0.72, 0.72, 0.74, 1.0] };
+                let bg = if dark { [0.15, 0.15, 0.16, 1.0] } else { [0.99, 0.99, 0.99, 1.0] };
+                // Per-row diff tints (opaque, near-pure so red/green read vividly on the
+                // sRGB target — keep the off-channels low so it doesn't wash to rose/mint).
+                let row_del = if dark { [0.44, 0.05, 0.05, 1.0] } else { [1.0, 0.62, 0.62, 1.0] };
+                let row_add = if dark { [0.05, 0.38, 0.10, 1.0] } else { [0.55, 0.88, 0.58, 1.0] };
+                let bw = (1.0 * s).max(1.0); // border thickness
+                let sh = (3.0 * s).max(2.0); // shadow offset
+                let mut pquads: Vec<Quad> = Vec::with_capacity(3 + visible);
+                // drop shadow, then border, then the neutral card fill.
+                pquads.push(Quad { x: card_x - bw + sh, y: card_y - bw + sh, w: card_w + bw * 2.0, h: card_h + bw * 2.0, color: shadow, radius: 5.0 * s });
+                pquads.push(Quad { x: card_x - bw, y: card_y - bw, w: card_w + bw * 2.0, h: card_h + bw * 2.0, color: border, radius: 5.0 * s });
+                pquads.push(Quad { x: card_x, y: card_y, w: card_w, h: card_h, color: bg, radius: 4.0 * s });
+                // one tinted row per diff line. A small radius is required for FULL
+                // opacity: the quad shader's SDF leaves a radius-0 interior at alpha
+                // 0.5 (it only measures the exterior distance). Rows overlap by the
+                // radius so the rounding never opens seams between them.
+                let rr = 2.0 * s;
+                for (i, (added, _)) in pk.lines[..visible].iter().enumerate() {
+                    let ry = card_y + vpad + i as f32 * line_height;
+                    pquads.push(Quad { x: card_x, y: ry - rr, w: card_w, h: line_height + rr * 2.0, color: if *added { row_add } else { row_del }, radius: rr });
+                }
+                self.peek_quads.prepare(&g.device, &g.queue, (width, height), &pquads);
+
+                // Prefix each row with its diff sign; color the whole row's text by kind.
+                let joined: String = pk.lines[..visible]
+                    .iter()
+                    .map(|(added, t)| format!("{} {}", if *added { '+' } else { '−' }, t))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let mut b = Buffer::new(fs, Metrics::new(font_size, line_height));
+                b.set_size(fs, Some((card_w - pad * 0.5).max(1.0)), Some(card_h));
+                b.set_wrap(fs, Wrap::None); // code never wraps — clip at the card edge
+                let del_c = if dark { Color::rgb(255, 210, 210) } else { Color::rgb(140, 20, 20) };
+                let add_c = if dark { Color::rgb(205, 250, 210) } else { Color::rgb(15, 100, 30) };
+                let base = Attrs::new().family(Family::Monospace).color(text_color);
+                b.set_text(fs, &joined, &base, Shaping::Advanced, None);
+                for (line, (added, _)) in b.lines.iter_mut().zip(pk.lines[..visible].iter()) {
+                    let c = if *added { add_c } else { del_c };
+                    line.set_attrs_list(glyphon::AttrsList::new(&base.clone().color(c)));
+                }
+                b.shape_until_scroll(fs, false);
+                peek_text_pos = (card_x + pad * 0.5, card_y + vpad);
+                peek_bounds = TextBounds {
+                    left: card_x as i32,
+                    top: card_y as i32,
+                    right: (card_x + card_w) as i32,
+                    bottom: (card_y + card_h) as i32,
+                };
+                peek_buf = Some(b);
+                has_peek = true;
+            }
+        }
+        if let Some(pb) = peek_buf.as_ref() {
+            let peek_text = &mut self.peek_text;
+            let atlas = &mut self.atlas;
+            let swash_cache = &mut self.swash_cache;
+            let viewport = &self.viewport;
+            let area = TextArea {
+                buffer: pb,
+                left: peek_text_pos.0,
+                top: peek_text_pos.1,
+                scale: 1.0,
+                bounds: peek_bounds,
+                default_color: text_color,
+                custom_glyphs: &[],
+            };
+            if let Err(e) =
+                peek_text.prepare(&g.device, &g.queue, fs, atlas, viewport, [area], swash_cache)
+            {
+                log::error!("unterm: peek glyphon prepare failed: {e}");
+            }
+        }
+
         let mut encoder = g
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1859,6 +2350,12 @@ impl InputBox {
                 self.popup_quads.render(&mut pass);
                 if let Err(e) = self.popup_text.render(&self.atlas, &self.viewport, &mut pass) {
                     log::error!("unterm: popup glyphon render failed: {e}");
+                }
+            }
+            if has_peek {
+                self.peek_quads.render(&mut pass);
+                if let Err(e) = self.peek_text.render(&self.atlas, &self.viewport, &mut pass) {
+                    log::error!("unterm: peek glyphon render failed: {e}");
                 }
             }
         }

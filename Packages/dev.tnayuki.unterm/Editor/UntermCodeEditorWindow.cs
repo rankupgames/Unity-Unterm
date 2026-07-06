@@ -70,6 +70,8 @@ namespace Unterm.Editor
         // clean, with no second copy of the buffer (just this u64).
         [SerializeField] private ulong _savedSerial;
         private double _lastExtCheck; // throttle for the on-disk change poll
+        // A background git-base fetch is in flight (kicked by SetPath/RefreshDiff);
+        // poll for its delivery only while set, instead of every tick forever.
 
         // Editing surface texture (zero-copy wrap of the native MTLTexture).
         private Texture2D _tex;
@@ -339,6 +341,7 @@ namespace Unterm.Editor
                 _native.EditorSetLanguage(Eid, _langToken);
                 _native.EditorSetText(Eid, text);
                 _savedSerial = _native.EditorEditSerial(Eid); // baseline: just-loaded = clean
+                _native.EditorSetPath(Eid, _filePath); // fetch git texts for diff gutter markers
                 RenderView();
                 Repaint();
             }
@@ -354,7 +357,7 @@ namespace Unterm.Editor
             s_reloading = false;
             AssemblyReloadEvents.beforeAssemblyReload += OnBeforeReload;
             EditorApplication.update += OnEditorUpdate;
-            wantsMouseMove = false;
+            wantsMouseMove = true; // hover over a gutter diff marker shows its peek tooltip
             // New/untitled buffer: default to the OS line ending until a file is
             // loaded (which then maintains that file's ending).
             if (string.IsNullOrEmpty(_filePath)) _crlf = Environment.NewLine == "\r\n";
@@ -398,8 +401,9 @@ namespace Unterm.Editor
 #if UNITY_EDITOR_WIN
             Input.imeCompositionMode = IMECompositionMode.On;
 #endif
-            // Returning to the window: pick up edits made to the file externally.
-            if (_native != null && _editorId != 0) CheckExternalChange();
+            // Returning to the window: pick up edits made to the file externally, and
+            // re-fetch the git base (a commit / branch switch may have happened away).
+            if (_native != null && _editorId != 0) { CheckExternalChange(); _native.EditorRefreshDiff(Eid); }
         }
 
         private void OnLostFocus()
@@ -449,6 +453,13 @@ namespace Unterm.Editor
                         LoadFile(_filePath); // fresh from disk; sets _savedSerial clean + _fileTicks now
                     else
                         _savedSerial = _native.EditorEditSerial(Eid); // untitled / file gone → empty, clean
+                }
+                else
+                {
+                    // Re-adopted across a domain reload: a fetch that was in flight
+                    // delivered unpolled. Kick a fresh one (also picking up commits
+                    // made mid-compile).
+                    _native.EditorRefreshDiff(Eid);
                 }
 
                 _refocus = true;
@@ -643,6 +654,10 @@ namespace Unterm.Editor
             {
                 case EventType.MouseDown when e.button == 0 && rect.Contains(e.mousePosition):
                     CloseCompletion(); // a click dismisses the popup
+                    // A click on a gutter diff marker opens its Stage/Revert menu
+                    // instead of moving the caret (VS Code-style).
+                    int hunk = _native.EditorHunkAt(Eid, lx, ly);
+                    if (hunk >= 0) { ShowHunkMenu(hunk); e.Use(); break; }
                     byte kind = e.clickCount >= 3 ? (byte)3 : e.clickCount == 2 ? (byte)2 : (byte)0;
                     _native.EditorMouse(Eid, lx, ly, kind);
                     _mouseDragging = true;
@@ -656,11 +671,78 @@ namespace Unterm.Editor
                 case EventType.MouseUp when _mouseDragging:
                     _mouseDragging = false; e.Use();
                     break;
+                case EventType.MouseMove when rect.Contains(e.mousePosition):
+                    ForwardHover(rect, e.mousePosition, ppp);
+                    break;
+                case EventType.Repaint:
+                    // Windows Unity often doesn't deliver MouseMove events, so the
+                    // hover tooltip never fires there. Fall back to polling the mouse
+                    // on Repaint (OnEditorUpdate forces repaints while the pointer is
+                    // over this window). Deduped by position, so it's cheap.
+                    ForwardHover(rect, e.mousePosition, ppp);
+                    break;
                 case EventType.ContextClick when rect.Contains(e.mousePosition):
                     ShowContextMenu();
                     e.Use();
                     break;
             }
+        }
+
+        private Vector2 _lastHoverPos = new Vector2(float.NaN, float.NaN);
+
+        // Show/hide the diff-peek tooltip for the pointer at `pos`. Deduped by
+        // position so repeated Repaint polls (the Windows hover fallback) and macOS
+        // MouseMove events both funnel here without spamming the native call.
+        private void ForwardHover(Rect rect, Vector2 pos, float ppp)
+        {
+            if (pos == _lastHoverPos) return;
+            _lastHoverPos = pos;
+            // Outside the surface → a far off-gutter point so native clears any tooltip.
+            float lx = 1e6f, ly = 1e6f;
+            if (rect.Contains(pos)) { lx = (pos.x - rect.x) * ppp; ly = (pos.y - rect.y) * ppp; }
+            if (_native.EditorHover(Eid, lx, ly)) { RenderView(); Repaint(); }
+        }
+
+        // Stage/Unstage/Revert menu for the git-diff hunk under a clicked gutter
+        // marker. Stage and Unstage write the git index; the 1s diff poll picks up
+        // the change and flips the marker solid/hollow. Three states: unstaged →
+        // Stage; exactly staged → Unstage; partially staged (staged, then edited
+        // further) → BOTH (Stage updates the staged version to the current content,
+        // Unstage drops it back to HEAD).
+        private void ShowHunkMenu(int hunk)
+        {
+            var menu = new GenericMenu();
+            bool staged = _native.EditorHunkStaged(Eid, hunk);
+            bool hasStaged = _native.EditorHunkHasStaged(Eid, hunk);
+            // Staged-only: the change lives in the index and the buffer is already at
+            // HEAD, so reverting the buffer would be a visible no-op — offer Unstage only.
+            bool stagedOnly = _native.EditorHunkStagedOnly(Eid, hunk);
+            // Plain "Stage / Unstage / Revert", like Zed's hunk buttons (VS Code says
+            // "Stage Change") — the clicked marker makes the target obvious.
+            if (!staged)
+                menu.AddItem(new GUIContent("Stage"), false, () =>
+                {
+                    _status = _native.EditorStageHunk(Eid, hunk) ? "Staged hunk" : "Stage failed (not a git repo?)";
+                    RenderView(); Repaint();
+                });
+            if (hasStaged)
+                menu.AddItem(new GUIContent("Unstage"), false, () =>
+                {
+                    _status = _native.EditorUnstageHunk(Eid, hunk) ? "Unstaged hunk" : "Unstage failed";
+                    RenderView(); Repaint();
+                });
+            if (!stagedOnly)
+                menu.AddItem(new GUIContent("Revert"), false, () =>
+                {
+                    // Restores the hunk to its HEAD content (one undo step), then
+                    // saves the file — VS Code's Revert Change does exactly this
+                    // (buffer edit + document.save()), so the revert lands on disk
+                    // immediately. Note this also writes any other unsaved edits in
+                    // the file, same as VS Code. Undo re-dirties as usual.
+                    _native.EditorRevertHunk(Eid, hunk);
+                    Save();
+                });
+            menu.ShowAsContext();
         }
 
         private void ShowContextMenu()
@@ -1330,6 +1412,12 @@ namespace Unterm.Editor
         private void OnEditorUpdate()
         {
             if (_native == null || _editorId == 0) return;
+#if UNITY_EDITOR_WIN
+            // Windows Unity doesn't reliably send MouseMove, so drive the hover
+            // tooltip by repainting while the pointer is over this window — the
+            // Repaint handler then polls the cursor. macOS uses MouseMove directly.
+            if (mouseOverWindow == this) Repaint();
+#endif
             // A line jump requested before the editor was ready (fresh window).
             if (_pendingLine > 0)
             {
@@ -1337,13 +1425,19 @@ namespace Unterm.Editor
                 _pendingLine = -1;
                 Repaint();
             }
-            // Pick up external changes (e.g. the Claude Code agent editing the file)
+            // Pick up external changes (e.g. the Claude Code agent editing the file,
+            // or `git add`/`reset`/commits run in a terminal changing the index)
             // even while this window stays focused — not just on OnFocus. Throttled.
             if (EditorApplication.timeSinceStartup - _lastExtCheck > 1.0)
             {
                 _lastExtCheck = EditorApplication.timeSinceStartup;
                 CheckExternalChange();
+                _native.EditorRefreshDiff(Eid); // background re-read of HEAD + index
             }
+            // A background git fetch may have finished: poll every tick (cheap bool);
+            // native applies it and returns true only when the git texts actually
+            // changed, so the steady-state 1s refresh doesn't cause re-renders.
+            if (_native.EditorPollDiff(Eid)) { RenderView(); Repaint(); }
             PollSignatureTask();
             // While a hint is shown, re-evaluate whenever the caret moved by ANY means
             // (arrows, click, edits) so it tracks the active parameter and closes once
@@ -1875,6 +1969,9 @@ namespace Unterm.Editor
 
             _dirty = false;
             hasUnsavedChanges = false;
+            // Path may have just been chosen (untitled → Save As); (re)point the diff
+            // gutter at it and re-fetch the git texts.
+            _native.EditorSetPath(Eid, _filePath);
             UpdateTitle();
             RenderView(); Repaint();
         }

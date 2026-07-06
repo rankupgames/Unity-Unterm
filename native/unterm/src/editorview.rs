@@ -1,12 +1,15 @@
 //! Code-editor view: a single id-handled editing surface — an [`InputBox`] in
 //! code-editor mode (tree-sitter highlighting + line-number gutter, no Send
-//! button) — that the Unity side blits and drives over the FFI. The file path
-//! and dirty state live on the C# side; this owns only the surface, its language,
-//! and the cached strings handed back across the boundary.
+//! button) — that the Unity side blits and drives over the FFI. Dirty state lives
+//! on the C# side; this owns the surface, its language, the cached strings handed
+//! back across the boundary, and (for git-diff gutter markers) the file path plus
+//! the background [`DiffFetcher`] that reads its git-index base.
 
 use std::ffi::CString;
 use std::os::raw::c_void;
+use std::path::PathBuf;
 
+use crate::diff::DiffFetcher;
 use crate::input::InputBox;
 
 /// Strip interior NULs so the text round-trips through a C string.
@@ -20,6 +23,8 @@ pub struct EditorView {
     copy_snap: CString,
     cut_snap: CString,
     word_snap: CString,
+    /// Background git-index reader feeding the diff gutter markers.
+    diff: DiffFetcher,
 }
 
 impl EditorView {
@@ -35,6 +40,30 @@ impl EditorView {
             copy_snap: CString::default(),
             cut_snap: CString::default(),
             word_snap: CString::default(),
+            diff: DiffFetcher::new(),
+        }
+    }
+
+    /// Point the diff gutter at `path` (empty = clear) and kick a background fetch
+    /// of its git HEAD + index versions. Call on load.
+    pub fn set_path(&mut self, path: &str) {
+        let p = path.trim();
+        self.diff.set_path(if p.is_empty() { None } else { Some(PathBuf::from(p)) });
+    }
+
+    /// Re-fetch the git texts (call on focus / after save / branch change).
+    pub fn refresh_diff(&mut self) {
+        self.diff.request();
+    }
+
+    /// Apply a finished background git fetch to the buffer, if one arrived. Returns
+    /// true only when the git texts actually CHANGED (the host should re-render) —
+    /// the host refreshes on a 1s poll, so unchanged deliveries stay no-ops. Cheap
+    /// to poll every tick.
+    pub fn poll_diff(&mut self) -> bool {
+        match self.diff.poll() {
+            Some((head, index)) => self.edit.set_diff(head, index),
+            None => false,
         }
     }
 
@@ -122,6 +151,58 @@ impl EditorView {
 
     pub fn mouse(&mut self, x: f32, y: f32, kind: u8) {
         self.edit.mouse(x, y, kind);
+    }
+
+    /// Pointer moved (no button): show/hide the diff-peek tooltip. Returns true when
+    /// the host should re-render (the tooltip is showing or just changed/cleared).
+    pub fn hover(&mut self, x: f32, y: f32) -> bool {
+        self.edit.hover(x, y)
+    }
+
+    /// The git-diff hunk index a click at (`x`, `y`) targets (gutter lane), or -1.
+    /// The host uses it to open the Stage/Unstage/Revert menu for that hunk.
+    pub fn hunk_at(&self, x: f32, y: f32) -> i32 {
+        self.edit.hunk_at(x, y).map_or(-1, |h| h as i32)
+    }
+
+    /// Whether hunk `hunk_i` is already staged (drives the menu's Stage vs Unstage).
+    pub fn hunk_staged(&self, hunk_i: usize) -> bool {
+        self.edit.hunk_staged(hunk_i)
+    }
+
+    /// Whether any staged content overlaps hunk `hunk_i` (partially staged regions
+    /// included), so the menu can offer Unstage alongside Stage there.
+    pub fn hunk_has_staged(&self, hunk_i: usize) -> bool {
+        self.edit.hunk_has_staged(hunk_i)
+    }
+
+    /// Whether hunk `hunk_i` is staged-only (buffer already at HEAD): reverting is a
+    /// no-op there, so the menu hides Revert and offers just Unstage.
+    pub fn hunk_staged_only(&self, hunk_i: usize) -> bool {
+        self.edit.hunk_staged_only(hunk_i)
+    }
+
+    /// Stage hunk `hunk_i` to the git index (returns false if not stageable).
+    /// Refreshes the git texts so the marker redraws hollow once they're re-read.
+    pub fn stage_hunk(&mut self, hunk_i: usize) -> bool {
+        match self.edit.stage_hunk_content(hunk_i) {
+            Some(content) => self.diff.stage(&content),
+            None => false,
+        }
+    }
+
+    /// Unstage hunk `hunk_i` (revert its staged block in the index back to HEAD;
+    /// the buffer is untouched). Returns false when nothing is staged there.
+    pub fn unstage_hunk(&mut self, hunk_i: usize) -> bool {
+        match self.edit.unstage_hunk_content(hunk_i) {
+            Some(content) => self.diff.stage(&content),
+            None => false,
+        }
+    }
+
+    /// Revert hunk `hunk_i` to its git-base (HEAD) content (one undoable buffer edit).
+    pub fn revert_hunk(&mut self, hunk_i: usize) {
+        self.edit.revert_hunk(hunk_i);
     }
 
     pub fn scroll(&mut self, dy: f32) {

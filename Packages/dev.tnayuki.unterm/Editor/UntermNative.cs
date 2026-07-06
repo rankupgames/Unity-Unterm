@@ -131,6 +131,9 @@ namespace Unterm.Editor
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate ulong EdCreateFn(uint w, uint h, float scale);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void EdThemeFn(ulong id, double br, double bg, double bb, double ba, byte fr, byte fg, byte fb, [MarshalAs(UnmanagedType.I1)] bool dark);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void EdMouseFn(ulong id, float x, float y, byte kind);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] [return: MarshalAs(UnmanagedType.I1)] private delegate bool EdHoverFn(ulong id, float x, float y);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int EdHunkAtFn(ulong id, float x, float y);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] [return: MarshalAs(UnmanagedType.I1)] private delegate bool EdStageHunkFn(ulong id, uint hunk);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] [return: MarshalAs(UnmanagedType.I1)] private delegate bool EdFindFn(ulong id, [MarshalAs(UnmanagedType.LPUTF8Str)] string query, [MarshalAs(UnmanagedType.I1)] bool forward, [MarshalAs(UnmanagedType.I1)] bool caseSensitive);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate uint EdReplaceAllFn(ulong id, [MarshalAs(UnmanagedType.LPUTF8Str)] string query, [MarshalAs(UnmanagedType.LPUTF8Str)] string repl, [MarshalAs(UnmanagedType.I1)] bool caseSensitive);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void EdCompleteFn(ulong id, uint prefixLen, [MarshalAs(UnmanagedType.LPUTF8Str)] string text);
@@ -187,11 +190,14 @@ namespace Unterm.Editor
         private EdCreateFn _edCreate; private AvExistsFn _edExists; private AvVoidFn _edDestroy; private ResizeFn _edResize;
         private SetScaleFn _edSetScale; private AvStrFn _edSetFont; private EdThemeFn _edSetTheme; private AvStrFn _edSetLanguage;
         private AvUintSetFn _edSetUndoLimit;
+        // Git-diff gutter markers (optional: an older native bundle may lack them).
+        private AvStrFn _edSetPath; private AvVoidFn _edRefreshDiff; private BoolFn _edPollDiff;
         private AvVoidFn _edRender; private AvPtrFn _edRawTexture; private AvFloatFn _edContentHeight; private AvCaretFn _edCaret;
         private U64IdFn _edEditSerial;
         private AvInputKeyFn _edKey; private SetFocusFn _edSetFocus; private AvStrFn _edInsert; private AvStrFn _edSetPreedit; private AvStrFn _edSetText; private AvStrFn _edAddUsing;
         private AvBufFn _edText; private AvVoidFn _edUndo; private AvVoidFn _edRedo; private AvVoidFn _edSelectAll;
-        private AvBufFn _edCopy; private AvBufFn _edCut; private EdMouseFn _edMouse; private AvF1Fn _edScroll;
+        private AvBufFn _edCopy; private AvBufFn _edCut; private EdMouseFn _edMouse; private EdHoverFn _edHover; private AvF1Fn _edScroll;
+        private EdHunkAtFn _edHunkAt; private EdStageHunkFn _edHunkStaged; private EdStageHunkFn _edHunkHasStaged; private EdStageHunkFn _edHunkStagedOnly; private EdStageHunkFn _edStageHunk; private EdStageHunkFn _edUnstageHunk; private AvUintSetFn _edRevertHunk;
         private AvF1Fn _edSetScroll; private AvFloatFn _edScrollOffset; private AvF1Fn _edScrollH;
         private AvVoidFn _edIndent, _edOutdent, _edToggleComment, _edMoveUp, _edMoveDown, _edDuplicate, _edDeleteLine;
         private AvUintSetFn _edGotoLine; private EdFindFn _edFind; private AvStrFn _edReplaceSel; private EdReplaceAllFn _edReplaceAll;
@@ -352,6 +358,9 @@ namespace Unterm.Editor
             _edSetFont = Sym<AvStrFn>("unterm_editor_set_font");
             _edSetTheme = Sym<EdThemeFn>("unterm_editor_set_theme");
             _edSetLanguage = Sym<AvStrFn>("unterm_editor_set_language");
+            _edSetPath = SymOpt<AvStrFn>("unterm_editor_set_path");
+            _edRefreshDiff = SymOpt<AvVoidFn>("unterm_editor_refresh_diff");
+            _edPollDiff = SymOpt<BoolFn>("unterm_editor_poll_diff");
             _edRender = Sym<AvVoidFn>("unterm_editor_render");
             _edRawTexture = Sym<AvPtrFn>("unterm_editor_raw_texture");
             _edContentHeight = Sym<AvFloatFn>("unterm_editor_content_height");
@@ -370,6 +379,14 @@ namespace Unterm.Editor
             _edCopy = Sym<AvBufFn>("unterm_editor_copy");
             _edCut = Sym<AvBufFn>("unterm_editor_cut");
             _edMouse = Sym<EdMouseFn>("unterm_editor_mouse");
+            _edHover = SymOpt<EdHoverFn>("unterm_editor_hover");
+            _edHunkAt = SymOpt<EdHunkAtFn>("unterm_editor_hunk_at");
+            _edHunkStaged = SymOpt<EdStageHunkFn>("unterm_editor_hunk_staged");
+            _edHunkHasStaged = SymOpt<EdStageHunkFn>("unterm_editor_hunk_has_staged");
+            _edHunkStagedOnly = SymOpt<EdStageHunkFn>("unterm_editor_hunk_staged_only");
+            _edStageHunk = SymOpt<EdStageHunkFn>("unterm_editor_stage_hunk");
+            _edUnstageHunk = SymOpt<EdStageHunkFn>("unterm_editor_unstage_hunk");
+            _edRevertHunk = SymOpt<AvUintSetFn>("unterm_editor_revert_hunk");
             _edScroll = Sym<AvF1Fn>("unterm_editor_scroll");
             _edSetScroll = Sym<AvF1Fn>("unterm_editor_set_scroll");
             _edScrollOffset = Sym<AvFloatFn>("unterm_editor_scroll_offset");
@@ -627,6 +644,12 @@ namespace Unterm.Editor
             _edSetTheme(id, bg.r, bg.g, bg.b, bg.a, fg.r, fg.g, fg.b, dark);
         /// Tree-sitter language token (e.g. "cs"); empty/unknown = plain.
         public void EditorSetLanguage(ulong id, string token) => _edSetLanguage(id, token ?? string.Empty);
+        /// Open file path for git-diff gutter markers (empty = clear); kicks a fetch.
+        public void EditorSetPath(ulong id, string path) => _edSetPath?.Invoke(id, path ?? string.Empty);
+        /// Re-fetch the git base for the diff markers (focus / after save).
+        public void EditorRefreshDiff(ulong id) => _edRefreshDiff?.Invoke(id);
+        /// Apply a finished background git fetch; true if new markers arrived (re-render).
+        public bool EditorPollDiff(ulong id) => _edPollDiff?.Invoke(id) ?? false;
         public void EditorRender(ulong id) => _edRender(id);
         public IntPtr EditorRawTexture(ulong id) => _edRawTexture(id);
         public float EditorContentHeight(ulong id) => _edContentHeight(id);
@@ -649,6 +672,22 @@ namespace Unterm.Editor
         public string EditorCut(ulong id) { var p = _edCut(id, out UIntPtr len); return Utf8(p, len); }
         /// Mouse at physical px: kind 0 click, 1 drag, 2 double-click, 3 triple-click.
         public void EditorMouse(ulong id, float x, float y, byte kind) => _edMouse(id, x, y, kind);
+        /// Pointer moved (no button): show/hide the diff-peek tooltip; true = re-render.
+        public bool EditorHover(ulong id, float x, float y) => _edHover?.Invoke(id, x, y) ?? false;
+        /// The git-diff hunk index a click at (x,y) targets (gutter lane), or -1.
+        public int EditorHunkAt(ulong id, float x, float y) => _edHunkAt?.Invoke(id, x, y) ?? -1;
+        /// Whether the hunk is already staged (menu shows Unstage instead of Stage).
+        public bool EditorHunkStaged(ulong id, int hunk) => _edHunkStaged?.Invoke(id, (uint)hunk) ?? false;
+        /// Whether any staged content overlaps the hunk (partially staged regions too).
+        public bool EditorHunkHasStaged(ulong id, int hunk) => _edHunkHasStaged?.Invoke(id, (uint)hunk) ?? false;
+        /// Staged-only (buffer already at HEAD): revert is a no-op, menu offers just Unstage.
+        public bool EditorHunkStagedOnly(ulong id, int hunk) => _edHunkStagedOnly?.Invoke(id, (uint)hunk) ?? false;
+        /// Stage hunk to the git index (like `git add -p`); true on success.
+        public bool EditorStageHunk(ulong id, int hunk) => _edStageHunk?.Invoke(id, (uint)hunk) ?? false;
+        /// Unstage hunk (like `git restore --staged -p`); true on success.
+        public bool EditorUnstageHunk(ulong id, int hunk) => _edUnstageHunk?.Invoke(id, (uint)hunk) ?? false;
+        /// Revert hunk to its git-base content (one undoable buffer edit).
+        public void EditorRevertHunk(ulong id, int hunk) => _edRevertHunk?.Invoke(id, (uint)hunk);
         public void EditorScroll(ulong id, float dy) => _edScroll(id, dy);
         public void EditorScrollH(ulong id, float dx) => _edScrollH(id, dx);
         public void EditorSetScroll(ulong id, float px) => _edSetScroll(id, px);
@@ -728,9 +767,11 @@ namespace Unterm.Editor
             _avInputCopy = null; _avInputCut = null; _avInputText = null;
             _edCreate = null; _edExists = null; _edDestroy = null; _edResize = null; _edSetScale = null; _edSetUndoLimit = null;
             _edSetFont = null; _edSetTheme = null; _edSetLanguage = null; _edRender = null; _edRawTexture = null;
+            _edSetPath = null; _edRefreshDiff = null; _edPollDiff = null;
             _edContentHeight = null; _edEditSerial = null; _edCaret = null; _edKey = null; _edSetFocus = null; _edInsert = null; _edSetPreedit = null;
             _edSetText = null; _edAddUsing = null; _edText = null; _edUndo = null; _edRedo = null; _edSelectAll = null;
-            _edCopy = null; _edCut = null; _edMouse = null; _edScroll = null;
+            _edCopy = null; _edCut = null; _edMouse = null; _edHover = null; _edScroll = null;
+            _edHunkAt = null; _edHunkStaged = null; _edHunkHasStaged = null; _edHunkStagedOnly = null; _edStageHunk = null; _edUnstageHunk = null; _edRevertHunk = null;
             _edSetScroll = null; _edScrollOffset = null; _edScrollH = null; _edIndent = null; _edOutdent = null;
             _edToggleComment = null; _edMoveUp = null; _edMoveDown = null; _edDuplicate = null;
             _edDeleteLine = null; _edGotoLine = null; _edFind = null; _edReplaceSel = null; _edReplaceAll = null;

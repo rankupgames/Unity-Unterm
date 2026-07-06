@@ -18,6 +18,7 @@ mod agentview;
 mod browser;
 mod clock;
 mod control;
+mod diff;
 mod editops;
 mod editorview;
 mod gpu;
@@ -1587,6 +1588,30 @@ pub unsafe extern "C" fn unterm_editor_set_language(id: u64, token: *const c_cha
     with_editor(id, (), |e| e.set_language(&token));
 }
 
+/// Set the open file's path so the editor can read its git-index version and draw
+/// diff gutter markers (empty/null = clear). Kicks a background fetch.
+///
+/// # Safety
+/// `path` must be a valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn unterm_editor_set_path(id: u64, path: *const c_char) {
+    let path = cstr(path);
+    with_editor(id, (), |e| e.set_path(&path));
+}
+
+/// Re-fetch the git base for the diff markers (call on focus / after save).
+#[no_mangle]
+pub extern "C" fn unterm_editor_refresh_diff(id: u64) {
+    with_editor(id, (), |e| e.refresh_diff());
+}
+
+/// Apply any finished background git fetch; returns true when new diff markers were
+/// applied (the host should re-render). Cheap to poll each editor tick.
+#[no_mangle]
+pub extern "C" fn unterm_editor_poll_diff(id: u64) -> bool {
+    with_editor(id, false, |e| e.poll_diff())
+}
+
 /// Render the editor surface into its IOSurface/shared texture.
 #[no_mangle]
 pub extern "C" fn unterm_editor_render(id: u64) {
@@ -1756,6 +1781,65 @@ pub unsafe extern "C" fn unterm_editor_cut(id: u64, out_len: *mut usize) -> *con
 #[no_mangle]
 pub extern "C" fn unterm_editor_mouse(id: u64, x: f32, y: f32, kind: u8) {
     with_editor(id, (), |e| e.mouse(x, y, kind));
+}
+
+/// Pointer moved (no button) at physical px: show/hide the diff-peek tooltip.
+/// Returns true when the host should re-render.
+#[no_mangle]
+pub extern "C" fn unterm_editor_hover(id: u64, x: f32, y: f32) -> bool {
+    with_editor(id, false, |e| e.hover(x, y))
+}
+
+/// The git-diff hunk index a click at physical px (`x`, `y`) targets, or -1 when
+/// the click isn't on a gutter marker. The host opens a Stage/Unstage/Revert menu
+/// for that hunk.
+#[no_mangle]
+pub extern "C" fn unterm_editor_hunk_at(id: u64, x: f32, y: f32) -> i32 {
+    with_editor(id, -1, |e| e.hunk_at(x, y))
+}
+
+/// Whether hunk `hunk_i` is already staged in the git index (the marker draws
+/// hollow); drives the host menu's Stage vs Unstage item.
+#[no_mangle]
+pub extern "C" fn unterm_editor_hunk_staged(id: u64, hunk_i: u32) -> bool {
+    with_editor(id, false, |e| e.hunk_staged(hunk_i as usize))
+}
+
+/// Whether any staged content overlaps hunk `hunk_i` — also true for a partially
+/// staged region (staged then edited further), where the menu offers Unstage
+/// alongside Stage.
+#[no_mangle]
+pub extern "C" fn unterm_editor_hunk_has_staged(id: u64, hunk_i: u32) -> bool {
+    with_editor(id, false, |e| e.hunk_has_staged(hunk_i as usize))
+}
+
+/// Whether hunk `hunk_i` is staged-only (the change lives in the index; the buffer
+/// is back at HEAD). Reverting the buffer is a no-op there, so the host menu hides
+/// Revert and offers just Unstage.
+#[no_mangle]
+pub extern "C" fn unterm_editor_hunk_staged_only(id: u64, hunk_i: u32) -> bool {
+    with_editor(id, false, |e| e.hunk_staged_only(hunk_i as usize))
+}
+
+/// Stage hunk `hunk_i` to the git index (like `git add -p` for that hunk). Returns
+/// true on success; refreshes the git texts so the marker then redraws hollow.
+#[no_mangle]
+pub extern "C" fn unterm_editor_stage_hunk(id: u64, hunk_i: u32) -> bool {
+    with_editor(id, false, |e| e.stage_hunk(hunk_i as usize))
+}
+
+/// Unstage hunk `hunk_i` (like `git restore --staged -p` for that hunk; the buffer
+/// is untouched). Returns true on success.
+#[no_mangle]
+pub extern "C" fn unterm_editor_unstage_hunk(id: u64, hunk_i: u32) -> bool {
+    with_editor(id, false, |e| e.unstage_hunk(hunk_i as usize))
+}
+
+/// Revert hunk `hunk_i` to its git-base content (one undoable buffer edit; leaves the
+/// document dirty until saved).
+#[no_mangle]
+pub extern "C" fn unterm_editor_revert_hunk(id: u64, hunk_i: u32) {
+    with_editor(id, (), |e| e.revert_hunk(hunk_i as usize));
 }
 
 /// Scroll vertically by `dy` physical px (mouse wheel).
