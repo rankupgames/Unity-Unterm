@@ -77,6 +77,15 @@ namespace Unterm.Editor
         private Texture2D _tex;
         private IntPtr _externalTexPtr;
 
+        // Last size/theme pushed to native, so RenderView (which runs per
+        // keystroke/drag/scroll) skips those P/Invokes when nothing changed.
+        // Reset in LoadNative so a fresh or re-adopted view is always sent both.
+        private uint _sentW, _sentH;
+        private float _sentPpp;
+        private Color _sentBg;
+        private bool _sentDark;
+        private bool _themeSent;
+
         // IME: a hidden IMGUI field at the caret drives composition + plain typing;
         // committed text is flushed into the native editor each Repaint.
         private string _imeBuffer = "";
@@ -429,6 +438,11 @@ namespace Unterm.Editor
                 var (w, h) = CurrentSize();
                 float ppp = EditorGUIUtility.pixelsPerPoint;
 
+                // New or re-adopted view: force the next RenderView to push size
+                // and theme (the change-gates otherwise carry "already sent" state
+                // from a previous view into this one).
+                _sentW = _sentH = 0; _sentPpp = 0f; _themeSent = false;
+
                 // Adopt our own native view only if no OTHER live window already
                 // owns this id. Native editor ids are recycled (alloc = max id + 1, so
                 // closing the top one frees its number), so a window restored with a
@@ -514,6 +528,8 @@ namespace Unterm.Editor
             if (_native == null || _editorId == 0) return;
             Color bg = GetEditorBackground();
             bool dark = EditorGUIUtility.isProSkin;
+            if (_themeSent && bg == _sentBg && dark == _sentDark) return;
+            _sentBg = bg; _sentDark = dark; _themeSent = true;
             Color32 fg = dark
                 ? new Color32(210, 210, 214, 255)
                 : new Color32(32, 32, 32, 255);
@@ -526,7 +542,11 @@ namespace Unterm.Editor
             if (_native == null || _editorId == 0) return;
             float ppp = EditorGUIUtility.pixelsPerPoint;
             var (w, h) = CurrentSize();
-            _native.EditorResize(Eid, w, h, ppp);
+            if (w != _sentW || h != _sentH || ppp != _sentPpp)
+            {
+                _sentW = w; _sentH = h; _sentPpp = ppp;
+                _native.EditorResize(Eid, w, h, ppp);
+            }
             ApplyTheme();
             _native.EditorRender(Eid);
             UploadSurface((int)w, (int)h);
@@ -551,16 +571,34 @@ namespace Unterm.Editor
             }
         }
 
+        // The internal method resolves once and the color it returns depends only
+        // on the skin, so both are cached — the reflective lookup + Invoke used to
+        // run on every RenderView (every keystroke/drag/scroll).
+        private static System.Reflection.MethodInfo s_bgMethod;
+        private static bool s_bgLooked;
+        private static Color s_bgColor;
+        private static bool s_bgDark, s_bgValid;
+
         private static Color GetEditorBackground()
         {
-            var m = typeof(EditorGUIUtility).GetMethod(
-                "GetDefaultBackgroundColor",
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-            if (m != null && m.ReturnType == typeof(Color))
-                return (Color)m.Invoke(null, null);
-            return EditorGUIUtility.isProSkin
-                ? (Color)new Color32(40, 40, 40, 255)
-                : (Color)new Color32(220, 220, 220, 255);
+            bool dark = EditorGUIUtility.isProSkin;
+            if (s_bgValid && s_bgDark == dark) return s_bgColor;
+            if (!s_bgLooked)
+            {
+                s_bgLooked = true;
+                var m = typeof(EditorGUIUtility).GetMethod(
+                    "GetDefaultBackgroundColor",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                if (m != null && m.ReturnType == typeof(Color)) s_bgMethod = m;
+            }
+            s_bgColor = s_bgMethod != null
+                ? (Color)s_bgMethod.Invoke(null, null)
+                : EditorGUIUtility.isProSkin
+                    ? (Color)new Color32(40, 40, 40, 255)
+                    : (Color)new Color32(220, 220, 220, 255);
+            s_bgDark = dark;
+            s_bgValid = true;
+            return s_bgColor;
         }
 
         // --- GUI ---------------------------------------------------------------
