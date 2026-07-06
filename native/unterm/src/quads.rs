@@ -5,7 +5,38 @@
 //! the cursor block/outline, and the selection highlight (radius 0 = sharp).
 
 use bytemuck::{Pod, Zeroable};
-use wgpu::util::DeviceExt;
+
+/// A grow-only vertex buffer reused across frames: rewritten in place on every
+/// prepare and reallocated only when the data outgrows its capacity, instead of
+/// creating (and deferred-destroying) a fresh GPU buffer per frame.
+struct GrowBuffer {
+    label: &'static str,
+    buf: Option<wgpu::Buffer>,
+    capacity: u64,
+}
+
+impl GrowBuffer {
+    fn new(label: &'static str) -> Self {
+        Self { label, buf: None, capacity: 0 }
+    }
+
+    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, bytes: &[u8]) {
+        let size = bytes.len() as u64;
+        if size == 0 {
+            return; // keep the old allocation; the caller's count guards the draw
+        }
+        if self.buf.is_none() || size > self.capacity {
+            self.buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(self.label),
+                size,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            self.capacity = size;
+        }
+        queue.write_buffer(self.buf.as_ref().unwrap(), 0, bytes);
+    }
+}
 
 /// A rounded rectangle in pixel coordinates (origin top-left).
 #[derive(Clone, Copy)]
@@ -38,7 +69,8 @@ pub struct QuadRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniform_buf: wgpu::Buffer,
-    instances: Option<wgpu::Buffer>,
+    instances: GrowBuffer,
+    scratch: Vec<Instance>,
     count: u32,
 }
 
@@ -137,7 +169,8 @@ impl QuadRenderer {
             pipeline,
             bind_group,
             uniform_buf,
-            instances: None,
+            instances: GrowBuffer::new("unterm-quad-instances"),
+            scratch: Vec::new(),
             count: 0,
         }
     }
@@ -158,31 +191,23 @@ impl QuadRenderer {
             }),
         );
 
-        let data: Vec<Instance> = quads
-            .iter()
-            .map(|q| Instance {
-                rect: [q.x, q.y, q.w, q.h],
-                color: q.color,
-                radius: q.radius,
-                _pad: [0.0; 3],
-            })
-            .collect();
-        self.count = data.len() as u32;
-        self.instances = if data.is_empty() {
-            None
-        } else {
-            Some(
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("unterm-quad-instances"),
-                    contents: bytemuck::cast_slice(&data),
-                    usage: wgpu::BufferUsages::VERTEX,
-                }),
-            )
-        };
+        self.scratch.clear();
+        self.scratch.extend(quads.iter().map(|q| Instance {
+            rect: [q.x, q.y, q.w, q.h],
+            color: q.color,
+            radius: q.radius,
+            _pad: [0.0; 3],
+        }));
+        self.count = self.scratch.len() as u32;
+        self.instances
+            .upload(device, queue, bytemuck::cast_slice(&self.scratch));
     }
 
     pub fn render<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
-        let Some(instances) = &self.instances else {
+        if self.count == 0 {
+            return;
+        }
+        let Some(instances) = &self.instances.buf else {
             return;
         };
         pass.set_pipeline(&self.pipeline);
@@ -207,7 +232,7 @@ pub struct MeshRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniform_buf: wgpu::Buffer,
-    verts: Option<wgpu::Buffer>,
+    verts: GrowBuffer,
     count: u32,
 }
 
@@ -282,7 +307,7 @@ impl MeshRenderer {
             multiview_mask: None,
             cache: None,
         });
-        Self { pipeline, bind_group, uniform_buf, verts: None, count: 0 }
+        Self { pipeline, bind_group, uniform_buf, verts: GrowBuffer::new("unterm-mesh-verts"), count: 0 }
     }
 
     pub fn prepare(
@@ -298,19 +323,14 @@ impl MeshRenderer {
             bytemuck::bytes_of(&Uniforms { resolution: [resolution.0, resolution.1], _pad: [0.0; 2] }),
         );
         self.count = verts.len() as u32;
-        self.verts = if verts.is_empty() {
-            None
-        } else {
-            Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("unterm-mesh-verts"),
-                contents: bytemuck::cast_slice(verts),
-                usage: wgpu::BufferUsages::VERTEX,
-            }))
-        };
+        self.verts.upload(device, queue, bytemuck::cast_slice(verts));
     }
 
     pub fn render<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
-        let Some(verts) = &self.verts else { return };
+        if self.count == 0 {
+            return;
+        }
+        let Some(verts) = &self.verts.buf else { return };
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, verts.slice(..));
