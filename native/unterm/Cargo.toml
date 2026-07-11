@@ -75,6 +75,7 @@ egui-winit = "0.35"
 # Player discovery: bind the Unity multicast group with SO_REUSEPORT (shared with the
 # editor's own listener) — std's UdpSocket can't set the sockopt before bind.
 socket2 = { version = "0.5", features = ["all"] }
+tree-sitter-md = "0.5.3"
 
 # Graceful child shutdown: SIGTERM the `claude` process before falling back to
 # SIGKILL, so it can finalize its transcript (std's Child::kill is SIGKILL-only).

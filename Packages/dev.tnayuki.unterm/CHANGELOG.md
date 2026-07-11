@@ -9,6 +9,8 @@
 - Breakpoints live in `Library/Unterm/breakpoints.json`, shared between the editor and the debugger and synced live in both directions: toggling in the code editor arms/disarms in a running debug session immediately (even mid-play), and toggling in the debugger — including while the editor is frozen at a breakpoint — updates the editor's gutter dots as soon as it runs again.
 - The debugger can attach to more than the editor: development builds with script debugging enabled are discovered on the network via Unity's player multicast and offered in a target picker (labelled with their project and host), and source locations reported by a player built on another machine are mapped back to this project's files for display and breakpoints.
 
+- The code editor now syntax-highlights Markdown while editing and can render it (toggle Preview with ⇧⌘V, or the tab ⋮ / right-click menu); a `.md` opened from a transcript or preview link opens rendered by default, while a Project double-click opens for editing.
+
 - The set of file extensions the code editor opens is now its own preference (Preferences ▸ Unterm ▸ Code Editor, semicolon-separated, with a reset button) instead of borrowing Unity's C# project-generation extension settings — Unterm never generates `.csproj` files, so tying "what opens" to a generation setting that never runs was misleading. The default covers Unity's code and text formats plus the docs, configs, and native-plugin sources an agent transcript typically links (`md`, `yml`, `toml`, `rs`, `c`/`cpp`, `java`/`kt`, `swift`, shell scripts, …), so those open in-editor out of the box.
 
 ### Fixed
