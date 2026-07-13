@@ -82,6 +82,22 @@ jobs:
           native/generate-notices.sh
           git diff --exit-code -- "Packages/dev.tnayuki.unterm/Third Party Notices.md"
 
+      - name: Verify pinned source provenance
+        env:
+          HARDENING_BRANCH: feat/toolkit-icon-performance-mcp
+          UPSTREAM_BASE_COMMIT: ead1391bd38532eebfb9f13f10064eddc372b769
+        run: |
+          jq -e \
+            --arg hardeningBranch "$HARDENING_BRANCH" \
+            --arg upstreamBaseCommit "$UPSTREAM_BASE_COMMIT" \
+            '.schemaVersion == 1 and
+             .source.repository == "https://github.com/tnayuki/Unity-Unterm" and
+             .source.commit == $upstreamBaseCommit and
+             .distribution.repository == "https://github.com/rankupgames/Unity-Unterm" and
+             .distribution.sourceBranch == "upstream/main" and
+             .distribution.hardeningBranch == $hardeningBranch' \
+            provenance/source.json
+
       - name: Upload SBOM and notices
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

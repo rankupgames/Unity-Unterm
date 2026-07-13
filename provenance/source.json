@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": {
     "repository": "https://github.com/tnayuki/Unity-Unterm",
-    "commit": "b4d8bd2d91751e251f0efb9b72e606471d168969",
+    "commit": "ead1391bd38532eebfb9f13f10064eddc372b769",
     "packageVersion": "0.6.0",
     "license": "MIT",
     "licenseFiles": [
@@ -12,8 +12,8 @@
   },
   "distribution": {
     "repository": "https://github.com/rankupgames/Unity-Unterm",
-    "sourceBranch": "main",
-    "hardeningBranch": "feat/harden-unterm-for-toolkit",
+    "sourceBranch": "upstream/main",
+    "hardeningBranch": "feat/toolkit-icon-performance-mcp",
     "supportedUnity": "6000.3",
     "supportedEditorPlatforms": [
       "macOS",
