@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Unterm now ships a full Mono debugger for play mode. Enable it under Preferences ▸ Unterm ▸ Debugger and click in the code editor's gutter to set breakpoints (a dedicated dot column appears next to the line numbers); pressing Play then just debugs — the debugger attaches to the editor's Mono runtime over the soft-debugger protocol, arms your breakpoints as their types load (so a breakpoint in `Awake`/`Start` hits from the very first frame), and pops to the front when one hits. It runs as a standalone process with its own window (`Window ▸ Unterm ▸ Debugger (Standalone Process)`, ⇧⌘D), so it stays fully interactive while the editor is frozen at a breakpoint, and it persists across Play/Stop cycles.
+- The debugger window gives you the essentials of an IDE debugger, rendered with the same native code editor as Unterm's own: a project file tree, a read-only source view with the executing line highlighted, continue / step over / into / out (also `c`/`n`/`i`/`o`), pause ("break all", `p`), a call stack you can click to inspect any frame, a thread list when a stop involves multiple managed threads, and a variables panel showing locals, `this`, and inherited fields — private members included — with lazy expansion of objects and arrays (reference cycles like `transform ↔ gameObject` are handled). Hovering an identifier in the source shows its current value, and the breakpoint list jumps to source on click.
+- Breakpoints live in `Library/Unterm/breakpoints.json`, shared between the editor and the debugger and synced live in both directions: toggling in the code editor arms/disarms in a running debug session immediately (even mid-play), and toggling in the debugger — including while the editor is frozen at a breakpoint — updates the editor's gutter dots as soon as it runs again.
+- The debugger can attach to more than the editor: development builds with script debugging enabled are discovered on the network via Unity's player multicast and offered in a target picker (labelled with their project and host), and source locations reported by a player built on another machine are mapped back to this project's files for display and breakpoints.
+
+- The code editor now syntax-highlights Markdown while editing and can render it (toggle Preview with ⇧⌘V, or the tab ⋮ / right-click menu); a `.md` opened from a transcript or preview link opens rendered by default, while a Project double-click opens for editing.
+
+- The set of file extensions the code editor opens is now its own preference (Preferences ▸ Unterm ▸ Code Editor, semicolon-separated, with a reset button) instead of borrowing Unity's C# project-generation extension settings — Unterm never generates `.csproj` files, so tying "what opens" to a generation setting that never runs was misleading. The default covers Unity's code and text formats plus the docs, configs, and native-plugin sources an agent transcript typically links (`md`, `yml`, `toml`, `rs`, `c`/`cpp`, `java`/`kt`, `swift`, shell scripts, …), so those open in-editor out of the box.
+
+### Fixed
+
+- The Unterm code editor stays selected as the External Script Editor across package updates — it's now recognized by package identity rather than the exact cached path (which changes each update), so script and link opens keep landing in Unterm instead of silently falling back to another editor.
+- File-path links in the Claude Code transcript now underline every existing file instead of only a hard-coded list of code extensions, and a click always opens the file somewhere: the configured script editor first, then Unity's own asset pipeline on decline (a scene link loads the scene, a prefab opens in prefab mode, an image opens in its associated app), and the OS default app for files outside the asset database — so paths like `native/**/*.rs` or `docs/*.md` no longer show an underline that does nothing when clicked.
+
 ## [0.6.0] - 2026-07-08
 
 ### Added
