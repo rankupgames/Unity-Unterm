@@ -201,10 +201,8 @@ namespace Unterm.Editor
         // Library/PackageCache.
 #if UNITY_EDITOR_WIN
         private const string PluginGuid = "3c18e287bcb84b3ba7fc203c80c79bf3";
-        private const string PluginFallback = "Unterm/Plugins/Windows/x86_64/unterm.dll";
 #else
         private const string PluginGuid = "54ea61c3e6ad54b688596fae0846fc88";
-        private const string PluginFallback = "Unterm/Plugins/macOS/unterm.dylib";
 #endif
 
         // Ensure Unity has mapped the native plugin — running UnityPluginLoad,
@@ -228,10 +226,9 @@ namespace Unterm.Editor
             {
                 var assetPath = AssetDatabase.GUIDToAssetPath(PluginGuid);
                 if (string.IsNullOrEmpty(assetPath))
-                {
-                    // Fallback to the in-repo source layout.
-                    return Path.Combine(Application.dataPath, PluginFallback);
-                }
+                    throw new FileNotFoundException(
+                        $"Unterm native plugin GUID {PluginGuid} is not present in the AssetDatabase. " +
+                        "The vendored package is incomplete or its .meta file changed.");
 
                 // Map the virtual asset path to a physical one. For packages cached
                 // under Library/PackageCache the "Packages/<name>" prefix is virtual,
@@ -241,10 +238,16 @@ namespace Unterm.Editor
                 {
                     var prefix = "Packages/" + pkg.name;
                     var rel = assetPath.Substring(prefix.Length).TrimStart('/');
-                    return Path.Combine(pkg.resolvedPath, rel);
+                    string packagePath = Path.Combine(pkg.resolvedPath, rel);
+                    if (!File.Exists(packagePath))
+                        throw new FileNotFoundException("Unterm native plugin is missing.", packagePath);
+                    return packagePath;
                 }
 
-                return Path.GetFullPath(assetPath);
+                string physicalPath = Path.GetFullPath(assetPath);
+                if (!File.Exists(physicalPath))
+                    throw new FileNotFoundException("Unterm native plugin is missing.", physicalPath);
+                return physicalPath;
             }
         }
 

@@ -118,4 +118,3 @@ InitTestScene*.unity*
 # `.meta` files stay tracked so GUIDs are stable.
 /Packages/dev.tnayuki.unterm/Editor/Plugins/macOS/unterm.dylib
 /Packages/dev.tnayuki.unterm/Editor/Plugins/Windows/x86_64/unterm.dll
-/Packages/dev.tnayuki.unterm/Third Party Notices.md

@@ -32,9 +32,10 @@ start in the project root.
 Unterm has an in-Editor Claude Code agent panel — a transcript and composer that
 drive Anthropic's standalone Claude Code engine in-process, no Node required.
 
-1. Open **Preferences ▸ Unterm** and click **Download Claude Code**. The engine
-   (~214 MB) is fetched from Anthropic's official npm registry into a per-user
-   folder shared by all your projects.
+1. Open **Preferences ▸ Unterm** and click **Download Claude Code**. A reviewed,
+   pinned engine release is fetched from Anthropic's official npm registry into a
+   per-user folder shared by all your projects. Its archive is size-bounded,
+   layout-validated, and verified against a platform-specific SHA-512 digest.
 2. Sign in with your own Anthropic account: run `claude login` (or type `/login`
    in the panel, which opens a terminal for the browser sign-in).
 3. Open the panel from **Window ▸ Unterm ▸ Claude Code**. The menu item stays
@@ -49,9 +50,19 @@ Editor ▸ Unterm Code Editor**. Afterwards, double-clicking a script, jumping t
 compile error, **Open C# Project**, and file paths clicked in the Claude Code
 transcript all open there.
 
+## Security boundary
+
+Unity MCP tools are disabled by default and require explicit confirmation in
+**Preferences ▸ Unterm**. Once enabled, read-only requests can run unattended;
+every mutating or dangerous call requires one-shot Editor approval. Such calls
+are denied in batch mode, unknown tools fail closed, and arbitrary C# execution
+is always dangerous. Claude permission-bypass modes are rejected, and the
+managed Claude process receives an explicit environment allowlist.
+
 ## Platform
 
-macOS and Windows — the zero-copy display platforms. The renderer hands the
+macOS and Windows with Unity 6.3 (6000.3) or newer — the zero-copy display
+platforms. The renderer hands the
 editor a GPU texture with no CPU copy: an IOSurface (Metal) on macOS, a shared
 D3D12 texture on Windows. The menu item is registered only on those editors; on
 any other platform the package contributes nothing.
@@ -59,7 +70,7 @@ any other platform the package contributes nothing.
 The package ships prebuilt native binaries — a universal (arm64 + x86_64)
 `unterm.dylib` for macOS and an `unterm.dll` for Windows (x86_64). To rebuild
 from the Rust source, run `native/build-macos.sh` or `native/build-windows.ps1`
-in the [development repository](https://github.com/tnayuki/Unity-Unterm).
+in the [hardened development repository](https://github.com/rankupgames/Unity-Unterm).
 
 ## License
 

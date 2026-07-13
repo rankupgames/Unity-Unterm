@@ -18,6 +18,14 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 
+# Keep host paths out of debug information and derive timestamps from the source
+# commit so repeated builds of the same revision have stable inputs.
+if ([string]::IsNullOrWhiteSpace($env:SOURCE_DATE_EPOCH)) {
+    $env:SOURCE_DATE_EPOCH = (git -C (Join-Path $PSScriptRoot '..') log -1 --pretty=%ct)
+}
+$nativeRoot = (Resolve-Path -LiteralPath $PSScriptRoot).Path
+$env:RUSTFLAGS = (($env:RUSTFLAGS + " --remap-path-prefix=$nativeRoot=.").Trim())
+
 $cargoFlags = @()
 $targetDir = 'debug'
 if ($Configuration -eq 'release') {
@@ -31,7 +39,7 @@ if ($Configuration -eq 'release') {
 rustup target add $Target | Out-Null
 
 Write-Host "==> building unterm ($Configuration, $Target)"
-cargo build -p unterm @cargoFlags --target $Target
+cargo build -p unterm --locked @cargoFlags --target $Target
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed (exit $LASTEXITCODE)" }
 
 $dest = Join-Path $PSScriptRoot '..\Packages\dev.tnayuki.unterm\Editor\Plugins\Windows\x86_64\unterm.dll'

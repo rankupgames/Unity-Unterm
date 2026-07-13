@@ -13,19 +13,12 @@ tailing logs. Unterm puts a genuine terminal *inside* the editor: not a
 log capture or a command runner, but a full VT emulator running your login
 shell, so `vim`, `tmux`, REPLs, and TUIs all work.
 
-## Install
+## Distribution
 
-Add to `Packages/manifest.json`:
-
-```json
-{
-  "dependencies": {
-    "dev.tnayuki.unterm": "https://github.com/tnayuki/Unity-Unterm.git#upm"
-  }
-}
-```
-
-Pin a version: `...git#upm/v0.2.0` (CI tags the `upm` branch as `upm/<tag>`).
+This hardened fork is maintained as an internal dependency of Unity Cursor
+Toolkit. It is not published as a standalone UPM feed. Consumers vendor the
+package from an audited commit together with the native binaries and provenance
+produced by this repository's CI workflow.
 
 ## Usage
 
@@ -48,9 +41,11 @@ start in the project root.
 Unterm has an in-Editor Claude Code agent panel — a transcript and composer that
 drive Anthropic's standalone Claude Code engine in-process, no Node required.
 
-1. Open **Preferences ▸ Unterm** and click **Download Claude Code**. The engine
-   (~214 MB) is fetched from Anthropic's official npm registry into a per-user
-   folder shared by all your projects.
+1. Open **Preferences ▸ Unterm** and click **Download Claude Code**. The reviewed,
+   pinned engine release is fetched from Anthropic's official npm registry into a
+   per-user folder shared by all your projects. The archive is size-bounded,
+   layout-validated, and verified against its platform-specific SHA-512 digest
+   before installation.
 2. Sign in with your own Anthropic account: run `claude login` (or type `/login`
    in the panel, which opens a terminal for the browser sign-in).
 3. Open the panel from **Window ▸ Unterm ▸ Claude Code**. The menu item stays
@@ -65,6 +60,17 @@ Editor ▸ Unterm Code Editor**. Afterwards, double-clicking a script, jumping t
 compile error, **Open C# Project**, and file paths clicked in the Claude Code
 transcript all open there.
 
+## Security boundary
+
+Unity MCP tools are disabled by default. Enabling them requires confirmation in
+**Preferences ▸ Unterm**. Read-only calls can then run unattended, while every
+mutating or dangerous call requires a fresh Editor approval. Approval-required
+calls are denied in batch mode, unknown tools fail closed, and arbitrary C#
+execution is always dangerous. Claude Code permission-bypass modes are rejected.
+
+The managed Claude child process receives an explicit environment allowlist, so
+host credentials and unrelated secrets are not inherited by default.
+
 ## Platform
 
 macOS and Windows, Unity 6.3 (6000.3) or newer. The renderer hands the editor a
@@ -74,15 +80,17 @@ any other platform the package contributes nothing.
 
 ## Repository layout
 
-- `Packages/dev.tnayuki.unterm/` — the distributable UPM package. The native
-  `unterm.dylib` is a build artifact and is **not** tracked here; only its
-  `.meta` is. On each release (a `v*` tag) a GitHub Action builds the native
-  binaries — a universal `unterm.dylib` on a macOS runner and `unterm.dll` on a
-  Windows runner — and publishes the package, binaries included, to the `upm`
-  branch that the install URL points at, plus a matching `upm/<tag>`.
+- `Packages/dev.tnayuki.unterm/` — the vendorable UPM package source. Native
+  binaries are CI artifacts and are not tracked in Git.
 - `native/` — the Rust source for the terminal engine. Run
   `native/build-macos.sh` (or `native/build-windows.ps1`) to build the native
   binary into the package for in-editor development. Not part of the published source.
+- `provenance/` — the audited upstream revision, dependency remediation, and
+  reviewed downloader pin.
+
+Feature-branch pushes, `main`, and version tags build both native platforms,
+generate an SBOM and notices, publish checksums and build metadata, and attest
+the resulting evidence through GitHub Actions.
 
 ## License
 

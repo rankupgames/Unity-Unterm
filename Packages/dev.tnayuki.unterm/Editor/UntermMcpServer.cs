@@ -56,9 +56,16 @@ namespace Unterm.Editor
         public static string ToolsJson()
         {
             EnsureTools();
+            if (!UntermMcpSecurity.Enabled) return "[]";
             var arr = new JArray();
             foreach (var t in _tools.Values)
-                arr.Add(new JObject { ["name"] = t.Name, ["description"] = t.Description, ["inputSchema"] = t.InputSchema });
+                arr.Add(new JObject
+                {
+                    ["name"] = t.Name,
+                    ["description"] = t.Description + UntermMcpSecurity.DescriptionSuffix(t.Name),
+                    ["inputSchema"] = t.InputSchema,
+                    ["annotations"] = UntermMcpSecurity.CatalogAnnotations(t.Name),
+                });
             return arr.ToString(Formatting.None);
         }
 
@@ -104,6 +111,12 @@ namespace Unterm.Editor
                     var args = v["args"] as JObject ?? new JObject();
                     if (!_tools.TryGetValue(name, out var tool))
                         throw new Exception("unknown tool: " + name);
+                    if (!UntermMcpSecurity.TryAuthorize(name, args, out string authorizationError))
+                    {
+                        result = ToolResult("error: " + authorizationError, true);
+                        native.McpRespond(id, result);
+                        continue;
+                    }
                     object r = tool.Handler(args);
                     if (r is UntermDeferredResult deferred)
                     {

@@ -19,8 +19,9 @@ namespace Unterm.Editor
     /// with CSharpCompilation.Emit, Assembly.Load the bytes, and invoke. No domain
     /// reload, no temp files, and a compile error is isolated to this call.
     ///
-    /// WARNING: runs arbitrary code in the editor (no approval gate yet — MCP tool
-    /// calls bypass the agent permission prompt).
+    /// WARNING: runs arbitrary code in the editor. The central MCP policy classifies
+    /// this tool as dangerous, requires one-shot Editor approval for every call, and
+    /// denies it in batch mode.
     /// </summary>
     internal sealed class UntermExecuteCodeTools : IUntermToolGroup
     {

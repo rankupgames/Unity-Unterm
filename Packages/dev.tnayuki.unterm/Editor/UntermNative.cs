@@ -540,7 +540,7 @@ namespace Unterm.Editor
         public void AgentviewCaret(ulong id, out float x, out float y, out float w, out float h) =>
             _avCaret(id, out x, out y, out w, out h);
         public void AgentviewInterrupt(ulong id) { if (id != 0) _avInterrupt(id); }
-        /// Permission mode: "default" / "plan" / "acceptEdits" / "bypassPermissions".
+        /// Permission mode: "default" / "auto" / "plan" / "acceptEdits".
         public void AgentviewSetPermissionMode(ulong id, string mode) { if (id != 0) _avSetPermissionMode(id, mode ?? "default"); }
         public string AgentviewPermissionMode(ulong id) { var p = _avPermissionMode(id, out UIntPtr len); return Utf8(p, len); }
         /// Model alias ("opus"/"sonnet"/"haiku"), or "" / "default" for the engine default.

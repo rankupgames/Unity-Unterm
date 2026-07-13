@@ -8,7 +8,7 @@ namespace Unterm.Editor
     /// <summary>
     /// "Preferences &gt; Unterm" page. Its job is to download Anthropic's standalone
     /// engine binary with a button (see <see cref="UntermClaudeInstaller"/>) and show
-    /// the active and latest versions, the resolved binary path, and live download progress.
+    /// the active and pinned versions, the resolved binary path, and live download progress.
     /// Once the binary lands, the "Window/Unterm/Claude Code" menu enables on its own —
     /// its validate callback checks <c>File.Exists</c> live (see <see cref="ClaudeCode"/>).
     ///
@@ -23,12 +23,6 @@ namespace Unterm.Editor
         private static string s_message;          // last success / error line
         private static bool s_failed;
         private static EditorWindow s_repaintTarget;
-
-        // The registry's "latest" dist-tag, fetched once per page open in the
-        // background (network), so we can show "update available".
-        private static string s_latest;
-        private static volatile bool s_latestChecking;
-        private static bool s_latestChecked;
 
         [SettingsProvider]
         public static SettingsProvider Create()
@@ -56,14 +50,11 @@ namespace Unterm.Editor
                 "shared by all your Unity projects, and you sign in with your own `claude login`.",
                 MessageType.Info);
 
-            EnsureLatestChecked();
-
             string active = UntermClaudeInstaller.InstalledVersion();
             string resolved = ClaudeCode.ClaudePath;
             EditorGUILayout.LabelField("Active version",
                 string.IsNullOrEmpty(active) ? "(none — download required)" : active);
-            EditorGUILayout.LabelField("Latest version",
-                !string.IsNullOrEmpty(s_latest) ? s_latest : (s_latestChecking ? "checking…" : "(unknown)"));
+            EditorGUILayout.LabelField("Pinned version", UntermClaudeInstaller.PinnedVersion);
             using (new EditorGUI.DisabledScope(true))
                 EditorGUILayout.TextField("Binary path", string.IsNullOrEmpty(resolved) ? "(not found)" : resolved);
 
@@ -109,13 +100,35 @@ namespace Unterm.Editor
                 notify);
             if (nextNotify != notify)
                 UntermAgentPrefs.NotifySoundEnabled = nextNotify;
+
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Unity MCP", EditorStyles.boldLabel);
+            bool mcpEnabled = UntermMcpSecurity.Enabled;
+            bool nextMcpEnabled = EditorGUILayout.Toggle(
+                new GUIContent("Enable MCP tools",
+                    "Disabled by default. Read-only calls run after enablement; every mutation " +
+                    "requires one-shot Editor approval."),
+                mcpEnabled);
+            if (nextMcpEnabled != mcpEnabled)
+            {
+                if (nextMcpEnabled)
+                    UntermMcpSecurity.TryEnableWithConfirmation();
+                else
+                    UntermMcpSecurity.Disable();
+                UntermMcp.RefreshTools();
+            }
+            EditorGUILayout.HelpBox(
+                UntermMcpSecurity.Enabled
+                    ? "MCP is enabled. Mutating and dangerous calls still require one-shot approval."
+                    : "MCP is disabled. Claude Code receives no Unity MCP tool catalog.",
+                UntermMcpSecurity.Enabled ? MessageType.Warning : MessageType.Info);
         }
 
         private static void DrawAction()
         {
             string installed = UntermClaudeInstaller.InstalledVersion();
-            bool updateAvailable = !string.IsNullOrEmpty(s_latest) &&
-                                   !string.IsNullOrEmpty(installed) && s_latest != installed;
+            bool updateAvailable = !string.IsNullOrEmpty(installed) &&
+                                   installed != UntermClaudeInstaller.PinnedVersion;
 
             if (string.IsNullOrEmpty(installed))
             {
@@ -123,15 +136,13 @@ namespace Unterm.Editor
             }
             else if (updateAvailable)
             {
-                EditorGUILayout.LabelField("Status", $"Installed {installed} — update available ({s_latest})");
-                if (GUILayout.Button($"Update to {s_latest}")) StartDownload();
+                EditorGUILayout.LabelField("Status", $"Installed {installed} — approved version is {UntermClaudeInstaller.PinnedVersion}");
+                if (GUILayout.Button($"Install {UntermClaudeInstaller.PinnedVersion}")) StartDownload();
             }
             else
             {
                 EditorGUILayout.LabelField("Status", $"Installed ({installed})");
-                // Always fetches the current latest, so this doubles as "update" when
-                // the latest check couldn't run.
-                if (GUILayout.Button("Reinstall latest")) StartDownload();
+                if (GUILayout.Button("Reinstall pinned version")) StartDownload();
             }
         }
 
@@ -161,7 +172,6 @@ namespace Unterm.Editor
                     {
                         s_failed = false;
                         string v = UntermClaudeInstaller.InstalledVersion();
-                        s_latest = v; // we just fetched and installed the latest
                         s_message = $"Installed Claude Code {v}. The menu is now enabled.";
                         // The menu's validate checks File.Exists live, so it enables on
                         // its own; nothing else to refresh.
@@ -177,31 +187,6 @@ namespace Unterm.Editor
             {
                 IsBackground = true,
                 Name = "UntermClaudeDownload",
-            };
-            thread.Start();
-        }
-
-        // Fetch the registry's latest version once per page open, off the main thread.
-        private static void EnsureLatestChecked()
-        {
-            if (s_latestChecked || s_latestChecking) return;
-            s_latestChecking = true;
-            if (s_repaintTarget == null) s_repaintTarget = EditorWindow.focusedWindow;
-
-            var thread = new Thread(() =>
-            {
-                string v = UntermClaudeInstaller.LatestVersion();
-                EditorApplication.delayCall += () =>
-                {
-                    s_latest = v;
-                    s_latestChecking = false;
-                    s_latestChecked = true;
-                    s_repaintTarget?.Repaint();
-                };
-            })
-            {
-                IsBackground = true,
-                Name = "UntermLatestCheck",
             };
             thread.Start();
         }

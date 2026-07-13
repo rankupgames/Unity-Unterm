@@ -46,7 +46,7 @@ streaming-iterator = "0.1" # consume tree-sitter 0.25's QueryCursor::captures
 # version of the open file (default-features off = no https/ssh, just local repo
 # reads), `similar` line-diffs it against the live buffer. Both keep the Windows
 # cross-check no worse than today (already blocked by tree-sitter's cc step).
-git2 = { version = "0.20", default-features = false }
+git2 = { version = "0.21", default-features = false }
 similar = "2"
 
 # In-process MCP server hosted in the plugin so it survives Unity C# domain
