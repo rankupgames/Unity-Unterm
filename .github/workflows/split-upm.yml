@@ -55,11 +55,12 @@ jobs:
         env:
           BINSTALL_DISABLE_TELEMETRY: 'true'
         run: |
-          cargo binstall --no-confirm --locked \
+          cargo binstall --force --no-confirm --locked \
             cargo-audit@0.22.1 \
             cargo-deny@0.20.2 \
             cargo-cyclonedx@0.5.9 \
             cargo-about@0.9.1
+          command -v cargo-audit cargo-deny cargo-cyclonedx cargo-about > /dev/null
 
       - name: Verify the locked dependency graph
         run: cargo metadata --manifest-path native/Cargo.toml --locked --format-version 1 > /dev/null
