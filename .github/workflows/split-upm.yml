@@ -35,9 +35,20 @@ jobs:
           workspaces: native
 
       - name: Install pinned cargo-binstall
-        uses: taiki-e/install-action@1ee706eb04986370fc60419ba172594c51067f29 # v2.62.58
-        with:
-          tool: cargo-binstall@1.16.2
+        env:
+          CARGO_BINSTALL_SHA256: 3be2695803f7b9a86b9976f2bdb8568ed6e8df026bacfc39c8546d3c6ea34808
+          CARGO_BINSTALL_VERSION: 1.16.2
+        run: |
+          archive="$RUNNER_TEMP/cargo-binstall.tgz"
+          extract_dir="$RUNNER_TEMP/cargo-binstall"
+          url="https://github.com/cargo-bins/cargo-binstall/releases/download/v${CARGO_BINSTALL_VERSION}/cargo-binstall-x86_64-unknown-linux-musl.tgz"
+          mkdir -p "$extract_dir"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            "$url" --output "$archive"
+          echo "${CARGO_BINSTALL_SHA256}  ${archive}" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$extract_dir"
+          install -m 0755 "$extract_dir/cargo-binstall" "$HOME/.cargo/bin/cargo-binstall"
+          test "$(cargo binstall --version)" = "cargo-binstall ${CARGO_BINSTALL_VERSION}"
 
       - name: Install pinned supply-chain tools
         env:
