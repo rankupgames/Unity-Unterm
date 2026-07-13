@@ -10,7 +10,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: unterm-${{ github.workflow }}-${{ github.ref }}
+  group: unterm-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -205,7 +205,7 @@ jobs:
           retention-days: 30
 
   attest-builds:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: [build-macos, build-windows, supply-chain]
     runs-on: ubuntu-latest
     permissions:
