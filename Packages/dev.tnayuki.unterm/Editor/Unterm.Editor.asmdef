@@ -1,5 +1,5 @@
 {
-    "name": "Unterm.Editor",
+    "name": "UnityCursorToolkit.Vendor.Unterm.Editor",
     "rootNamespace": "Unterm.Editor",
     "references": [],
     "includePlatforms": [
@@ -16,7 +16,10 @@
         "System.Reflection.Metadata.dll"
     ],
     "autoReferenced": true,
-    "defineConstraints": [],
+    "defineConstraints": [
+        "UNITY_6000_3_OR_NEWER",
+        "UNITY_EDITOR_OSX || UNITY_EDITOR_WIN"
+    ],
     "versionDefines": [],
     "noEngineReferences": false
 }

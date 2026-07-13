@@ -2,7 +2,7 @@
     "name": "Unterm.Editor.Tests",
     "rootNamespace": "Unterm.Editor.Tests",
     "references": [
-        "Unterm.Editor"
+        "UnityCursorToolkit.Vendor.Unterm.Editor"
     ],
     "optionalUnityReferences": [
         "TestAssemblies"

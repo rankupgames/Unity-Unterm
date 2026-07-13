@@ -932,7 +932,7 @@ pub extern "C" fn unterm_agentview_browse_archived_count(id: u64) -> u64 {
     lock_views().get(&id).map_or(0, |v| v.browse_archived_count())
 }
 
-/// Set the permission mode (`default`/`plan`/`acceptEdits`/`bypassPermissions`).
+/// Set an interactive permission mode (`default`/`auto`/`plan`/`acceptEdits`).
 ///
 /// # Safety
 /// `mode` must be a valid C string or null.
@@ -2114,4 +2114,3 @@ pub unsafe extern "C" fn unterm_editor_complete(id: u64, prefix_len: u32, text: 
 // Keep `c_void` referenced so a header generator records the opaque handle type.
 #[doc(hidden)]
 pub type _UntermHandle = *mut c_void;
-

@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "repository": "https://github.com/tnayuki/Unity-Unterm",
+    "commit": "b4d8bd2d91751e251f0efb9b72e606471d168969",
+    "packageVersion": "0.6.0",
+    "license": "MIT",
+    "licenseFiles": [
+      "LICENSE",
+      "Packages/dev.tnayuki.unterm/LICENSE.md"
+    ]
+  },
+  "distribution": {
+    "repository": "https://github.com/rankupgames/Unity-Unterm",
+    "sourceBranch": "main",
+    "hardeningBranch": "feat/harden-unterm-for-toolkit",
+    "supportedUnity": "6000.3",
+    "supportedEditorPlatforms": [
+      "macOS",
+      "Windows"
+    ]
+  },
+  "claudeCode": {
+    "packageVersion": "0.3.183",
+    "embeddedCliVersion": "2.1.183",
+    "publishedAt": "2026-06-18T23:58:59.358Z",
+    "reviewedAt": "2026-07-13",
+    "minimumReleaseAgeDays": 7,
+    "registry": "https://registry.npmjs.org",
+    "integrity": {
+      "darwin-arm64": "sha512-o/+sxwKgXuw6RG5cERWjvcvL1CDSPe/TaXMhax+dq+V4lDOI5iTqg3y5Wfb6dL3xlWoTA2OhWowDQllKbE04LQ==",
+      "darwin-x64": "sha512-V7Cf8JeD5EPf4MPomFUlEblCIQI0wg+aWdOSqvfMsDmCBEHljd52CQ3a7W263oVt6I7QUfRTpX2KNvdma56rDA==",
+      "win32-x64": "sha512-h/XzbrSmXGroTk/FYKR6J4/8G9vDb1HUUUeNXeBGqGW1kppIiWPJKLRzjtSe0brVjADOKOT6tE5IHK0mV/1gBw=="
+    }
+  },
+  "rustRemediation": {
+    "plist": "1.10.0",
+    "quick-xml": "0.41.0",
+    "anyhow": "1.0.103",
+    "memmap2": "0.9.11",
+    "git2": "0.21.0",
+    "unmaintainedTransitives": [
+      {
+        "advisory": "RUSTSEC-2025-0141",
+        "crate": "bincode 1.3.3",
+        "introducedBy": "syntect",
+        "disposition": "informational; tracked for upstream removal"
+      },
+      {
+        "advisory": "RUSTSEC-2017-0008",
+        "crate": "serial 0.4.0",
+        "introducedBy": "portable-pty",
+        "disposition": "informational; tracked for upstream removal"
+      },
+      {
+        "advisory": "RUSTSEC-2026-0192",
+        "crate": "ttf-parser 0.25.1",
+        "introducedBy": "fontdb/cosmic-text/glyphon",
+        "disposition": "informational; tracked for upstream removal"
+      },
+      {
+        "advisory": "RUSTSEC-2024-0320",
+        "crate": "yaml-rust 0.4.5",
+        "introducedBy": "syntect",
+        "disposition": "informational; tracked for upstream removal"
+      }
+    ]
+  }
+}

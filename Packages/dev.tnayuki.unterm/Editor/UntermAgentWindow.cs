@@ -101,7 +101,7 @@ namespace Unterm.Editor
         [SerializeField] private bool _reconnectPending;
 
         private static readonly string[] s_modes =
-            { "default", "auto", "plan", "acceptEdits", "bypassPermissions" };
+            { "default", "auto", "plan", "acceptEdits" };
 
         // Session ids currently driven by a live `claude` process — this window's,
         // another Unterm window's, or an external CLI — from Claude Code's own
@@ -1728,6 +1728,7 @@ namespace Unterm.Editor
         private void ApplyAgentSettings()
         {
             if (_native == null || _viewId == 0) return;
+            if (!IsAllowedPermissionMode(_permissionMode)) _permissionMode = "default";
             _native.AgentviewSetPermissionMode(Vid, _permissionMode);
             _native.AgentviewSetModel(Vid, _modelSelection);
             // Effort is applied at spawn (--effort), not here.
@@ -1735,13 +1736,21 @@ namespace Unterm.Editor
 
         private void SetPermissionMode(string mode)
         {
+            if (!IsAllowedPermissionMode(mode))
+            {
+                Debug.LogWarning("[Unterm] Rejected unsupported Claude permission mode: " + mode);
+                return;
+            }
             _permissionMode = mode;
             if (_native != null && _viewId != 0) _native.AgentviewSetPermissionMode(Vid, mode);
             Repaint();
         }
 
-        // Shift+Tab cycles default → plan → acceptEdits → bypassPermissions (the
-        // Claude Code convention).
+        /// <summary>Whether a permission mode preserves interactive authorization.</summary>
+        private static bool IsAllowedPermissionMode(string mode) =>
+            mode == "default" || mode == "auto" || mode == "plan" || mode == "acceptEdits";
+
+        // Shift+Tab cycles only modes that preserve the host authorization boundary.
         private void CyclePermissionMode()
         {
             int i = Array.IndexOf(s_modes, _permissionMode);
@@ -1798,7 +1807,6 @@ namespace Unterm.Editor
             "auto" => "Auto",
             "plan" => "Plan",
             "acceptEdits" => "Accept",
-            "bypassPermissions" => "Bypass",
             _ => "Default",
         };
 
@@ -2044,7 +2052,6 @@ namespace Unterm.Editor
                 m.AddItem(new GUIContent("Auto"), _permissionMode == "auto", () => SetPermissionMode("auto"));
             m.AddItem(new GUIContent("Plan"), _permissionMode == "plan", () => SetPermissionMode("plan"));
             m.AddItem(new GUIContent("Accept edits"), _permissionMode == "acceptEdits", () => SetPermissionMode("acceptEdits"));
-            m.AddItem(new GUIContent("Bypass permissions"), _permissionMode == "bypassPermissions", () => SetPermissionMode("bypassPermissions"));
             m.ShowAsContext();
         }
 

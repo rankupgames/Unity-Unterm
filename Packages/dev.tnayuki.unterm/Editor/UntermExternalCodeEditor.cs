@@ -19,10 +19,11 @@ namespace Unterm.Editor
     {
         // The "installation path" Unity stores as the selected editor. Unterm is
         // in-editor (no executable), but Unity's dropdown only lists installations
-        // whose path exists on disk — so we key off the package's own package.json,
-        // a real file unique to this package.
-        private static readonly string EditorKey =
-            Path.GetFullPath("Packages/dev.tnayuki.unterm/package.json");
+        // whose path exists on disk. The compiled assembly is real and stable within
+        // a project, and unlike a package.json path it remains valid when Unterm is
+        // embedded under another package's Editor/ThirdParty subtree.
+        internal static readonly string EditorKey =
+            Path.GetFullPath(typeof(UntermExternalCodeEditor).Assembly.Location);
 
         static UntermExternalCodeEditor()
         {

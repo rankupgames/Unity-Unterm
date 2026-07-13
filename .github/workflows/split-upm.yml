@@ -1,74 +1,178 @@
-name: Build native + publish UPM branch
-
-# The native binaries are NOT tracked in source (they bloat the repo and can't be
-# merged across branches). Instead this workflow builds the macOS .dylib and the
-# Windows .dll on their respective runners and publishes the package — source
-# files plus the freshly built binaries — to a distribution branch.
-#
-# Structure: two symmetric, parallel build jobs (one per platform) each upload
-# their binary as an artifact, then a single platform-neutral `publish` job
-# assembles them, runs the license gate, and pushes the channel branch.
-#
-# Two channels:
-#   - stable  (v* tags)     -> `upm` branch, pinned per release with an `upm/<tag>`.
-#   - preview (main pushes)  -> `upm-preview` branch, a rolling channel that advances
-#                              on every push with a machine-computed prerelease
-#                              version (see the publish step) and no human bump.
+name: Security, native builds, and provenance
 
 on:
+  pull_request:
   push:
+    branches: [main, 'feat/**']
     tags: ['v*']
-    branches: ['main']
   workflow_dispatch:
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
-  # One group per ref: rapid main pushes cancel superseded preview builds, while
-  # each tag (a distinct ref) gets its own group so a release is never cancelled
-  # by — nor cancels — an in-flight preview.
-  group: upm-${{ github.ref }}
+  group: unterm-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.94.1
+
 jobs:
-  build-macos:
-    runs-on: macos-latest
+  supply-chain:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
 
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo inputs
+        uses: Swatinem/rust-cache@aa7c1c80a07a27a84c0aa76d0cef0aad3830e330 # v2.7.8
         with:
           workspaces: native
+
+      - name: Install pinned cargo-binstall
+        env:
+          CARGO_BINSTALL_SHA256: 3be2695803f7b9a86b9976f2bdb8568ed6e8df026bacfc39c8546d3c6ea34808
+          CARGO_BINSTALL_VERSION: 1.16.2
+        run: |
+          archive="$RUNNER_TEMP/cargo-binstall.tgz"
+          extract_dir="$RUNNER_TEMP/cargo-binstall"
+          url="https://github.com/cargo-bins/cargo-binstall/releases/download/v${CARGO_BINSTALL_VERSION}/cargo-binstall-x86_64-unknown-linux-musl.tgz"
+          mkdir -p "$extract_dir"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            "$url" --output "$archive"
+          echo "${CARGO_BINSTALL_SHA256}  ${archive}" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$extract_dir"
+          install -m 0755 "$extract_dir/cargo-binstall" "$HOME/.cargo/bin/cargo-binstall"
+          grep -aFq "cargo-binstall/${CARGO_BINSTALL_VERSION}" "$HOME/.cargo/bin/cargo-binstall"
+          test "$(cargo binstall -V)" = "$CARGO_BINSTALL_VERSION"
+
+      - name: Install pinned supply-chain tools
+        env:
+          BINSTALL_DISABLE_TELEMETRY: 'true'
+        run: |
+          cargo binstall --force --no-confirm --locked \
+            cargo-audit@0.22.1 \
+            cargo-deny@0.20.2 \
+            cargo-cyclonedx@0.5.9 \
+            cargo-about@0.9.1
+          command -v cargo-audit cargo-deny cargo-cyclonedx cargo-about > /dev/null
+
+      - name: Verify the locked dependency graph
+        run: cargo metadata --manifest-path native/Cargo.toml --locked --format-version 1 > /dev/null
+
+      - name: Deny vulnerable and unsound Rust advisories
+        run: cargo audit --file native/Cargo.lock
+
+      - name: Enforce advisory, license, source, and dependency policy
+        run: cargo deny --manifest-path native/Cargo.toml --config native/deny.toml check advisories bans licenses sources
+
+      - name: Generate CycloneDX SBOM
+        working-directory: native/unterm
+        run: |
+          cargo cyclonedx --format json --override-filename unterm.cdx
+          test -s unterm.cdx.json
+
+      - name: Verify native third-party notices
+        run: |
+          native/generate-notices.sh
+          git diff --exit-code -- "Packages/dev.tnayuki.unterm/Third Party Notices.md"
+
+      - name: Upload SBOM and notices
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unterm-supply-chain
+          path: |
+            native/unterm/unterm.cdx.json
+            Packages/dev.tnayuki.unterm/Third Party Notices.md
+            provenance/source.json
+          if-no-files-found: error
+          retention-days: 30
+
+  build-macos:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Cache Cargo inputs
+        uses: Swatinem/rust-cache@aa7c1c80a07a27a84c0aa76d0cef0aad3830e330 # v2.7.8
+        with:
+          workspaces: native
+
+      - name: Run native tests and lints
+        working-directory: native
+        run: |
+          cargo test -p unterm --lib --locked
+          # Deny new warnings while preserving the upstream crate's documented
+          # legacy lint debt until those broad refactors can be reviewed separately.
+          cargo clippy -p unterm --lib --tests --locked -- \
+            -D warnings \
+            -A clippy::too_many_arguments \
+            -A clippy::type_complexity \
+            -A clippy::manual_div_ceil \
+            -A clippy::get_first \
+            -A clippy::if_same_then_else \
+            -A clippy::explicit_counter_loop \
+            -A clippy::needless_range_loop \
+            -A clippy::unnecessary_map_or \
+            -A clippy::manual_map \
+            -A clippy::missing_safety_doc
 
       - name: Build universal native bundle
         run: native/build-macos.sh release
 
-      - name: Upload dylib artifact
-        uses: actions/upload-artifact@v4
+      - name: Write checksum and build provenance
+        run: |
+          BINARY="Packages/dev.tnayuki.unterm/Editor/Plugins/macOS/unterm.dylib"
+          shasum -a 256 "$BINARY" > unterm-macos.sha256
+          jq -n \
+            --arg commit "$GITHUB_SHA" \
+            --arg runner "macos-latest" \
+            --arg toolchain "$RUST_TOOLCHAIN" \
+            --arg sourceDateEpoch "$(git log -1 --pretty=%ct)" \
+            --arg sha256 "$(awk '{print $1}' unterm-macos.sha256)" \
+            '{schemaVersion:1, commit:$commit, runner:$runner, rustToolchain:$toolchain, sourceDateEpoch:$sourceDateEpoch, artifact:"unterm.dylib", sha256:$sha256}' \
+            > build-provenance-macos.json
+
+      - name: Upload macOS build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: unterm-macos-dylib
-          path: Packages/dev.tnayuki.unterm/Editor/Plugins/macOS/unterm.dylib
+          name: unterm-macos
+          path: |
+            Packages/dev.tnayuki.unterm/Editor/Plugins/macOS/unterm.dylib
+            unterm-macos.sha256
+            build-provenance-macos.json
           if-no-files-found: error
+          retention-days: 30
 
   build-windows:
     runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal
+          rustup default $env:RUST_TOOLCHAIN
 
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo inputs
+        uses: Swatinem/rust-cache@aa7c1c80a07a27a84c0aa76d0cef0aad3830e330 # v2.7.8
         with:
           workspaces: native
 
@@ -76,122 +180,62 @@ jobs:
         shell: pwsh
         run: native/build-windows.ps1 -Configuration release
 
-      - name: Upload DLL artifact
-        uses: actions/upload-artifact@v4
+      - name: Write checksum and build provenance
+        shell: pwsh
+        run: |
+          $binary = 'Packages/dev.tnayuki.unterm/Editor/Plugins/Windows/x86_64/unterm.dll'
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash.ToLowerInvariant()
+          "$hash  unterm.dll" | Set-Content -Encoding ascii unterm-windows.sha256
+          $sourceDateEpoch = (git log -1 --pretty=%ct)
+          [ordered]@{
+              schemaVersion = 1
+              commit = $env:GITHUB_SHA
+              runner = 'windows-latest'
+              rustToolchain = $env:RUST_TOOLCHAIN
+              sourceDateEpoch = $sourceDateEpoch
+              artifact = 'unterm.dll'
+              sha256 = $hash
+          } | ConvertTo-Json | Set-Content -Encoding utf8 build-provenance-windows.json
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: unterm-windows-dll
-          path: Packages/dev.tnayuki.unterm/Editor/Plugins/Windows/x86_64/unterm.dll
+          name: unterm-windows
+          path: |
+            Packages/dev.tnayuki.unterm/Editor/Plugins/Windows/x86_64/unterm.dll
+            unterm-windows.sha256
+            build-provenance-windows.json
           if-no-files-found: error
+          retention-days: 30
 
-  publish:
-    needs: [build-macos, build-windows]
+  attest-builds:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: [build-macos, build-windows, supply-chain]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Download macOS build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          # Full history + tags: the preview channel derives its version from the
-          # latest stable tag, so it needs every `v*` tag visible. The checkout
-          # also carries the tracked plugin .meta files that the downloaded
-          # binaries land next to.
-          fetch-depth: 0
+          name: unterm-macos
+          path: artifacts/macos
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+      - name: Download Windows build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          workspaces: native
+          name: unterm-windows
+          path: artifacts/windows
 
-      - name: Download the macOS dylib built by build-macos
-        uses: actions/download-artifact@v4
+      - name: Download supply-chain evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: unterm-macos-dylib
-          path: Packages/dev.tnayuki.unterm/Editor/Plugins/macOS
+          name: unterm-supply-chain
+          path: artifacts/supply-chain
 
-      - name: Download the Windows DLL built by build-windows
-        uses: actions/download-artifact@v4
+      - name: Attest native binaries and evidence
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
-          name: unterm-windows-dll
-          path: Packages/dev.tnayuki.unterm/Editor/Plugins/Windows/x86_64
-
-      - name: Install cargo-about
-        # cargo-about gates its binary behind a non-default `cli` feature, so a
-        # source build without it installs no `cargo about` subcommand. Install
-        # from source with the feature enabled so this is deterministic.
-        run: cargo install cargo-about --locked --features cli
-
-      - name: Generate third-party license notices (license gate)
-        working-directory: native
-        run: |
-          # --fail: exit non-zero on a license that isn't in about.toml's
-          # `accepted` list (e.g. a GPL/AGPL/LGPL dependency that slips in), or
-          # one we can't resolve at all. Failing here aborts before the publish
-          # step — nothing reaches a distribution branch.
-          cargo about generate about.hbs --fail \
-            -o "../Packages/dev.tnayuki.unterm/Third Party Notices.md"
-
-      - name: Publish package to UPM branch
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          PKG="Packages/dev.tnayuki.unterm"
-          test -f "$PKG/Editor/Plugins/macOS/unterm.dylib" || { echo "dylib missing"; exit 1; }
-          test -f "$PKG/Editor/Plugins/Windows/x86_64/unterm.dll" || { echo "dll missing"; exit 1; }
-
-          # Route by ref: version tags publish the stable channel, main publishes
-          # the rolling preview channel, anything else (e.g. workflow_dispatch) is
-          # a build + license-gate dry run that never touches a distribution branch.
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            BRANCH="upm"
-            PIN_TAG="upm/${GITHUB_REF##*/}"
-            VERSION=""   # stable ships package.json as committed (bumped alongside the tag)
-          elif [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
-            BRANCH="upm-preview"
-            PIN_TAG=""
-            # The preview is a prerelease of the NEXT version, derived from the
-            # latest stable tag so cutting a release *is* the version bump: once
-            # v0.6.0 ships it becomes the newest tag and previews roll to
-            # 0.7.0-preview.*. The run number is the monotonic prerelease counter.
-            LATEST="$(git tag -l 'v*' --sort=-v:refname | grep -vE -- '-' | head -n1)"
-            LATEST="${LATEST:-v0.0.0}"
-            BASE="${LATEST#v}"
-            IFS=. read -r MAJ MIN _PAT <<< "$BASE"
-            VERSION="${MAJ}.$((MIN + 1)).0-preview.${GITHUB_RUN_NUMBER}"
-          else
-            echo "Ref $GITHUB_REF is not publishable; build + license gate only."
-            exit 0
-          fi
-
-          # Stage the package contents (including the just-downloaded, un-tracked
-          # binaries) as the root of a fresh orphan commit. Distribution branches
-          # are machine-generated, so history is disposable.
-          STAGE="$(mktemp -d)"
-          rsync -a "$PKG/" "$STAGE/"
-
-          # Preview: stamp the machine-computed version so the channel advances on
-          # every main push with no human bump. Stable keeps the committed version.
-          if [[ -n "$VERSION" ]]; then
-            jq --arg v "$VERSION" '.version = $v' "$STAGE/package.json" > "$STAGE/package.json.tmp"
-            mv "$STAGE/package.json.tmp" "$STAGE/package.json"
-            echo "Preview version: $VERSION"
-          fi
-
-          cd "$STAGE"
-          git init -q
-          git checkout -q -b "$BRANCH"
-          git add -A
-          git -c user.name="github-actions[bot]" \
-              -c user.email="github-actions[bot]@users.noreply.github.com" \
-              commit -q -m "Publish ${GITHUB_SHA} (${BRANCH})"
-
-          REMOTE="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-
-          # The floating channel branch always points at the latest publish; the
-          # stable channel additionally pins each release with an `upm/<tag>`.
-          git push --force "$REMOTE" "${BRANCH}:refs/heads/${BRANCH}"
-          if [[ -n "$PIN_TAG" ]]; then
-            git tag "$PIN_TAG"
-            git push "$REMOTE" "$PIN_TAG"
-          fi
+          subject-path: artifacts/**/*

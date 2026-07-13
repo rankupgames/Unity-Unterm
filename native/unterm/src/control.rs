@@ -48,6 +48,35 @@ pub const US: char = '\u{1f}';
 
 static NEXT_REQ: AtomicU64 = AtomicU64::new(1);
 
+/// Non-secret process context required by the managed Claude executable. Ambient
+/// Unity, CI, WispKey, GitHub, cloud-provider, and model-provider variables are not
+/// inherited unless their key is explicitly present here.
+const SAFE_CHILD_ENVIRONMENT: &[&str] = &[
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "PATH",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "PATHEXT",
+    "SystemRoot",
+    "WINDIR",
+    "ComSpec",
+];
+
 // ===========================================================================
 // Conversation model: serialized into the role-tagged transcript the renderer
 // parses (`role{US}body` blocks joined by `{RS}`). Roles: 'u' user, 'a' agent,
@@ -717,64 +746,19 @@ impl Driver {
             workdir.display()
         );
 
-        // Unity launched from the GUI inherits a minimal environment, so resolve
-        // `claude` the way it can be found on each OS.
-        let mut command = if std::path::Path::new(&cmd).is_absolute() {
-            // A known absolute path (e.g. a native install at ~/.local/bin/claude):
-            // exec it directly — no shell, no rc, no PATH lookup, same on every OS.
-            let mut c = Command::new(&cmd);
-            c.args(&args);
-            c
-        } else {
-            // Bare command name: resolve it on PATH the way a real terminal would.
-            #[cfg(windows)]
-            {
-                // Windows GUI processes inherit the full user PATH; go through
-                // cmd.exe so an npm `.cmd` shim resolves too, and suppress the
-                // console window.
-                use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                // Quote whitespace-carrying args (the system prompt) so cmd.exe
-                // keeps each one a single argument.
-                let joined = args
-                    .iter()
-                    .map(|a| {
-                        if a.chars().any(char::is_whitespace) {
-                            format!("\"{a}\"")
-                        } else {
-                            a.clone()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let mut c = Command::new("cmd");
-                c.args(["/c", &format!("{cmd} {joined}")])
-                    .creation_flags(CREATE_NO_WINDOW);
-                c
-            }
-            #[cfg(not(windows))]
-            {
-                // The login+interactive shell sources the user's rc so `claude`
-                // resolves despite the minimal GUI PATH. Single-quote
-                // whitespace-carrying args (the system prompt) so the shell
-                // keeps each one a single argument.
-                let joined = args
-                    .iter()
-                    .map(|a| {
-                        if a.chars().any(char::is_whitespace) {
-                            format!("'{}'", a.replace('\'', r"'\''"))
-                        } else {
-                            a.clone()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-                let mut c = Command::new(shell);
-                c.args(["-lic", &format!("exec {cmd} {joined}")]);
-                c
-            }
-        };
+        if !std::path::Path::new(&cmd).is_absolute() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "managed claude binary path must be absolute",
+            ));
+        }
+
+        // Execute the reviewed binary directly and rebuild its environment from a
+        // small allowlist. Shell startup files and ambient host credentials never
+        // cross this boundary.
+        let mut command = Command::new(&cmd);
+        command.args(&args);
+        apply_safe_child_environment(&mut command);
         let mut child = command
             .current_dir(workdir)
             .stdin(Stdio::piped())
@@ -986,12 +970,16 @@ impl Driver {
         }));
     }
 
-    /// Set the permission mode (`default`/`plan`/`acceptEdits`/`bypassPermissions`).
-    /// Stored, and pushed to the engine now if ready (else applied on init).
+    /// Set a permission mode that preserves host authorization. Unknown modes,
+    /// including `bypassPermissions`, are rejected to the interactive default.
     pub fn set_permission_mode(&self, mode: &str) {
-        *self.state.permission_mode.lock_recover() = mode.to_string();
+        let safe_mode = safe_permission_mode(mode);
+        if safe_mode != mode {
+            log::warn!("rejected unsupported Claude permission mode: {mode}");
+        }
+        *self.state.permission_mode.lock_recover() = safe_mode.to_string();
         if self.state.ready.load(Ordering::Relaxed) {
-            self.state.send_control("set_permission_mode", "mode", mode);
+            self.state.send_control("set_permission_mode", "mode", safe_mode);
         }
     }
     pub fn permission_mode(&self) -> String {
@@ -1155,6 +1143,24 @@ impl Driver {
     pub fn clear_pending(&self) {
         *self.state.pending.lock_recover() = None;
     }
+}
+
+/// Permission modes allowed to cross the native engine boundary.
+fn safe_permission_mode(mode: &str) -> &str {
+    match mode {
+        "default" | "auto" | "plan" | "acceptEdits" => mode,
+        _ => "default",
+    }
+}
+
+/// Replace inherited process state with the explicit safe child allowlist.
+fn apply_safe_child_environment(command: &mut Command) {
+    let values: Vec<(&str, std::ffi::OsString)> = SAFE_CHILD_ENVIRONMENT
+        .iter()
+        .filter_map(|key| std::env::var_os(key).map(|value| (*key, value)))
+        .collect();
+    command.env_clear();
+    command.envs(values);
 }
 
 impl Drop for Driver {
@@ -1602,6 +1608,29 @@ fn handle_control_request(state: &Arc<State>, v: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_modes_reject_bypass_and_unknown_values() {
+        assert_eq!(safe_permission_mode("default"), "default");
+        assert_eq!(safe_permission_mode("acceptEdits"), "acceptEdits");
+        assert_eq!(safe_permission_mode("bypassPermissions"), "default");
+        assert_eq!(safe_permission_mode("unexpected"), "default");
+    }
+
+    #[test]
+    fn child_environment_allowlist_excludes_ambient_credentials() {
+        for key in [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+            "WISP_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "UNITY_PASSWORD",
+        ] {
+            assert!(!SAFE_CHILD_ENVIRONMENT.contains(&key), "{key} must not cross the child boundary");
+        }
+    }
 
     #[test]
     fn serialize_marks_time_gaps_only() {

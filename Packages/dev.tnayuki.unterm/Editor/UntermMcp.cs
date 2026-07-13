@@ -59,6 +59,15 @@ namespace Unterm.Editor
 #endif
         }
 
+        /// <summary>Republish the catalog after the user enables or disables MCP.</summary>
+        public static void RefreshTools()
+        {
+#if UNITY_EDITOR_OSX || UNITY_EDITOR_WIN
+            EnsureStarted();
+            _native?.McpSetTools(UntermMcpServer.ToolsJson());
+#endif
+        }
+
         // Run any queued tool calls on the main thread.
         private static void Poll()
         {

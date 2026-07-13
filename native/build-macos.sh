@@ -8,6 +8,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Keep host paths out of debug information and derive timestamps from the source
+# commit so repeated builds of the same revision have stable inputs.
+export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C .. log -1 --pretty=%ct)}"
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$(pwd)=."
+
 PROFILE="${1:-release}"
 case "$PROFILE" in
   release) CARGO_FLAGS=(--release); TARGET_DIR="release" ;;
@@ -18,14 +23,14 @@ esac
 # Universal binary so the plugin runs on Apple Silicon and Intel editors.
 ARCHS=(aarch64-apple-darwin x86_64-apple-darwin)
 for arch in "${ARCHS[@]}"; do
-  rustup target add "$arch" >/dev/null 2>&1 || true
+  rustup target add "$arch"
 done
 
 echo "==> building unterm ($PROFILE)"
 for arch in "${ARCHS[@]}"; do
   # Bash 3.2 (macOS) treats "${CARGO_FLAGS[@]}" as unbound under `set -u` when the
   # array is empty (the debug profile), so expand it guardedly.
-  cargo build -p unterm ${CARGO_FLAGS[@]+"${CARGO_FLAGS[@]}"} --target "$arch"
+  cargo build -p unterm --locked ${CARGO_FLAGS[@]+"${CARGO_FLAGS[@]}"} --target "$arch"
 done
 
 DEST="../Packages/dev.tnayuki.unterm/Editor/Plugins/macOS/unterm.dylib"
