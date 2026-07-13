@@ -70,12 +70,17 @@ namespace Unterm.Editor
         // clean, with no second copy of the buffer (just this u64).
         [SerializeField] private ulong _savedSerial;
         private double _lastExtCheck; // throttle for the on-disk change poll
+        private double _lastDiffPoll;
+        private const double ExternalCheckInterval = 1.0;
+        private const double DiffPollInterval = 0.05;
         // A background git-base fetch is in flight (kicked by SetPath/RefreshDiff);
-        // poll for its delivery only while set, instead of every tick forever.
+        // poll it at a bounded cadence while the editor is focused.
 
         // Editing surface texture (zero-copy wrap of the native MTLTexture).
         private Texture2D _tex;
-        private IntPtr _externalTexPtr;
+        private readonly Dictionary<IntPtr, Texture2D> _surfaceTextures =
+            new Dictionary<IntPtr, Texture2D>();
+        private int _surfaceTextureW, _surfaceTextureH;
 
         // Last size/theme pushed to native, so RenderView (which runs per
         // keystroke/drag/scroll) skips those P/Invokes when nothing changed.
@@ -180,7 +185,7 @@ namespace Unterm.Editor
         public static void OpenEmpty()
         {
             var w = CreateWindow<UntermCodeEditorWindow>();
-            w.titleContent = new GUIContent("Code Editor");
+            w.titleContent = UntermWindowTitle.Create("Code Editor", UntermWindowTitle.CodeEditorIcon, w.titleContent);
             w.minSize = new Vector2(320, 200);
             w.Show();
             w.Focus();
@@ -529,7 +534,13 @@ namespace Unterm.Editor
 #endif
             // Returning to the window: pick up edits made to the file externally, and
             // re-fetch the git base (a commit / branch switch may have happened away).
-            if (_native != null && _editorId != 0) { CheckExternalChange(); _native.EditorRefreshDiff(Eid); }
+            if (_native != null && _editorId != 0)
+            {
+                CheckExternalChange();
+                if (!_preview) _native.EditorRefreshDiff(Eid);
+                _lastExtCheck = EditorApplication.timeSinceStartup;
+                _lastDiffPoll = 0d;
+            }
         }
 
         private void OnLostFocus()
@@ -619,7 +630,7 @@ namespace Unterm.Editor
 
         private void Teardown(bool keepView)
         {
-            if (_tex != null) { DestroyImmediate(_tex); _tex = null; }
+            ClearSurfaceTextureCache();
 
             var native = _native;
             _native = null;
@@ -686,18 +697,31 @@ namespace Unterm.Editor
             IntPtr texPtr = _native.EditorRawTexture(Eid);
             if (texPtr == IntPtr.Zero) return;
 
-            if (_tex == null || _tex.width != iw || _tex.height != ih || _externalTexPtr != texPtr)
+            if (_surfaceTextureW != iw || _surfaceTextureH != ih)
             {
-                if (_tex != null) DestroyImmediate(_tex);
-                _tex = Texture2D.CreateExternalTexture(iw, ih, TextureFormat.RGBA32, false, false, texPtr);
-                _tex.filterMode = FilterMode.Bilinear;
-                _tex.hideFlags = HideFlags.HideAndDontSave;
-                _externalTexPtr = texPtr;
+                ClearSurfaceTextureCache();
+                _surfaceTextureW = iw;
+                _surfaceTextureH = ih;
             }
-            else
+            if (!_surfaceTextures.TryGetValue(texPtr, out var tex) || tex == null)
             {
-                _tex.UpdateExternalTexture(texPtr);
+                tex = Texture2D.CreateExternalTexture(iw, ih, TextureFormat.RGBA32, false, false, texPtr);
+                tex.filterMode = FilterMode.Bilinear;
+                tex.hideFlags = HideFlags.HideAndDontSave;
+                _surfaceTextures[texPtr] = tex;
             }
+            _tex = tex;
+        }
+
+        private void ClearSurfaceTextureCache()
+        {
+            foreach (var texture in _surfaceTextures.Values)
+            {
+                if (texture != null) DestroyImmediate(texture);
+            }
+            _surfaceTextures.Clear();
+            _tex = null;
+            _surfaceTextureW = _surfaceTextureH = 0;
         }
 
         // The internal method resolves once and the color it returns depends only
@@ -1706,19 +1730,22 @@ namespace Unterm.Editor
             // Pick up external changes (e.g. the Claude Code agent editing the file,
             // or `git add`/`reset`/commits run in a terminal changing the index)
             // even while this window stays focused — not just on OnFocus. Throttled.
-            if (EditorApplication.timeSinceStartup - _lastExtCheck > 1.0)
+            double now = EditorApplication.timeSinceStartup;
+            if (hasFocus && now - _lastExtCheck >= ExternalCheckInterval)
             {
-                _lastExtCheck = EditorApplication.timeSinceStartup;
+                _lastExtCheck = now;
                 CheckExternalChange(); // still needed in preview (file may change on disk)
                 // The diff gutter is an edit-mode surface: don't re-read git while
                 // previewing (SetPreview refreshes it again on exit).
                 if (!_preview) _native.EditorRefreshDiff(Eid); // background HEAD + index
             }
-            // A background git fetch may have finished: poll every tick (cheap bool);
-            // native applies it and returns true only when the git texts actually
-            // changed, so the steady-state 1s refresh doesn't cause re-renders. Skipped
-            // in preview (the gutter isn't shown, so there's nothing to apply).
-            if (!_preview && _native.EditorPollDiff(Eid)) { RenderView(); Repaint(); }
+            // Poll at a bounded cadence while focused. Losing focus pauses this work;
+            // OnFocus requests a fresh diff and resumes polling immediately.
+            if (hasFocus && !_preview && now - _lastDiffPoll >= DiffPollInterval)
+            {
+                _lastDiffPoll = now;
+                if (_native.EditorPollDiff(Eid)) { RenderView(); Repaint(); }
+            }
             PollSignatureTask();
             // While a hint is shown, re-evaluate whenever the caret moved by ANY means
             // (arrows, click, edits) so it tracks the active parameter and closes once
@@ -2272,8 +2299,9 @@ namespace Unterm.Editor
         {
             // No manual dirty marker — Unity overlays the unsaved indicator from
             // hasUnsavedChanges.
-            string name = string.IsNullOrEmpty(_filePath) ? "Untitled" : Path.GetFileName(_filePath);
-            titleContent = new GUIContent(_preview ? name + " (Preview)" : name);
+            string title = string.IsNullOrEmpty(_filePath) ? "Untitled" : Path.GetFileName(_filePath);
+            if (_preview) title += " (Preview)";
+            titleContent = UntermWindowTitle.Create(title, UntermWindowTitle.CodeEditorIcon, titleContent);
         }
 
         // Cmd/Ctrl+S while this window is focused saves the file (a window-context
