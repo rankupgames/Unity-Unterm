@@ -71,7 +71,10 @@ jobs:
         run: cargo deny --manifest-path native/Cargo.toml --config native/deny.toml check advisories bans licenses sources
 
       - name: Generate CycloneDX SBOM
-        run: cargo cyclonedx --manifest-path native/unterm/Cargo.toml --format json --override-filename unterm.cdx.json
+        working-directory: native/unterm
+        run: |
+          cargo cyclonedx --format json --override-filename unterm.cdx.json
+          test -s unterm.cdx.json
 
       - name: Verify native third-party notices
         run: |
