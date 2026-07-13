@@ -48,7 +48,8 @@ jobs:
           echo "${CARGO_BINSTALL_SHA256}  ${archive}" | sha256sum --check --strict
           tar -xzf "$archive" -C "$extract_dir"
           install -m 0755 "$extract_dir/cargo-binstall" "$HOME/.cargo/bin/cargo-binstall"
-          test "$(cargo binstall --version)" = "cargo-binstall ${CARGO_BINSTALL_VERSION}"
+          grep -aFq "cargo-binstall/${CARGO_BINSTALL_VERSION}" "$HOME/.cargo/bin/cargo-binstall"
+          cargo binstall --help > /dev/null
 
       - name: Install pinned supply-chain tools
         env:
