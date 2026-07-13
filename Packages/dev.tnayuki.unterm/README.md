@@ -53,11 +53,15 @@ transcript all open there.
 ## Security boundary
 
 Unity MCP tools are disabled by default and require explicit confirmation in
-**Preferences ▸ Unterm**. Once enabled, read-only requests can run unattended;
-every mutating or dangerous call requires one-shot Editor approval. Such calls
-are denied in batch mode, unknown tools fail closed, and arbitrary C# execution
-is always dangerous. Claude permission-bypass modes are rejected, and the
-managed Claude process receives an explicit environment allowlist.
+**Preferences ▸ Unterm**. Trust is stored only in this project's uncommitted
+Editor user settings. The default Prompt policy allows reads and requires
+one-shot approval for mutations and dangerous actions; confirmed Allow Mutating
+and Allow Dangerous policies can permit known actions unattended. Requests
+outside the selected policy are denied in batch mode, and unclassified tools
+never auto-run. Arbitrary C# remains dangerous and runs unattended only with
+both Allow Dangerous and its separate full-machine-access confirmation. Claude
+permission-bypass modes are rejected, and the managed Claude process receives
+an explicit environment allowlist.
 
 ## Platform
 
