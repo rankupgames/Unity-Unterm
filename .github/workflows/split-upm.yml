@@ -34,10 +34,20 @@ jobs:
         with:
           workspaces: native
 
-      - name: Install pinned supply-chain tools
+      - name: Install pinned cargo-binstall
         uses: taiki-e/install-action@1ee706eb04986370fc60419ba172594c51067f29 # v2.62.58
         with:
-          tool: cargo-audit@0.22.1,cargo-deny@0.20.2,cargo-cyclonedx@0.5.9,cargo-about@0.9.1
+          tool: cargo-binstall@1.16.2
+
+      - name: Install pinned supply-chain tools
+        env:
+          BINSTALL_DISABLE_TELEMETRY: 'true'
+        run: |
+          cargo binstall --no-confirm --locked \
+            cargo-audit@0.22.1 \
+            cargo-deny@0.20.2 \
+            cargo-cyclonedx@0.5.9 \
+            cargo-about@0.9.1
 
       - name: Verify the locked dependency graph
         run: cargo metadata --manifest-path native/Cargo.toml --locked --format-version 1 > /dev/null
