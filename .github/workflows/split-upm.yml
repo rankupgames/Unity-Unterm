@@ -74,7 +74,7 @@ jobs:
       - name: Generate CycloneDX SBOM
         working-directory: native/unterm
         run: |
-          cargo cyclonedx --format json --override-filename unterm.cdx.json
+          cargo cyclonedx --format json --override-filename unterm.cdx
           test -s unterm.cdx.json
 
       - name: Verify native third-party notices
