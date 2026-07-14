@@ -12,7 +12,13 @@ use unterm::*;
 fn main() {
     env_logger::try_init().ok();
 
-    let cwd = CString::new(std::env::current_dir().unwrap().to_string_lossy().to_string()).unwrap();
+    let cwd = CString::new(
+        std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .to_string(),
+    )
+    .unwrap();
     let id = unsafe { unterm_create(1000, 600, 2.0, cwd.as_ptr()) };
     assert!(id != 0, "create failed");
 
@@ -44,7 +50,10 @@ fn main() {
     unsafe { unterm_size(id, &mut w as *mut u32, &mut h as *mut u32) };
     let raw = unsafe { unterm_raw_texture(id) };
     println!("rendered {w}x{h}; IOSurface MTLTexture ptr = {raw:?}");
-    assert!(!raw.is_null(), "IOSurface texture was null (zero-copy target failed)");
+    assert!(
+        !raw.is_null(),
+        "IOSurface texture was null (zero-copy target failed)"
+    );
 
     unterm_destroy(id);
     println!("OK: render pipeline ran on wgpu 29 without panicking");

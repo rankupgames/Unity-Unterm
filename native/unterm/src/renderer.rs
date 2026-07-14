@@ -13,12 +13,12 @@ use glyphon::{
 
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{point_to_viewport, TermMode, Term};
+use alacritty_terminal::term::{point_to_viewport, Term, TermMode};
 
 use crate::gpu::{self, FORMAT};
-use crate::surface::{IOSurfaceRef, SharedSurface};
 use crate::palette::{self, Theme};
 use crate::quads::{Quad, QuadRenderer};
+use crate::surface::{IOSurfaceRef, SharedSurface};
 use crate::term::EventProxy;
 use std::collections::hash_map::{DefaultHasher, Entry};
 use std::collections::HashMap;
@@ -133,8 +133,12 @@ impl Renderer {
         let shared = crate::surface::create_shared_target(&g.device, width, height, FORMAT);
         let viewport = Viewport::new(&g.device, &g.cache);
         let mut atlas = TextAtlas::new(&g.device, &g.queue, &g.cache, FORMAT);
-        let text_renderer =
-            TextRenderer::new(&mut atlas, &g.device, wgpu::MultisampleState::default(), None);
+        let text_renderer = TextRenderer::new(
+            &mut atlas,
+            &g.device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
         let quads = QuadRenderer::new(&g.device, FORMAT);
 
         Renderer {
@@ -372,7 +376,11 @@ impl Renderer {
                 std::mem::swap(&mut fg, &mut bg);
             }
             if flags.contains(Flags::DIM) {
-                fg = [fg[0] / 2 + fg[0] / 4, fg[1] / 2 + fg[1] / 4, fg[2] / 2 + fg[2] / 4];
+                fg = [
+                    fg[0] / 2 + fg[0] / 4,
+                    fg[1] / 2 + fg[1] / 4,
+                    fg[2] / 2 + fg[2] / 4,
+                ];
             }
             // Selected cells take the highlight background (text color is kept).
             if selection.map_or(false, |r| r.contains(indexed.point)) {
@@ -423,7 +431,11 @@ impl Renderer {
         }
         // The cursor spans two columns when it sits on a wide (CJK) glyph.
         let cursor_cells = |p: &alacritty_terminal::index::Point<usize>| -> f32 {
-            if self.cells[p.line * cols + p.column.0].wide { cell_w * 2.0 } else { cell_w }
+            if self.cells[p.line * cols + p.column.0].wide {
+                cell_w * 2.0
+            } else {
+                cell_w
+            }
         };
         if show_cursor {
             if let Some(p) = cursor_vp {
@@ -432,22 +444,63 @@ impl Renderer {
                 let cw = cursor_cells(&p);
                 let col = linear(theme.cursor, 1.0);
                 if focused {
-                    quads.push(Quad { x, y, w: cw, h: cell_h, color: col, radius: 0.0 });
+                    quads.push(Quad {
+                        x,
+                        y,
+                        w: cw,
+                        h: cell_h,
+                        color: col,
+                        radius: 0.0,
+                    });
                 } else {
                     // Hollow outline when the window isn't focused.
                     let t = (1.0 * self.scale).max(1.0);
-                    quads.push(Quad { x, y, w: cw, h: t, color: col, radius: 0.0 });
-                    quads.push(Quad { x, y: y + cell_h - t, w: cw, h: t, color: col, radius: 0.0 });
-                    quads.push(Quad { x, y, w: t, h: cell_h, color: col, radius: 0.0 });
-                    quads.push(Quad { x: x + cw - t, y, w: t, h: cell_h, color: col, radius: 0.0 });
+                    quads.push(Quad {
+                        x,
+                        y,
+                        w: cw,
+                        h: t,
+                        color: col,
+                        radius: 0.0,
+                    });
+                    quads.push(Quad {
+                        x,
+                        y: y + cell_h - t,
+                        w: cw,
+                        h: t,
+                        color: col,
+                        radius: 0.0,
+                    });
+                    quads.push(Quad {
+                        x,
+                        y,
+                        w: t,
+                        h: cell_h,
+                        color: col,
+                        radius: 0.0,
+                    });
+                    quads.push(Quad {
+                        x: x + cw - t,
+                        y,
+                        w: t,
+                        h: cell_h,
+                        color: col,
+                        radius: 0.0,
+                    });
                 }
             }
         }
 
         // Remember the cursor rect (physical px) for the host's IME placement.
         self.cursor_px = if show_cursor {
-            cursor_vp
-                .map(|p| [pad + p.column.0 as f32 * cell_w, pad + p.line as f32 * cell_h, cursor_cells(&p), cell_h])
+            cursor_vp.map(|p| {
+                [
+                    pad + p.column.0 as f32 * cell_w,
+                    pad + p.line as f32 * cell_h,
+                    cursor_cells(&p),
+                    cell_h,
+                ]
+            })
         } else {
             None
         };
@@ -576,11 +629,20 @@ impl Renderer {
                         }
                         Some((&text[s..e], attrs_of(fg, bold, italic)))
                     });
-                    buf.set_rich_text(&mut fs, spans, &Attrs::new().family(family), Shaping::Advanced, None);
+                    buf.set_rich_text(
+                        &mut fs,
+                        spans,
+                        &Attrs::new().family(family),
+                        Shaping::Advanced,
+                        None,
+                    );
                     buf.shape_until_scroll(&mut fs, false);
                     segs.push((buf, pad + seg_start as f32 * cell_w));
                 }
-                entry.insert(ShapedRow { segs, last_used: frame });
+                entry.insert(ShapedRow {
+                    segs,
+                    last_used: frame,
+                });
             }
 
             // --- IME preedit overlay: the in-progress composition at the cursor. ---
@@ -601,7 +663,12 @@ impl Renderer {
                     for ch in preedit.chars() {
                         let w = UnicodeWidthChar::width(ch).unwrap_or(0);
                         if col + w.max(1) > cols && col > 0 {
-                            segments.push((line, seg_start, std::mem::take(&mut seg), col - seg_start));
+                            segments.push((
+                                line,
+                                seg_start,
+                                std::mem::take(&mut seg),
+                                col - seg_start,
+                            ));
                             line += 1;
                             col = 0;
                             seg_start = 0;
@@ -620,8 +687,22 @@ impl Renderer {
                         // Opaque background + underline over the whole segment.
                         let bx = pad + *sc as f32 * cell_w;
                         let bw = *wc as f32 * cell_w;
-                        quads.push(Quad { x: bx, y, w: bw, h: cell_h, color: linear(theme.bg, 1.0), radius: 0.0 });
-                        quads.push(Quad { x: bx, y: y + cell_h - ut, w: bw, h: ut, color: linear(theme.fg, 1.0), radius: 0.0 });
+                        quads.push(Quad {
+                            x: bx,
+                            y,
+                            w: bw,
+                            h: cell_h,
+                            color: linear(theme.bg, 1.0),
+                            radius: 0.0,
+                        });
+                        quads.push(Quad {
+                            x: bx,
+                            y: y + cell_h - ut,
+                            w: bw,
+                            h: ut,
+                            color: linear(theme.fg, 1.0),
+                            radius: 0.0,
+                        });
                         // Glyphs are placed exactly like the grid: narrow runs are
                         // shaped together and anchored at their start column, while a
                         // wide (CJK) glyph gets its own buffer anchored at its column
@@ -660,9 +741,16 @@ impl Renderer {
                                     i += 1;
                                 }
                                 if !run.is_empty() {
-                                    let mut buf = Buffer::new(&mut fs, Metrics::new(font_px, line_h));
+                                    let mut buf =
+                                        Buffer::new(&mut fs, Metrics::new(font_px, line_h));
                                     buf.set_size(&mut fs, None, Some(line_h));
-                                    buf.set_text(&mut fs, &run, &attrs_of(theme.fg, false, false), Shaping::Advanced, None);
+                                    buf.set_text(
+                                        &mut fs,
+                                        &run,
+                                        &attrs_of(theme.fg, false, false),
+                                        Shaping::Advanced,
+                                        None,
+                                    );
                                     buf.shape_until_scroll(&mut fs, false);
                                     overlay.push((buf, pad + run_col as f32 * cell_w, y));
                                 }
@@ -730,8 +818,12 @@ impl Renderer {
                     height: self.height,
                 },
             );
-            self.quads
-                .prepare(&g.device, &g.queue, (self.width as f32, self.height as f32), &quads);
+            self.quads.prepare(
+                &g.device,
+                &g.queue,
+                (self.width as f32, self.height as f32),
+                &quads,
+            );
             if let Err(e) = self.text_renderer.prepare(
                 &g.device,
                 &g.queue,
@@ -753,7 +845,12 @@ impl Renderer {
         let g = gpu::gpu();
         let clear = {
             let c = linear(theme.bg, 1.0);
-            wgpu::Color { r: c[0] as f64, g: c[1] as f64, b: c[2] as f64, a: 1.0 }
+            wgpu::Color {
+                r: c[0] as f64,
+                g: c[1] as f64,
+                b: c[2] as f64,
+                a: 1.0,
+            }
         };
         let mut encoder = g
             .device
@@ -778,7 +875,10 @@ impl Renderer {
                 multiview_mask: None,
             });
             self.quads.render(&mut pass);
-            if let Err(e) = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass) {
+            if let Err(e) = self
+                .text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+            {
                 // Draw the frame without text rather than abort; next frame retries.
                 log::error!("unterm: glyphon render failed: {e}");
             }

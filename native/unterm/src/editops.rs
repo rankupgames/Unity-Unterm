@@ -15,7 +15,9 @@ pub fn to_lines(text: &str) -> Vec<String> {
 
 /// Leading whitespace (spaces/tabs) of a line.
 fn leading_ws(line: &str) -> String {
-    line.chars().take_while(|c| *c == ' ' || *c == '\t').collect()
+    line.chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect()
 }
 
 /// The newline-plus-indent string to insert for auto-indent on Enter: carries the
@@ -51,7 +53,11 @@ pub fn outdent(lines: &mut [String], l0: usize, l1: usize) {
         if let Some(rest) = line.strip_prefix('\t') {
             lines[i] = rest.to_string();
         } else {
-            let spaces = line.chars().take_while(|c| *c == ' ').count().min(INDENT.len());
+            let spaces = line
+                .chars()
+                .take_while(|c| *c == ' ')
+                .count()
+                .min(INDENT.len());
             lines[i] = line.chars().skip(spaces).collect();
         }
     }
@@ -65,13 +71,18 @@ pub fn toggle_comment(lines: &mut [String], l0: usize, l1: usize, prefix: &str) 
     let trimmed = prefix.trim_end();
     let non_blank: Vec<usize> = (l0..=l1).filter(|&i| !lines[i].trim().is_empty()).collect();
     let all_commented = !non_blank.is_empty()
-        && non_blank.iter().all(|&i| lines[i].trim_start().starts_with(trimmed));
+        && non_blank
+            .iter()
+            .all(|&i| lines[i].trim_start().starts_with(trimmed));
 
     if all_commented {
         for &i in &non_blank {
             let indent = leading_ws(&lines[i]);
             let body = lines[i].trim_start();
-            let body = body.strip_prefix(prefix).or_else(|| body.strip_prefix(trimmed)).unwrap_or(body);
+            let body = body
+                .strip_prefix(prefix)
+                .or_else(|| body.strip_prefix(trimmed))
+                .unwrap_or(body);
             lines[i] = format!("{indent}{body}");
         }
     } else {
@@ -117,7 +128,13 @@ pub fn duplicate(lines: &mut Vec<String>, l0: usize, l1: usize) {
 
 /// Find `query` in `text` starting from character offset `from` (the search wraps
 /// around). Returns the matched character range [start, end). Empty query → None.
-pub fn find(text: &str, query: &str, from: usize, forward: bool, case_sensitive: bool) -> Option<(usize, usize)> {
+pub fn find(
+    text: &str,
+    query: &str,
+    from: usize,
+    forward: bool,
+    case_sensitive: bool,
+) -> Option<(usize, usize)> {
     if query.is_empty() {
         return None;
     }
@@ -126,7 +143,13 @@ pub fn find(text: &str, query: &str, from: usize, forward: bool, case_sensitive:
     if ned.len() > hay.len() {
         return None;
     }
-    let eq = |a: char, b: char| if case_sensitive { a == b } else { a.eq_ignore_ascii_case(&b) || a.to_lowercase().eq(b.to_lowercase()) };
+    let eq = |a: char, b: char| {
+        if case_sensitive {
+            a == b
+        } else {
+            a.eq_ignore_ascii_case(&b) || a.to_lowercase().eq(b.to_lowercase())
+        }
+    };
     let matches_at = |i: usize| (0..ned.len()).all(|k| eq(hay[i + k], ned[k]));
     let last = hay.len() - ned.len();
 
@@ -260,7 +283,13 @@ pub fn replace_all(text: &str, query: &str, repl: &str, case_sensitive: bool) ->
     }
     let hay: Vec<char> = text.chars().collect();
     let ned: Vec<char> = query.chars().collect();
-    let eq = |a: char, b: char| if case_sensitive { a == b } else { a.eq_ignore_ascii_case(&b) || a.to_lowercase().eq(b.to_lowercase()) };
+    let eq = |a: char, b: char| {
+        if case_sensitive {
+            a == b
+        } else {
+            a.eq_ignore_ascii_case(&b) || a.to_lowercase().eq(b.to_lowercase())
+        }
+    };
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     let mut n = 0u32;
@@ -307,8 +336,14 @@ mod tests {
 
     #[test]
     fn replace_all_counts() {
-        assert_eq!(replace_all("a.a.a", "a", "X", true), ("X.X.X".to_string(), 3));
-        assert_eq!(replace_all("Foo foo", "foo", "bar", false), ("bar bar".to_string(), 2));
+        assert_eq!(
+            replace_all("a.a.a", "a", "X", true),
+            ("X.X.X".to_string(), 3)
+        );
+        assert_eq!(
+            replace_all("Foo foo", "foo", "bar", false),
+            ("bar bar".to_string(), 2)
+        );
         assert_eq!(replace_all("abc", "x", "y", true), ("abc".to_string(), 0));
     }
 

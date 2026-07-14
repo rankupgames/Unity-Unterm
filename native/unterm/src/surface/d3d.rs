@@ -125,10 +125,17 @@ impl SharedSurface {
     pub fn begin_frame(&mut self) {
         if self.buffer.raw_texture.is_null() && !unity::unity_device().is_null() {
             if let Some(b) = unsafe {
-                try_shared_buffer(&crate::gpu::gpu().device, self.width, self.height, self.format)
+                try_shared_buffer(
+                    &crate::gpu::gpu().device,
+                    self.width,
+                    self.height,
+                    self.format,
+                )
             } {
                 self.buffer = b;
-                log::info!("unterm: shared texture upgraded after the Unity device became available");
+                log::info!(
+                    "unterm: shared texture upgraded after the Unity device became available"
+                );
             }
         }
     }
@@ -136,7 +143,9 @@ impl SharedSurface {
     /// Block until the GPU finishes the submitted frame (render + copy) so Unity
     /// samples a complete texture. Same as the macOS path.
     pub fn present(&mut self) {
-        let _ = crate::gpu::gpu().device.poll(wgpu::PollType::wait_indefinitely());
+        let _ = crate::gpu::gpu()
+            .device
+            .poll(wgpu::PollType::wait_indefinitely());
     }
 
     /// Single-buffered — nothing to advance on idle ticks.

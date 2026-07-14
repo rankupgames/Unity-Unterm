@@ -52,7 +52,7 @@ pub struct BrowserView {
     /// The query the in-flight/last request was issued for.
     sent_query: Option<String>,
     last_gen: u64, // sessions-dir generation the current list reflects
-    serial: u64, // in-flight sessions request (0 = idle)
+    serial: u64,   // in-flight sessions request (0 = idle)
     rows: Arc<Vec<Session>>,
     loading: bool,
     show_archived: bool,
@@ -92,8 +92,12 @@ impl BrowserView {
         let swash_cache = SwashCache::new();
         let viewport = Viewport::new(&g.device, &g.cache);
         let mut atlas = TextAtlas::new(&g.device, &g.queue, &g.cache, FORMAT);
-        let text_renderer =
-            TextRenderer::new(&mut atlas, &g.device, wgpu::MultisampleState::default(), None);
+        let text_renderer = TextRenderer::new(
+            &mut atlas,
+            &g.device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
         let quads = QuadRenderer::new(&g.device, FORMAT);
         let mesh = MeshRenderer::new(&g.device, FORMAT);
         Self {
@@ -101,7 +105,12 @@ impl BrowserView {
             height,
             shared,
             scale: 1.0,
-            clear: wgpu::Color { r: 0.05, g: 0.05, b: 0.05, a: 1.0 },
+            clear: wgpu::Color {
+                r: 0.05,
+                g: 0.05,
+                b: 0.05,
+                a: 1.0,
+            },
             text_color: Color::rgb(210, 210, 214),
             font_family: None,
             cwd,
@@ -252,7 +261,11 @@ impl BrowserView {
         for r in &self.row_rects {
             if y >= r.y && y < r.y + r.h && x >= 0.0 && x <= self.width as f32 {
                 // A busy (open-elsewhere) row is disabled: no hover, no icon.
-                if self.visible.get(r.index).is_some_and(|&i| self.is_busy(&self.rows[i].id)) {
+                if self
+                    .visible
+                    .get(r.index)
+                    .is_some_and(|&i| self.is_busy(&self.rows[i].id))
+                {
                     break;
                 }
                 let on_icon = x >= r.icon[0]
@@ -398,12 +411,33 @@ impl BrowserView {
                     let busy = self.is_busy(&sess.id);
                     let hovered = !busy && self.hover.map(|(i, _)| i) == Some(index);
                     if is_current {
-                        quads.push(Quad { x: 0.0, y, w: width, h: row_h, color: accent_bg, radius: 0.0 });
+                        quads.push(Quad {
+                            x: 0.0,
+                            y,
+                            w: width,
+                            h: row_h,
+                            color: accent_bg,
+                            radius: 0.0,
+                        });
                     } else if hovered {
-                        quads.push(Quad { x: 0.0, y, w: width, h: row_h, color: hover_bg, radius: 0.0 });
+                        quads.push(Quad {
+                            x: 0.0,
+                            y,
+                            w: width,
+                            h: row_h,
+                            color: hover_bg,
+                            radius: 0.0,
+                        });
                     }
                     // Hairline separator.
-                    quads.push(Quad { x: 0.0, y: y + row_h - 1.0, w: width, h: 1.0, color: sep, radius: 0.0 });
+                    quads.push(Quad {
+                        x: 0.0,
+                        y: y + row_h - 1.0,
+                        w: width,
+                        h: 1.0,
+                        color: sep,
+                        radius: 0.0,
+                    });
 
                     // Title (clipped left of the time slot) + right-aligned time.
                     // Archived rows keep full-strength text — dimming them would
@@ -412,9 +446,21 @@ impl BrowserView {
                     // disabled, so it's the one thing that greys out.
                     let title_color = if busy { faint } else { t };
                     let meta_color = if busy { faint } else { dim };
-                    let title = if sess.title.is_empty() { "(untitled)" } else { &sess.title };
+                    let title = if sess.title.is_empty() {
+                        "(untitled)"
+                    } else {
+                        &sess.title
+                    };
                     let title_w = (width - pad_h * 2.0 - time_w - icon_w - 16.0 * s).max(1.0);
-                    let b = shape(fs, title, family, title_size, title_lh, title_color, title_w);
+                    let b = shape(
+                        fs,
+                        title,
+                        family,
+                        title_size,
+                        title_lh,
+                        title_color,
+                        title_w,
+                    );
                     let clip = [pad_h, y, title_w, row_h];
                     buffers.push((b, pad_h, y + pad_v, Some(clip), title_color));
 
@@ -422,7 +468,13 @@ impl BrowserView {
                         let label = crate::clock::format_relative(sess.updated, now);
                         let b = shape(fs, &label, family, meta_size, title_lh, meta_color, time_w);
                         let tx = width - pad_h - icon_w - 8.0 * s - measure_w(&b);
-                        buffers.push((b, tx, y + pad_v + (title_lh - meta_lh) / 2.0, None, meta_color));
+                        buffers.push((
+                            b,
+                            tx,
+                            y + pad_v + (title_lh - meta_lh) / 2.0,
+                            None,
+                            meta_color,
+                        ));
                     }
 
                     if has_snippet {
@@ -451,7 +503,12 @@ impl BrowserView {
                         } else {
                             0.55
                         };
-                        let c = [t.r() as f32 / 255.0, t.g() as f32 / 255.0, t.b() as f32 / 255.0, alpha];
+                        let c = [
+                            t.r() as f32 / 255.0,
+                            t.g() as f32 / 255.0,
+                            t.b() as f32 / 255.0,
+                            alpha,
+                        ];
                         push_archive_icon(&mut quads, &mut verts, icon_rect, c, s);
                     }
                 }
@@ -487,10 +544,15 @@ impl BrowserView {
 
         self.viewport.update(
             &g.queue,
-            Resolution { width: self.width, height: self.height },
+            Resolution {
+                width: self.width,
+                height: self.height,
+            },
         );
-        self.quads.prepare(&g.device, &g.queue, (width, height), &quads);
-        self.mesh.prepare(&g.device, &g.queue, (width, height), &verts);
+        self.quads
+            .prepare(&g.device, &g.queue, (width, height), &quads);
+        self.mesh
+            .prepare(&g.device, &g.queue, (width, height), &verts);
         if let Err(e) = self.text_renderer.prepare(
             &g.device,
             &g.queue,
@@ -528,7 +590,10 @@ impl BrowserView {
             });
             self.quads.render(&mut pass);
             self.mesh.render(&mut pass);
-            if let Err(e) = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass) {
+            if let Err(e) = self
+                .text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+            {
                 log::error!("unterm: browser glyphon render failed: {e}");
             }
         }
@@ -552,7 +617,13 @@ fn shape(
     let mut b = Buffer::new(fs, Metrics::new(size, line_h));
     b.set_size(fs, Some(width.max(1.0)), None);
     b.set_wrap(fs, Wrap::None);
-    b.set_text(fs, text, &Attrs::new().family(family).color(color), Shaping::Advanced, None);
+    b.set_text(
+        fs,
+        text,
+        &Attrs::new().family(family).color(color),
+        Shaping::Advanced,
+        None,
+    );
     b.shape_until_scroll(fs, false);
     b
 }
@@ -581,10 +652,24 @@ fn push_archive_icon(
     let vx = |v: f32| x + v * ux;
     let vy = |v: f32| y + v * uy;
     let hbar = |q: &mut Vec<Quad>, x0: f32, x1: f32, yc: f32| {
-        q.push(Quad { x: vx(x0) - t / 2.0, y: vy(yc) - t / 2.0, w: (x1 - x0) * ux + t, h: t, color, radius: t / 2.0 });
+        q.push(Quad {
+            x: vx(x0) - t / 2.0,
+            y: vy(yc) - t / 2.0,
+            w: (x1 - x0) * ux + t,
+            h: t,
+            color,
+            radius: t / 2.0,
+        });
     };
     let vbar = |q: &mut Vec<Quad>, xc: f32, y0: f32, y1: f32| {
-        q.push(Quad { x: vx(xc) - t / 2.0, y: vy(y0), w: t, h: (y1 - y0) * uy, color, radius: t / 2.0 });
+        q.push(Quad {
+            x: vx(xc) - t / 2.0,
+            y: vy(y0),
+            w: t,
+            h: (y1 - y0) * uy,
+            color,
+            radius: t / 2.0,
+        });
     };
 
     // Lid: a hollow rounded rectangle across the top (design: x3..13, y3..5.6).
@@ -601,8 +686,26 @@ fn push_archive_icon(
     hbar(quads, 3.6 + cr, 12.4 - cr, 13.0);
     // Bottom-left / bottom-right rounded corners (y is down: 90°=down, 180°=left).
     let r_px = cr * ux;
-    push_arc(verts, vx(3.6 + cr), vy(13.0 - cr), r_px, t, 90.0, 180.0, color);
-    push_arc(verts, vx(12.4 - cr), vy(13.0 - cr), r_px, t, 0.0, 90.0, color);
+    push_arc(
+        verts,
+        vx(3.6 + cr),
+        vy(13.0 - cr),
+        r_px,
+        t,
+        90.0,
+        180.0,
+        color,
+    );
+    push_arc(
+        verts,
+        vx(12.4 - cr),
+        vy(13.0 - cr),
+        r_px,
+        t,
+        0.0,
+        90.0,
+        color,
+    );
 
     // Handle: a short horizontal stroke centred in the box (design: x6..10, y8.3).
     hbar(quads, 6.0, 10.0, 8.3);
@@ -618,7 +721,16 @@ fn push_tri(verts: &mut Vec<MeshVertex>, a: [f32; 2], b: [f32; 2], c: [f32; 2], 
 /// Append a stroked circular arc (a quarter-annulus of mid-radius `r`, stroke
 /// width `thick`) from `a0` to `a1` degrees, centred at (`cx`, `cy`). Angles use
 /// the screen's y-down convention: 0°=right, 90°=down, 180°=left.
-fn push_arc(verts: &mut Vec<MeshVertex>, cx: f32, cy: f32, r: f32, thick: f32, a0: f32, a1: f32, color: [f32; 4]) {
+fn push_arc(
+    verts: &mut Vec<MeshVertex>,
+    cx: f32,
+    cy: f32,
+    r: f32,
+    thick: f32,
+    a0: f32,
+    a1: f32,
+    color: [f32; 4],
+) {
     let ro = r + thick / 2.0;
     let ri = (r - thick / 2.0).max(0.0);
     let steps = 8;
@@ -648,7 +760,11 @@ mod tests {
         let (w, h) = (200u32, 56u32);
         let tex = g.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("icon-test"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -689,7 +805,12 @@ mod tests {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.14, g: 0.14, b: 0.15, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.14,
+                            g: 0.14,
+                            b: 0.15,
+                            a: 1.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -702,12 +823,25 @@ mod tests {
             mr.render(&mut pass);
         }
         enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
             wgpu::TexelCopyBufferInfo {
                 buffer: &buf,
-                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bpr), rows_per_image: Some(h) },
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bpr),
+                    rows_per_image: Some(h),
+                },
             },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         g.queue.submit([enc.finish()]);
 
@@ -718,7 +852,11 @@ mod tests {
         for row in 0..h {
             for col_ in 0..w {
                 let o = (row * bpr + col_ * 4) as usize;
-                img.put_pixel(col_, row, image::Rgba([data[o], data[o + 1], data[o + 2], data[o + 3]]));
+                img.put_pixel(
+                    col_,
+                    row,
+                    image::Rgba([data[o], data[o + 1], data[o + 2], data[o + 3]]),
+                );
             }
         }
         let path = std::env::temp_dir().join("unterm-archive-icon.png");

@@ -12,7 +12,13 @@ use unterm::*;
 fn main() {
     env_logger::try_init().ok();
 
-    let cwd = CString::new(std::env::current_dir().unwrap().to_string_lossy().to_string()).unwrap();
+    let cwd = CString::new(
+        std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .to_string(),
+    )
+    .unwrap();
     let id = unsafe { unterm_create(1000, 600, 2.0, cwd.as_ptr()) };
     assert!(id != 0, "create failed");
 
@@ -34,8 +40,13 @@ fn main() {
     let mut len = 0usize;
     let ptr = unsafe { unterm_selection_text(id, &mut len as *mut usize) };
     assert!(!ptr.is_null() && len > 0, "no selection text");
-    let text = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
-    assert!(text.contains("SELECTME"), "selection missing token; got:\n{text}");
+    let text = unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        text.contains("SELECTME"),
+        "selection missing token; got:\n{text}"
+    );
     println!("selection round-trip OK ({len} bytes), contains SELECTME");
 
     // Render the highlighted frame for visual inspection.
@@ -47,8 +58,14 @@ fn main() {
     let mut h = 0u32;
     unsafe { unterm_size(id, &mut w as *mut u32, &mut h as *mut u32) };
     let data = unsafe { std::slice::from_raw_parts(px, plen) };
-    image::save_buffer("unterm_sel.png", data, w, h, image::ExtendedColorType::Rgba8)
-        .expect("png save");
+    image::save_buffer(
+        "unterm_sel.png",
+        data,
+        w,
+        h,
+        image::ExtendedColorType::Rgba8,
+    )
+    .expect("png save");
     println!("wrote unterm_sel.png ({w}x{h})");
 
     // Clearing drops the highlight (selection text becomes empty).

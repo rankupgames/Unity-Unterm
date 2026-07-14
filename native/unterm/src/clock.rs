@@ -60,7 +60,12 @@ pub fn format_relative(stamp: u64, now: u64) -> String {
 /// needs no date library just for this one field.
 pub fn parse_iso8601_secs(s: &str) -> u64 {
     let b = s.as_bytes();
-    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':'
+    if b.len() < 19
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
     {
         return 0;
     }
@@ -102,8 +107,14 @@ mod tests {
         let midnight = parse_iso8601_secs("2026-07-02T00:00:00Z");
         assert_ne!(midnight, 0);
         let intraday = 8 * 3600 + 12 * 60 + 34;
-        assert_eq!(parse_iso8601_secs("2026-07-02T08:12:34Z"), midnight + intraday);
-        assert_eq!(parse_iso8601_secs("2026-07-02T08:12:34.567Z"), midnight + intraday);
+        assert_eq!(
+            parse_iso8601_secs("2026-07-02T08:12:34Z"),
+            midnight + intraday
+        );
+        assert_eq!(
+            parse_iso8601_secs("2026-07-02T08:12:34.567Z"),
+            midnight + intraday
+        );
         // Consecutive civil days are exactly 86_400 s apart, across a leap day too.
         let next = parse_iso8601_secs("2026-07-03T00:00:00Z");
         assert_eq!(next - midnight, 86_400);

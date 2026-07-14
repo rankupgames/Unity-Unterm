@@ -27,7 +27,11 @@ pub fn selection_bg(bg: [u8; 3]) -> [u8; 3] {
     const ACCENT: [u8; 3] = [0x4d, 0x7a, 0xc7];
     const T: f32 = 0.55;
     let mix = |a: u8, b: u8| (a as f32 * (1.0 - T) + b as f32 * T).round() as u8;
-    [mix(bg[0], ACCENT[0]), mix(bg[1], ACCENT[1]), mix(bg[2], ACCENT[2])]
+    [
+        mix(bg[0], ACCENT[0]),
+        mix(bg[1], ACCENT[1]),
+        mix(bg[2], ACCENT[2]),
+    ]
 }
 
 impl Default for Theme {
@@ -69,12 +73,12 @@ pub fn resolve(color: Color, theme: &Theme) -> [u8; 3] {
             let idx = named as usize;
             match idx {
                 0..=15 => theme.ansi[idx],
-                256 => theme.fg,                          // Foreground
-                257 => theme.bg,                          // Background
-                258 => theme.cursor,                      // Cursor
-                259..=266 => dim(theme.ansi[idx - 259]),  // DimBlack..DimWhite
-                267 => theme.fg,                          // BrightForeground
-                268 => dim(theme.fg),                     // DimForeground
+                256 => theme.fg,                         // Foreground
+                257 => theme.bg,                         // Background
+                258 => theme.cursor,                     // Cursor
+                259..=266 => dim(theme.ansi[idx - 259]), // DimBlack..DimWhite
+                267 => theme.fg,                         // BrightForeground
+                268 => dim(theme.fg),                    // DimForeground
                 _ => theme.fg,
             }
         }

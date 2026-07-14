@@ -12,8 +12,8 @@ use glyphon::{
 };
 
 use crate::gpu::{self, FORMAT};
-use crate::surface::{self, SharedSurface};
 use crate::quads::{Quad, QuadRenderer};
+use crate::surface::{self, SharedSurface};
 use std::ffi::c_void;
 use std::hash::{Hash, Hasher};
 
@@ -200,14 +200,26 @@ impl InputBox {
         let swash_cache = SwashCache::new();
         let viewport = Viewport::new(&g.device, &g.cache);
         let mut atlas = TextAtlas::new(&g.device, &g.queue, &g.cache, FORMAT);
-        let text_renderer =
-            TextRenderer::new(&mut atlas, &g.device, wgpu::MultisampleState::default(), None);
+        let text_renderer = TextRenderer::new(
+            &mut atlas,
+            &g.device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
         let quads = QuadRenderer::new(&g.device, FORMAT);
-        let popup_text =
-            TextRenderer::new(&mut atlas, &g.device, wgpu::MultisampleState::default(), None);
+        let popup_text = TextRenderer::new(
+            &mut atlas,
+            &g.device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
         let popup_quads = QuadRenderer::new(&g.device, FORMAT);
-        let peek_text =
-            TextRenderer::new(&mut atlas, &g.device, wgpu::MultisampleState::default(), None);
+        let peek_text = TextRenderer::new(
+            &mut atlas,
+            &g.device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
         let peek_quads = QuadRenderer::new(&g.device, FORMAT);
 
         let editor = {
@@ -306,8 +318,8 @@ impl InputBox {
 
     pub fn set_font(&mut self, path: &str) {
         self.attrs_dirty = true; // family feeds every line's attrs
-        // A family name (not a file path) is already in the shared FontSystem (a
-        // system UI font): address it directly, no file load.
+                                 // A family name (not a file path) is already in the shared FontSystem (a
+                                 // system UI font): address it directly, no file load.
         if !gpu::is_font_path(path) {
             self.font_family = Some(path.to_string());
             return;
@@ -402,8 +414,13 @@ impl InputBox {
     /// there, but an Unstage would still drop the staged version, so the host offers
     /// both Stage (update) and Unstage (drop).
     pub fn hunk_has_staged(&self, hunk_i: usize) -> bool {
-        let Some(h) = self.diff_hunks.get(hunk_i) else { return false };
-        crate::diff::overlaps_staged(&self.diff_index_hunks, (h.old_start, h.old_start + h.old_len))
+        let Some(h) = self.diff_hunks.get(hunk_i) else {
+            return false;
+        };
+        crate::diff::overlaps_staged(
+            &self.diff_index_hunks,
+            (h.old_start, h.old_start + h.old_len),
+        )
     }
 
     /// Logical line at surface `y` (px), from the last render's layout. None past the
@@ -430,7 +447,11 @@ impl InputBox {
             let (lo, hi) = if h.new_len > 0 {
                 (h.new_start, h.new_start + h.new_len) // [lo, hi)
             } else {
-                let b = if h.new_start < n { h.new_start } else { n.saturating_sub(1) };
+                let b = if h.new_start < n {
+                    h.new_start
+                } else {
+                    n.saturating_sub(1)
+                };
                 (b, b + 1)
             };
             // ±1 line of slack so a click near the marker still lands.
@@ -446,7 +467,11 @@ impl InputBox {
             let (lo, hi) = if h.new_len > 0 {
                 (h.new_start, h.new_start + h.new_len)
             } else {
-                let b = if h.new_start < n { h.new_start } else { n.saturating_sub(1) };
+                let b = if h.new_start < n {
+                    h.new_start
+                } else {
+                    n.saturating_sub(1)
+                };
                 (b, b + 1)
             };
             line >= lo.saturating_sub(1) && line < hi + 1
@@ -469,10 +494,18 @@ impl InputBox {
     /// (marks the buffer dirty; the base is unchanged so the marker clears on the
     /// next render).
     pub fn revert_hunk(&mut self, hunk_i: usize) {
-        let Some(h) = self.diff_hunks.get(hunk_i).copied() else { return };
-        let Some(base) = self.diff_base_text() else { return };
-        let base_old: Vec<String> =
-            base.split('\n').skip(h.old_start).take(h.old_len).map(str::to_string).collect();
+        let Some(h) = self.diff_hunks.get(hunk_i).copied() else {
+            return;
+        };
+        let Some(base) = self.diff_base_text() else {
+            return;
+        };
+        let base_old: Vec<String> = base
+            .split('\n')
+            .skip(h.old_start)
+            .take(h.old_len)
+            .map(str::to_string)
+            .collect();
         let n = self.line_count();
         if h.new_len > 0 {
             // Modified/added span: replace the current lines with the base lines
@@ -551,7 +584,13 @@ impl InputBox {
                 };
                 if let Some((is, il)) = self.diff_index_new.get(hi).copied().flatten() {
                     if let Some(index) = self.diff_index.as_deref() {
-                        lines.extend(index.split('\n').skip(is).take(il).map(|s| (true, s.to_string())));
+                        lines.extend(
+                            index
+                                .split('\n')
+                                .skip(is)
+                                .take(il)
+                                .map(|s| (true, s.to_string())),
+                        );
                     }
                 } else if h.new_len > 0 {
                     self.editor.with_buffer(|b| {
@@ -563,7 +602,11 @@ impl InputBox {
                 if lines.is_empty() {
                     return self.peek.take().is_some();
                 }
-                self.peek = Some(Peek { hunk_i: hi, at: (x, y), lines });
+                self.peek = Some(Peek {
+                    hunk_i: hi,
+                    at: (x, y),
+                    lines,
+                });
                 true
             }
             // Left every marker: hide the tooltip (repaint once to clear it).
@@ -713,9 +756,12 @@ impl InputBox {
     /// Current caret as (line, character-column).
     fn cur_pos(&self) -> (usize, usize) {
         let c = self.editor.cursor();
-        let col = self
-            .editor
-            .with_buffer(|b| b.lines.get(c.line).map(|l| byte_to_col(l.text(), c.index)).unwrap_or(0));
+        let col = self.editor.with_buffer(|b| {
+            b.lines
+                .get(c.line)
+                .map(|l| byte_to_col(l.text(), c.index))
+                .unwrap_or(0)
+        });
         (c.line, col)
     }
 
@@ -743,8 +789,12 @@ impl InputBox {
 
     /// Owned text of logical line `l` (empty if out of range).
     fn line_text(&self, l: usize) -> String {
-        self.editor
-            .with_buffer(|b| b.lines.get(l).map(|x| x.text().to_string()).unwrap_or_default())
+        self.editor.with_buffer(|b| {
+            b.lines
+                .get(l)
+                .map(|x| x.text().to_string())
+                .unwrap_or_default()
+        })
     }
 
     /// Owned text of logical lines `l0..=l1` (clamped to the buffer).
@@ -757,16 +807,23 @@ impl InputBox {
 
     /// Replace the whole buffer with `lines` as ONE undoable change, then place the
     /// caret at `caret` (line, char-col) with an optional selection anchor.
-    fn apply_lines(&mut self, lines: Vec<String>, caret: (usize, usize), sel: Option<(usize, usize)>) {
+    fn apply_lines(
+        &mut self,
+        lines: Vec<String>,
+        caret: (usize, usize),
+        sel: Option<(usize, usize)>,
+    ) {
         let text = lines.join("\n");
         {
             let mut fs = gpu::lock_font_system();
             self.editor.start_change();
             self.editor.set_selection(Selection::None);
-            self.editor.action(&mut fs, Action::Motion(Motion::BufferStart));
+            self.editor
+                .action(&mut fs, Action::Motion(Motion::BufferStart));
             let start = self.editor.cursor();
             self.editor.set_selection(Selection::Normal(start));
-            self.editor.action(&mut fs, Action::Motion(Motion::BufferEnd));
+            self.editor
+                .action(&mut fs, Action::Motion(Motion::BufferEnd));
             self.editor.delete_selection();
             self.editor.insert_string(&text, None);
             if let Some(c) = self.editor.finish_change() {
@@ -780,7 +837,8 @@ impl InputBox {
             Some((al, ac)) => {
                 let al = al.min(last);
                 let ab = col_to_byte(&lines[al], ac);
-                self.editor.set_selection(Selection::Normal(Cursor::new(al, ab)));
+                self.editor
+                    .set_selection(Selection::Normal(Cursor::new(al, ab)));
                 self.editor.set_cursor(Cursor::new(cl, cb));
             }
             None => {
@@ -812,12 +870,20 @@ impl InputBox {
         let (start, end, repl) = if l1 + 1 < n {
             // A line follows the block: include the '\n' after l1 so an empty
             // replacement removes the block cleanly (and a normal one restores it).
-            let repl = if new_lines.is_empty() { String::new() } else { format!("{joined}\n") };
+            let repl = if new_lines.is_empty() {
+                String::new()
+            } else {
+                format!("{joined}\n")
+            };
             (Cursor::new(l0, 0), Cursor::new(l1 + 1, 0), repl)
         } else if l0 > 0 {
             // Block runs to EOF but isn't the whole buffer: include the '\n' before
             // l0 so deletion doesn't leave a trailing empty line.
-            let repl = if new_lines.is_empty() { String::new() } else { format!("\n{joined}") };
+            let repl = if new_lines.is_empty() {
+                String::new()
+            } else {
+                format!("\n{joined}")
+            };
             (
                 Cursor::new(l0 - 1, self.line_byte_len(l0 - 1)),
                 Cursor::new(l1, self.line_byte_len(l1)),
@@ -825,7 +891,11 @@ impl InputBox {
             )
         } else {
             // Whole buffer.
-            (Cursor::new(0, 0), Cursor::new(l1, self.line_byte_len(l1)), joined)
+            (
+                Cursor::new(0, 0),
+                Cursor::new(l1, self.line_byte_len(l1)),
+                joined,
+            )
         };
         self.editor.start_change();
         self.editor.set_selection(Selection::Normal(start));
@@ -842,7 +912,8 @@ impl InputBox {
             Some((al, ac)) => {
                 let al = al.min(last);
                 let ab = col_to_byte(&self.line_text(al), ac);
-                self.editor.set_selection(Selection::Normal(Cursor::new(al, ab)));
+                self.editor
+                    .set_selection(Selection::Normal(Cursor::new(al, ab)));
                 self.editor.set_cursor(Cursor::new(cl, cb));
             }
             None => {
@@ -867,7 +938,13 @@ impl InputBox {
             self.splice_lines(l0, l1, &block, (l1, end), Some((l0, 0)));
         } else {
             let delta = block[bi].chars().count() as i64 - old as i64;
-            self.splice_lines(l0, l1, &block, (cur.0, (cur.1 as i64 + delta).max(0) as usize), None);
+            self.splice_lines(
+                l0,
+                l1,
+                &block,
+                (cur.0, (cur.1 as i64 + delta).max(0) as usize),
+                None,
+            );
         }
     }
 
@@ -885,7 +962,13 @@ impl InputBox {
             self.splice_lines(l0, l1, &block, (l1, end), Some((l0, 0)));
         } else {
             let delta = old as i64 - block[bi].chars().count() as i64;
-            self.splice_lines(l0, l1, &block, (cur.0, (cur.1 as i64 - delta).max(0) as usize), None);
+            self.splice_lines(
+                l0,
+                l1,
+                &block,
+                (cur.0, (cur.1 as i64 - delta).max(0) as usize),
+                None,
+            );
         }
     }
 
@@ -903,7 +986,13 @@ impl InputBox {
             self.splice_lines(l0, l1, &block, (l1, end), Some((l0, 0)));
         } else {
             let delta = block[bi].chars().count() as i64 - old as i64;
-            self.splice_lines(l0, l1, &block, (cur.0, (cur.1 as i64 + delta).max(0) as usize), None);
+            self.splice_lines(
+                l0,
+                l1,
+                &block,
+                (cur.0, (cur.1 as i64 + delta).max(0) as usize),
+                None,
+            );
         }
     }
 
@@ -1022,7 +1111,11 @@ impl InputBox {
                 .map(|(b, _)| b)
                 .unwrap_or(line.len())
         });
-        let motion = if cur.index != soft { Motion::SoftHome } else { Motion::Home };
+        let motion = if cur.index != soft {
+            Motion::SoftHome
+        } else {
+            Motion::Home
+        };
         self.editor.action(&mut fs, Action::Motion(motion));
     }
 
@@ -1092,21 +1185,31 @@ impl InputBox {
     fn word_target(&self, forward: bool) -> (usize, usize) {
         let cur = self.cur_pos();
         let last = self.editor.with_buffer(|b| b.lines.len().saturating_sub(1));
-        let line = self
-            .editor
-            .with_buffer(|b| b.lines.get(cur.0).map(|l| l.text().to_string()).unwrap_or_default());
+        let line = self.editor.with_buffer(|b| {
+            b.lines
+                .get(cur.0)
+                .map(|l| l.text().to_string())
+                .unwrap_or_default()
+        });
         let len = line.chars().count();
         if forward {
             if cur.1 >= len {
-                if cur.0 < last { (cur.0 + 1, 0) } else { (cur.0, len) }
+                if cur.0 < last {
+                    (cur.0 + 1, 0)
+                } else {
+                    (cur.0, len)
+                }
             } else {
                 (cur.0, crate::editops::word_right(&line, cur.1))
             }
         } else if cur.1 == 0 {
             if cur.0 > 0 {
-                let plen = self
-                    .editor
-                    .with_buffer(|b| b.lines.get(cur.0 - 1).map(|l| l.text().chars().count()).unwrap_or(0));
+                let plen = self.editor.with_buffer(|b| {
+                    b.lines
+                        .get(cur.0 - 1)
+                        .map(|l| l.text().chars().count())
+                        .unwrap_or(0)
+                });
                 (cur.0 - 1, plen)
             } else {
                 (cur.0, 0)
@@ -1117,8 +1220,12 @@ impl InputBox {
     }
 
     fn word_byte(&self, line: usize, col: usize) -> usize {
-        self.editor
-            .with_buffer(|b| b.lines.get(line).map(|l| col_to_byte(l.text(), col)).unwrap_or(0))
+        self.editor.with_buffer(|b| {
+            b.lines
+                .get(line)
+                .map(|l| col_to_byte(l.text(), col))
+                .unwrap_or(0)
+        })
     }
 
     /// Move the caret one word left/right (code-aware); `shift` extends selection.
@@ -1143,7 +1250,8 @@ impl InputBox {
             let anchor = self.editor.cursor();
             let (tl, tc) = self.word_target(forward);
             self.editor.set_selection(Selection::Normal(anchor));
-            self.editor.set_cursor(Cursor::new(tl, self.word_byte(tl, tc)));
+            self.editor
+                .set_cursor(Cursor::new(tl, self.word_byte(tl, tc)));
         }
         self.editor.start_change();
         self.editor.delete_selection();
@@ -1232,7 +1340,6 @@ impl InputBox {
         self.button != 0 && x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]
     }
 
-
     pub fn raw_texture(&self) -> *mut c_void {
         self.shared.raw_texture()
     }
@@ -1281,7 +1388,8 @@ impl InputBox {
         let attrs = Attrs::new().family(family).color(color);
         self.editor
             .with_buffer_mut(|b| b.set_text(&mut fs, text, &attrs, Shaping::Advanced, None));
-        self.editor.action(&mut fs, Action::Motion(Motion::BufferEnd));
+        self.editor
+            .action(&mut fs, Action::Motion(Motion::BufferEnd));
         // A programmatic buffer replacement invalidates any in-progress IME
         // composition; drop it so a later clear_preedit can't delete against a stale
         // anchor that now points past the new buffer (cosmic-text split_off panic).
@@ -1383,7 +1491,11 @@ impl InputBox {
             self.push_change(c);
         }
         // Restore the caret, shifted down a line if the import was inserted above it.
-        let line = if cur.line >= target { cur.line + 1 } else { cur.line };
+        let line = if cur.line >= target {
+            cur.line + 1
+        } else {
+            cur.line
+        };
         self.editor.set_cursor(Cursor::new(line, cur.index));
         self.bump();
     }
@@ -1581,14 +1693,20 @@ impl InputBox {
             // whole). `.` is a boundary except inside a float literal.
             self.editor.action(&mut fs, Action::Click { x: bx, y: by });
             let cur = self.editor.cursor();
-            let line = self
-                .editor
-                .with_buffer(|b| b.lines.get(cur.line).map(|l| l.text().to_string()).unwrap_or_default());
+            let line = self.editor.with_buffer(|b| {
+                b.lines
+                    .get(cur.line)
+                    .map(|l| l.text().to_string())
+                    .unwrap_or_default()
+            });
             let col = byte_to_col(&line, cur.index);
             let (s, e) = crate::editops::word_at(&line, col);
+            self.editor.set_selection(Selection::Normal(Cursor::new(
+                cur.line,
+                col_to_byte(&line, s),
+            )));
             self.editor
-                .set_selection(Selection::Normal(Cursor::new(cur.line, col_to_byte(&line, s))));
-            self.editor.set_cursor(Cursor::new(cur.line, col_to_byte(&line, e)));
+                .set_cursor(Cursor::new(cur.line, col_to_byte(&line, e)));
         } else {
             let action = match kind {
                 1 => Action::Drag { x: bx, y: by },
@@ -1600,7 +1718,6 @@ impl InputBox {
         drop(fs);
         self.caret_dirty = true;
     }
-
 
     /// The current selection text, or None if nothing is selected.
     pub fn copy(&self) -> Option<String> {
@@ -1623,10 +1740,12 @@ impl InputBox {
 
     pub fn select_all(&mut self) {
         let mut fs = gpu::lock_font_system();
-        self.editor.action(&mut fs, Action::Motion(Motion::BufferStart));
+        self.editor
+            .action(&mut fs, Action::Motion(Motion::BufferStart));
         let start = self.editor.cursor();
         self.editor.set_selection(Selection::Normal(start));
-        self.editor.action(&mut fs, Action::Motion(Motion::BufferEnd));
+        self.editor
+            .action(&mut fs, Action::Motion(Motion::BufferEnd));
     }
 
     /// Drop any selection (used when focus moves to the transcript).
@@ -1690,10 +1809,18 @@ impl InputBox {
         let width = self.width as f32;
         let height = self.height as f32;
         // Reserve a square on the right for the Send/Stop button, if any.
-        let bw = if self.button != 0 { (28.0 * s).min(height - 2.0).max(0.0) } else { 0.0 };
+        let bw = if self.button != 0 {
+            (28.0 * s).min(height - 2.0).max(0.0)
+        } else {
+            0.0
+        };
         let btn_x = width - pad - bw;
         let btn_y = ((height - bw) / 2.0).max(0.0);
-        self.button_rect = if bw > 0.0 { [btn_x, btn_y, bw, bw] } else { [0.0; 4] };
+        self.button_rect = if bw > 0.0 {
+            [btn_x, btn_y, bw, bw]
+        } else {
+            [0.0; 4]
+        };
         let reserve = if bw > 0.0 { bw + pad } else { 0.0 };
 
         // Code-editor gutter: width from the logical line count, shifting the text
@@ -1703,7 +1830,11 @@ impl InputBox {
         // at its plain line-number width.
         let line_count = self.editor.with_buffer(|b| b.lines.len()).max(1);
         let bp_dot = (line_height * 0.52).min(font_size);
-        let bp_col = if self.bp_gutter { bp_dot + pad * 0.45 } else { 0.0 };
+        let bp_col = if self.bp_gutter {
+            bp_dot + pad * 0.45
+        } else {
+            0.0
+        };
         let gutter_w = if self.gutter {
             let digits = ((line_count as f32).log10().floor() as usize + 1).max(2);
             // digits + a right gap for the numbers + a left lane for the diff markers
@@ -1748,7 +1879,11 @@ impl InputBox {
                 self.diff_index_new = display.iter().map(|d| d.index_new).collect();
                 let n = text.split('\n').count();
                 self.diff_markers = crate::diff::markers_from_hunks(&self.diff_hunks, n);
-                crate::diff::apply_staged_bits(&mut self.diff_markers, &self.diff_hunks, &self.diff_staged);
+                crate::diff::apply_staged_bits(
+                    &mut self.diff_markers,
+                    &self.diff_hunks,
+                    &self.diff_staged,
+                );
                 self.diff_gen = self.edit_gen;
             }
         }
@@ -1772,7 +1907,14 @@ impl InputBox {
         self.editor.with_buffer_mut(|b| {
             b.set_metrics(fs, Metrics::new(font_size, line_height));
             // Code mode doesn't wrap (long lines scroll horizontally instead).
-            b.set_wrap(fs, if self.code_mode { Wrap::None } else { Wrap::WordOrGlyph });
+            b.set_wrap(
+                fs,
+                if self.code_mode {
+                    Wrap::None
+                } else {
+                    Wrap::WordOrGlyph
+                },
+            );
             // Re-apply per-line attrs only when something that feeds them changed
             // (highlight cache, theme, text color, or font), tracked by `attrs_dirty`.
             // set_attrs_list itself is cheap (it diffs and skips reshaping), but
@@ -1806,7 +1948,11 @@ impl InputBox {
         // bounded, so this is the only way to see the whole thing.
         self.editor.with_buffer_mut(|b| {
             b.set_size(fs, Some(inner_w), None);
-            b.set_scroll(Scroll { line: 0, vertical: 0.0, horizontal: 0.0 });
+            b.set_scroll(Scroll {
+                line: 0,
+                vertical: 0.0,
+                horizontal: 0.0,
+            });
         });
         self.editor.shape_as_needed(fs, false);
         let full_h = self.editor.with_buffer(measure_height);
@@ -1843,14 +1989,22 @@ impl InputBox {
             }
         }
         self.scroll_v = self.scroll_v.clamp(0.0, max_scroll);
-        self.scroll_h = if self.code_mode { self.scroll_h.clamp(0.0, max_scroll_h) } else { 0.0 };
+        self.scroll_h = if self.code_mode {
+            self.scroll_h.clamp(0.0, max_scroll_h)
+        } else {
+            0.0
+        };
         self.caret_dirty = false;
 
         // Pass 2: bound to the box at the kept scroll offset.
         let scroll_h = self.scroll_h;
         self.editor.with_buffer_mut(|b| {
             b.set_size(fs, Some(inner_w), Some(inner_h));
-            b.set_scroll(Scroll { line: 0, vertical: self.scroll_v, horizontal: scroll_h });
+            b.set_scroll(Scroll {
+                line: 0,
+                vertical: self.scroll_v,
+                horizontal: scroll_h,
+            });
         });
         self.editor.shape_as_needed(fs, false);
 
@@ -1963,7 +2117,12 @@ impl InputBox {
                 y,
                 w: (2.0 * s).max(1.0),
                 h: line_height,
-                color: [self.text_color.r() as f32 / 255.0, self.text_color.g() as f32 / 255.0, self.text_color.b() as f32 / 255.0, 0.9],
+                color: [
+                    self.text_color.r() as f32 / 255.0,
+                    self.text_color.g() as f32 / 255.0,
+                    self.text_color.b() as f32 / 255.0,
+                    0.9,
+                ],
                 radius: 0.0,
             });
         }
@@ -1990,7 +2149,11 @@ impl InputBox {
             let isize = bw * 0.5;
             let mut b = Buffer::new(fs, Metrics::new(isize, isize));
             b.set_size(fs, Some(bw), Some(bw));
-            let ch = if self.button == 2 { "\u{25A0}" } else { "\u{25B6}" };
+            let ch = if self.button == 2 {
+                "\u{25A0}"
+            } else {
+                "\u{25B6}"
+            };
             b.set_text(
                 fs,
                 ch,
@@ -2042,14 +2205,28 @@ impl InputBox {
             // Staged hunks draw HOLLOW (an inner cut of the gutter background), the
             // Zed idiom, so what's already staged reads apart from working changes.
             if !self.diff_markers.is_empty() {
-                use crate::diff::{ADDED, DELETED_ABOVE, DELETED_BELOW, MODIFIED, STAGED, STAGED_DEL};
+                use crate::diff::{
+                    ADDED, DELETED_ABOVE, DELETED_BELOW, MODIFIED, STAGED, STAGED_DEL,
+                };
                 let dark = self.highlight_dark;
                 // Opaque (alpha 1) + a small radius: the quad SDF leaves a radius-0
                 // interior at half alpha, which washed these out. Bars overlap by the
                 // radius so consecutive changed lines read as one continuous mark.
-                let added = if dark { [0.24, 0.64, 0.36, 1.0] } else { [0.18, 0.56, 0.30, 1.0] };
-                let modified = if dark { [0.13, 0.54, 0.72, 1.0] } else { [0.10, 0.50, 0.80, 1.0] };
-                let deleted = if dark { [0.86, 0.22, 0.22, 1.0] } else { [0.82, 0.12, 0.12, 1.0] };
+                let added = if dark {
+                    [0.24, 0.64, 0.36, 1.0]
+                } else {
+                    [0.18, 0.56, 0.30, 1.0]
+                };
+                let modified = if dark {
+                    [0.13, 0.54, 0.72, 1.0]
+                } else {
+                    [0.10, 0.50, 0.80, 1.0]
+                };
+                let deleted = if dark {
+                    [0.86, 0.22, 0.22, 1.0]
+                } else {
+                    [0.82, 0.12, 0.12, 1.0]
+                };
                 // The gutter strip's own color, for the hollow inner cut.
                 let gbg = [
                     (c.r as f32 + shade).min(1.0),
@@ -2070,7 +2247,14 @@ impl InputBox {
                     let y = pad + *top;
                     if m & (ADDED | MODIFIED) != 0 {
                         let color = if m & MODIFIED != 0 { modified } else { added };
-                        quads.push(Quad { x: 0.0, y: y - rr, w: bar_w, h: line_height + rr * 2.0, color, radius: rr });
+                        quads.push(Quad {
+                            x: 0.0,
+                            y: y - rr,
+                            w: bar_w,
+                            h: line_height + rr * 2.0,
+                            color,
+                            radius: rr,
+                        });
                         if m & STAGED != 0 {
                             // Hollow: cut the bar's interior back to the gutter color,
                             // leaving a frame (per-line cuts, so a staged line next to
@@ -2090,7 +2274,14 @@ impl InputBox {
                         (DELETED_BELOW, y + line_height - wedge_h * 0.5),
                     ] {
                         if m & bit != 0 {
-                            quads.push(Quad { x: 0.0, y: wy, w: wedge_w, h: wedge_h, color: deleted, radius: wedge_h * 0.5 });
+                            quads.push(Quad {
+                                x: 0.0,
+                                y: wy,
+                                w: wedge_w,
+                                h: wedge_h,
+                                color: deleted,
+                                radius: wedge_h * 0.5,
+                            });
                             if m & STAGED_DEL != 0 {
                                 quads.push(Quad {
                                     x: inset,
@@ -2140,9 +2331,12 @@ impl InputBox {
                 h.finish()
             };
             if self.gutter_cache.key != Some(key) {
-                let num_attrs = Attrs::new()
-                    .family(Family::Monospace)
-                    .color(Color::rgba(nc.r(), nc.g(), nc.b(), 120));
+                let num_attrs = Attrs::new().family(Family::Monospace).color(Color::rgba(
+                    nc.r(),
+                    nc.g(),
+                    nc.b(),
+                    120,
+                ));
                 let mut bufs: Vec<Buffer> = Vec::with_capacity(tops.len());
                 let mut pos: Vec<(f32, f32)> = Vec::with_capacity(tops.len());
                 for (li, top) in &tops {
@@ -2156,7 +2350,11 @@ impl InputBox {
                     bufs.push(b);
                     pos.push((left, pad + *top));
                 }
-                self.gutter_cache = GutterCache { key: Some(key), bufs, pos };
+                self.gutter_cache = GutterCache {
+                    key: Some(key),
+                    bufs,
+                    pos,
+                };
             }
         } else if self.gutter_cache.key.is_some() {
             self.gutter_cache = GutterCache::default();
@@ -2232,9 +2430,15 @@ impl InputBox {
                         custom_glyphs: &[],
                     });
                 }
-                if let Err(e) =
-                    text_renderer.prepare(&g.device, &g.queue, fs, atlas, viewport, areas, swash_cache)
-                {
+                if let Err(e) = text_renderer.prepare(
+                    &g.device,
+                    &g.queue,
+                    fs,
+                    atlas,
+                    viewport,
+                    areas,
+                    swash_cache,
+                ) {
                     // Full atlas / transient device error: log and let the frame
                     // draw without fresh text rather than panic across the C ABI.
                     log::error!("unterm: input glyphon prepare failed: {e}");
@@ -2278,11 +2482,23 @@ impl InputBox {
             let ph = visible as f32 * row_h + pad;
 
             let px = cx.min((width - pw).max(0.0)).max(0.0);
-            let py = if use_below { cy + row_h } else { (cy - ph).max(0.0) };
-            let top = if self.compl_sel >= visible { self.compl_sel + 1 - visible } else { 0 };
+            let py = if use_below {
+                cy + row_h
+            } else {
+                (cy - ph).max(0.0)
+            };
+            let top = if self.compl_sel >= visible {
+                self.compl_sel + 1 - visible
+            } else {
+                0
+            };
 
             let bg = self.clear;
-            let shade = if self.highlight_dark { 0.10_f32 } else { -0.06_f32 };
+            let shade = if self.highlight_dark {
+                0.10_f32
+            } else {
+                -0.06_f32
+            };
             let mut pquads: Vec<Quad> = Vec::with_capacity(2);
             pquads.push(Quad {
                 x: px,
@@ -2306,7 +2522,8 @@ impl InputBox {
                 color: [0.30, 0.50, 0.90, 0.55],
                 radius: 0.0,
             });
-            self.popup_quads.prepare(&g.device, &g.queue, (width, height), &pquads);
+            self.popup_quads
+                .prepare(&g.device, &g.queue, (width, height), &pquads);
 
             // Each item is a 1-char kind tag + the display label. Strip the tag for
             // display, keep it to color the row like the editor.
@@ -2324,7 +2541,9 @@ impl InputBox {
             let mut b = Buffer::new(fs, Metrics::new(font_size, row_h));
             b.set_size(fs, Some(pw - pad), Some(ph));
             b.set_wrap(fs, Wrap::None); // labels never wrap — clip at the popup edge
-            let base = Attrs::new().family(Family::Monospace).color(self.text_color);
+            let base = Attrs::new()
+                .family(Family::Monospace)
+                .color(self.text_color);
             b.set_text(fs, &joined, &base, Shaping::Advanced, None);
             // Color each row like the editor: the name by its kind (function/type/
             // property…) and the signature/type part in the type color.
@@ -2359,9 +2578,15 @@ impl InputBox {
                 default_color: text_color,
                 custom_glyphs: &[],
             };
-            if let Err(e) =
-                popup_text.prepare(&g.device, &g.queue, fs, atlas, viewport, [area], swash_cache)
-            {
+            if let Err(e) = popup_text.prepare(
+                &g.device,
+                &g.queue,
+                fs,
+                atlas,
+                viewport,
+                [area],
+                swash_cache,
+            ) {
                 // Skip the popup's text this frame rather than panic; retried next frame.
                 log::error!("unterm: popup glyphon prepare failed: {e}");
             }
@@ -2391,7 +2616,8 @@ impl InputBox {
                     .max()
                     .unwrap_or(0);
                 let text_w = (longest as f32 * font_size * 0.6).ceil();
-                let card_w = (text_w + sign_w + pad * 2.0).clamp(60.0, (width - pad * 2.0).max(60.0));
+                let card_w =
+                    (text_w + sign_w + pad * 2.0).clamp(60.0, (width - pad * 2.0).max(60.0));
                 let card_h = visible as f32 * line_height + vpad * 2.0;
 
                 // Top-left just below-right of the pointer — snug, like an OS tooltip
@@ -2412,19 +2638,56 @@ impl InputBox {
                 card_y = card_y.clamp(pad, (height - pad - card_h).max(pad));
 
                 let shadow = [0.0, 0.0, 0.0, if dark { 0.5 } else { 0.25 }];
-                let border = if dark { [0.34, 0.34, 0.36, 1.0] } else { [0.72, 0.72, 0.74, 1.0] };
-                let bg = if dark { [0.15, 0.15, 0.16, 1.0] } else { [0.99, 0.99, 0.99, 1.0] };
+                let border = if dark {
+                    [0.34, 0.34, 0.36, 1.0]
+                } else {
+                    [0.72, 0.72, 0.74, 1.0]
+                };
+                let bg = if dark {
+                    [0.15, 0.15, 0.16, 1.0]
+                } else {
+                    [0.99, 0.99, 0.99, 1.0]
+                };
                 // Per-row diff tints (opaque, near-pure so red/green read vividly on the
                 // sRGB target — keep the off-channels low so it doesn't wash to rose/mint).
-                let row_del = if dark { [0.44, 0.05, 0.05, 1.0] } else { [1.0, 0.62, 0.62, 1.0] };
-                let row_add = if dark { [0.05, 0.38, 0.10, 1.0] } else { [0.55, 0.88, 0.58, 1.0] };
+                let row_del = if dark {
+                    [0.44, 0.05, 0.05, 1.0]
+                } else {
+                    [1.0, 0.62, 0.62, 1.0]
+                };
+                let row_add = if dark {
+                    [0.05, 0.38, 0.10, 1.0]
+                } else {
+                    [0.55, 0.88, 0.58, 1.0]
+                };
                 let bw = (1.0 * s).max(1.0); // border thickness
                 let sh = (3.0 * s).max(2.0); // shadow offset
                 let mut pquads: Vec<Quad> = Vec::with_capacity(3 + visible);
                 // drop shadow, then border, then the neutral card fill.
-                pquads.push(Quad { x: card_x - bw + sh, y: card_y - bw + sh, w: card_w + bw * 2.0, h: card_h + bw * 2.0, color: shadow, radius: 5.0 * s });
-                pquads.push(Quad { x: card_x - bw, y: card_y - bw, w: card_w + bw * 2.0, h: card_h + bw * 2.0, color: border, radius: 5.0 * s });
-                pquads.push(Quad { x: card_x, y: card_y, w: card_w, h: card_h, color: bg, radius: 4.0 * s });
+                pquads.push(Quad {
+                    x: card_x - bw + sh,
+                    y: card_y - bw + sh,
+                    w: card_w + bw * 2.0,
+                    h: card_h + bw * 2.0,
+                    color: shadow,
+                    radius: 5.0 * s,
+                });
+                pquads.push(Quad {
+                    x: card_x - bw,
+                    y: card_y - bw,
+                    w: card_w + bw * 2.0,
+                    h: card_h + bw * 2.0,
+                    color: border,
+                    radius: 5.0 * s,
+                });
+                pquads.push(Quad {
+                    x: card_x,
+                    y: card_y,
+                    w: card_w,
+                    h: card_h,
+                    color: bg,
+                    radius: 4.0 * s,
+                });
                 // one tinted row per diff line. A small radius is required for FULL
                 // opacity: the quad shader's SDF leaves a radius-0 interior at alpha
                 // 0.5 (it only measures the exterior distance). Rows overlap by the
@@ -2432,9 +2695,17 @@ impl InputBox {
                 let rr = 2.0 * s;
                 for (i, (added, _)) in pk.lines[..visible].iter().enumerate() {
                     let ry = card_y + vpad + i as f32 * line_height;
-                    pquads.push(Quad { x: card_x, y: ry - rr, w: card_w, h: line_height + rr * 2.0, color: if *added { row_add } else { row_del }, radius: rr });
+                    pquads.push(Quad {
+                        x: card_x,
+                        y: ry - rr,
+                        w: card_w,
+                        h: line_height + rr * 2.0,
+                        color: if *added { row_add } else { row_del },
+                        radius: rr,
+                    });
                 }
-                self.peek_quads.prepare(&g.device, &g.queue, (width, height), &pquads);
+                self.peek_quads
+                    .prepare(&g.device, &g.queue, (width, height), &pquads);
 
                 // Prefix each row with its diff sign; color the whole row's text by kind.
                 let joined: String = pk.lines[..visible]
@@ -2445,8 +2716,16 @@ impl InputBox {
                 let mut b = Buffer::new(fs, Metrics::new(font_size, line_height));
                 b.set_size(fs, Some((card_w - pad * 0.5).max(1.0)), Some(card_h));
                 b.set_wrap(fs, Wrap::None); // code never wraps — clip at the card edge
-                let del_c = if dark { Color::rgb(255, 210, 210) } else { Color::rgb(140, 20, 20) };
-                let add_c = if dark { Color::rgb(205, 250, 210) } else { Color::rgb(15, 100, 30) };
+                let del_c = if dark {
+                    Color::rgb(255, 210, 210)
+                } else {
+                    Color::rgb(140, 20, 20)
+                };
+                let add_c = if dark {
+                    Color::rgb(205, 250, 210)
+                } else {
+                    Color::rgb(15, 100, 30)
+                };
                 let base = Attrs::new().family(Family::Monospace).color(text_color);
                 b.set_text(fs, &joined, &base, Shaping::Advanced, None);
                 for (line, (added, _)) in b.lines.iter_mut().zip(pk.lines[..visible].iter()) {
@@ -2479,9 +2758,15 @@ impl InputBox {
                 default_color: text_color,
                 custom_glyphs: &[],
             };
-            if let Err(e) =
-                peek_text.prepare(&g.device, &g.queue, fs, atlas, viewport, [area], swash_cache)
-            {
+            if let Err(e) = peek_text.prepare(
+                &g.device,
+                &g.queue,
+                fs,
+                atlas,
+                viewport,
+                [area],
+                swash_cache,
+            ) {
                 log::error!("unterm: peek glyphon prepare failed: {e}");
             }
         }
@@ -2509,19 +2794,28 @@ impl InputBox {
                 multiview_mask: None,
             });
             self.quads.render(&mut pass);
-            if let Err(e) = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass) {
+            if let Err(e) = self
+                .text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+            {
                 // Draw the frame without text rather than abort; next frame retries.
                 log::error!("unterm: input glyphon render failed: {e}");
             }
             if popup {
                 self.popup_quads.render(&mut pass);
-                if let Err(e) = self.popup_text.render(&self.atlas, &self.viewport, &mut pass) {
+                if let Err(e) = self
+                    .popup_text
+                    .render(&self.atlas, &self.viewport, &mut pass)
+                {
                     log::error!("unterm: popup glyphon render failed: {e}");
                 }
             }
             if has_peek {
                 self.peek_quads.render(&mut pass);
-                if let Err(e) = self.peek_text.render(&self.atlas, &self.viewport, &mut pass) {
+                if let Err(e) = self
+                    .peek_text
+                    .render(&self.atlas, &self.viewport, &mut pass)
+                {
                     log::error!("unterm: peek glyphon render failed: {e}");
                 }
             }
@@ -2535,12 +2829,14 @@ impl InputBox {
         // texture (the zero-copy path has no readback to force completion).
         self.shared.present();
     }
-
 }
 
 /// Byte index of character column `col` within `line` (clamped to its end).
 fn col_to_byte(line: &str, col: usize) -> usize {
-    line.char_indices().nth(col).map(|(b, _)| b).unwrap_or(line.len())
+    line.char_indices()
+        .nth(col)
+        .map(|(b, _)| b)
+        .unwrap_or(line.len())
 }
 
 /// Character column of byte index `byte` within `line`.
@@ -2581,7 +2877,12 @@ fn cursor_char_off(text: &str, cur: Cursor) -> usize {
 /// Build colored spans for a completion popup label (`name : type`, `Foo(T) : R`):
 /// the name is colored by the symbol's KIND (from the host) using the editor's
 /// theme captures, and the rest (params, `:`, type) in the type color.
-pub(crate) fn popup_label_attrs(label: &str, kind: char, base: &Attrs, dark: bool) -> glyphon::AttrsList {
+pub(crate) fn popup_label_attrs(
+    label: &str,
+    kind: char,
+    base: &Attrs,
+    dark: bool,
+) -> glyphon::AttrsList {
     let mut al = glyphon::AttrsList::new(base);
     let paren = label.find('(');
     let colon = label.find(" : ");
@@ -2604,10 +2905,18 @@ pub(crate) fn popup_label_attrs(label: &str, kind: char, base: &Attrs, dark: boo
         _ => "",
     };
     if name_end > 0 && !capture.is_empty() {
-        al.add_span(0..name_end, &base.clone().color(crate::highlight::color_of(capture, dark)));
+        al.add_span(
+            0..name_end,
+            &base
+                .clone()
+                .color(crate::highlight::color_of(capture, dark)),
+        );
     }
     if name_end < label.len() {
-        al.add_span(name_end..label.len(), &base.clone().color(crate::highlight::color_of("type", dark)));
+        al.add_span(
+            name_end..label.len(),
+            &base.clone().color(crate::highlight::color_of("type", dark)),
+        );
     }
     al
 }

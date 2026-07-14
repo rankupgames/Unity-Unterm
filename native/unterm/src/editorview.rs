@@ -88,7 +88,12 @@ impl EditorView {
         p.set_clear_color(self.clear.0, self.clear.1, self.clear.2, self.clear.3);
         p.set_text_color(self.fg.0, self.fg.1, self.fg.2, 255);
         if !self.font_path.is_empty() {
-            p.set_fonts(&self.font_path, &self.font_path, &self.font_path, &self.font_path);
+            p.set_fonts(
+                &self.font_path,
+                &self.font_path,
+                &self.font_path,
+                &self.font_path,
+            );
         }
         p.set_root(self.root.clone());
         self.preview = Some(p);
@@ -110,7 +115,10 @@ impl EditorView {
     /// for click-to-open; empty when not over one or not previewing.
     pub fn preview_token_at(&mut self, x: f32, y: f32) -> &CString {
         let tok = if self.preview_on {
-            self.preview.as_ref().and_then(|p| p.token_at(x, y)).unwrap_or_default()
+            self.preview
+                .as_ref()
+                .and_then(|p| p.token_at(x, y))
+                .unwrap_or_default()
         } else {
             String::new()
         };
@@ -122,13 +130,20 @@ impl EditorView {
     /// of its git HEAD + index versions. Call on load.
     pub fn set_path(&mut self, path: &str) {
         let p = path.trim();
-        self.diff.set_path(if p.is_empty() { None } else { Some(PathBuf::from(p)) });
+        self.diff.set_path(if p.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(p))
+        });
         // Preview link resolution: a Markdown file's relative paths resolve against
         // its own directory. Empty path → project cwd (empty root).
         self.root = if p.is_empty() {
             PathBuf::new()
         } else {
-            PathBuf::from(p).parent().map(|d| d.to_path_buf()).unwrap_or_default()
+            PathBuf::from(p)
+                .parent()
+                .map(|d| d.to_path_buf())
+                .unwrap_or_default()
         };
         if let Some(pr) = self.preview.as_mut() {
             pr.set_root(self.root.clone());
@@ -186,7 +201,17 @@ impl EditorView {
     }
 
     /// Background rgba + foreground rgb, plus the syntect-vs-dark highlight theme.
-    pub fn set_theme(&mut self, br: f64, bg: f64, bb: f64, ba: f64, fr: u8, fg: u8, fb: u8, dark: bool) {
+    pub fn set_theme(
+        &mut self,
+        br: f64,
+        bg: f64,
+        bb: f64,
+        ba: f64,
+        fr: u8,
+        fg: u8,
+        fb: u8,
+        dark: bool,
+    ) {
         self.clear = (br, bg, bb, ba);
         self.fg = (fr, fg, fb);
         self.edit.set_clear_color(br, bg, bb, ba);
@@ -201,7 +226,8 @@ impl EditorView {
     /// Tree-sitter language token (e.g. "cs"); empty = plain.
     pub fn set_language(&mut self, token: &str) {
         let t = token.trim();
-        self.edit.set_language(if t.is_empty() { None } else { Some(t) });
+        self.edit
+            .set_language(if t.is_empty() { None } else { Some(t) });
     }
 
     pub fn render(&mut self) {

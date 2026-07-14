@@ -193,7 +193,11 @@ impl AgentView {
     /// event, otherwise the id we resumed with (so the title/current-highlight are
     /// right immediately on resume instead of after init lands).
     fn effective_id(&self) -> String {
-        let live = self.driver.as_ref().map(|d| d.session_id()).unwrap_or_default();
+        let live = self
+            .driver
+            .as_ref()
+            .map(|d| d.session_id())
+            .unwrap_or_default();
         if live.is_empty() {
             self.resume_id.clone()
         } else {
@@ -228,7 +232,12 @@ impl AgentView {
             let (w, h) = self.panel_size;
             let scale = self.panel_scale;
             let bg = self.theme_bg;
-            let clear = wgpu::Color { r: bg[0], g: bg[1], b: bg[2], a: bg[3] };
+            let clear = wgpu::Color {
+                r: bg[0],
+                g: bg[1],
+                b: bg[2],
+                a: bg[3],
+            };
             let fg = glyphon::Color::rgb(self.theme_fg[0], self.theme_fg[1], self.theme_fg[2]);
             let family = resolve_family(&self.ui_font);
             let current = self.effective_id();
@@ -273,7 +282,10 @@ impl AgentView {
     /// How many of the browser's listed sessions are archived (for the host's
     /// "Archived" toggle visibility).
     pub fn browse_archived_count(&self) -> u64 {
-        self.browser.as_ref().map(|b| b.archived_count() as u64).unwrap_or(0)
+        self.browser
+            .as_ref()
+            .map(|b| b.archived_count() as u64)
+            .unwrap_or(0)
     }
 
     /// Open a browser row as a host command: the host owns view lifetimes (it
@@ -290,7 +302,11 @@ impl AgentView {
         // Reported in every mode — the session browser raises host commands too
         // (opening a session from it routes through one). The host drains the
         // string only on ticks this bit is set.
-        let host_flag = if self.pending_host_cmd.is_some() { FLAG_HOST_CMD } else { 0 };
+        let host_flag = if self.pending_host_cmd.is_some() {
+            FLAG_HOST_CMD
+        } else {
+            0
+        };
         // Browser mode: the composer text is the live search query.
         if self.browsing {
             let query = self.input.text();
@@ -350,7 +366,11 @@ impl AgentView {
             self.last_sid = sid;
             flags |= FLAG_META;
         }
-        let mode = self.driver.as_ref().map(|d| d.permission_mode()).unwrap_or_default();
+        let mode = self
+            .driver
+            .as_ref()
+            .map(|d| d.permission_mode())
+            .unwrap_or_default();
         if mode != self.last_mode {
             self.last_mode = mode;
             flags |= FLAG_META;
@@ -361,7 +381,11 @@ impl AgentView {
         let now = crate::clock::now_secs();
         if now / 60 != self.last_minute {
             self.last_minute = now / 60;
-            if self.driver.as_ref().is_some_and(|d| d.has_relative_stamp(now)) {
+            if self
+                .driver
+                .as_ref()
+                .is_some_and(|d| d.has_relative_stamp(now))
+            {
                 flags |= FLAG_DIRTY;
             }
         }
@@ -484,7 +508,12 @@ impl AgentView {
         self.theme_fg = [fr, fg, fb];
         if let Some(b) = &mut self.browser {
             b.set_theme(
-                wgpu::Color { r: br, g: bg, b: bb, a: ba },
+                wgpu::Color {
+                    r: br,
+                    g: bg,
+                    b: bb,
+                    a: ba,
+                },
                 glyphon::Color::rgb(fr, fg, fb),
             );
         }
@@ -605,7 +634,11 @@ impl AgentView {
         }
     }
     pub fn permission_mode(&mut self) -> &CString {
-        let s = self.driver.as_ref().map(|d| d.permission_mode()).unwrap_or_default();
+        let s = self
+            .driver
+            .as_ref()
+            .map(|d| d.permission_mode())
+            .unwrap_or_default();
         self.mode_snap = clean(s);
         &self.mode_snap
     }
@@ -625,7 +658,11 @@ impl AgentView {
         &self.models_snap
     }
     pub fn commands(&mut self) -> &CString {
-        let s = self.driver.as_ref().map(|d| d.commands()).unwrap_or_default();
+        let s = self
+            .driver
+            .as_ref()
+            .map(|d| d.commands())
+            .unwrap_or_default();
         self.commands_snap = clean(s);
         &self.commands_snap
     }
@@ -789,7 +826,11 @@ impl AgentView {
     // --- Identity (host owns the picker / persistence) ----------------------
 
     pub fn session_id(&mut self) -> &CString {
-        let s = self.driver.as_ref().map(|d| d.session_id()).unwrap_or_default();
+        let s = self
+            .driver
+            .as_ref()
+            .map(|d| d.session_id())
+            .unwrap_or_default();
         self.session_id_snap = clean(s);
         &self.session_id_snap
     }
@@ -799,7 +840,11 @@ impl AgentView {
         let title = if !self.ai_title.is_empty() {
             self.ai_title.clone()
         } else {
-            let t = self.driver.as_ref().map(|d| d.transcript()).unwrap_or_default();
+            let t = self
+                .driver
+                .as_ref()
+                .map(|d| d.transcript())
+                .unwrap_or_default();
             first_user_line(&t)
         };
         self.title_snap = clean(title);
