@@ -19,9 +19,7 @@
       "macOS",
       "Windows"
     ],
-    "debuggerCompileValidationPlatforms": [
-      "macOS",
-      "Windows",
+    "debuggerDependencyValidationPlatforms": [
       "Linux"
     ]
   },

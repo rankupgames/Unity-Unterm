@@ -90,9 +90,11 @@ libc = "0.2"
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 egui-winit = { version = "0.35", default-features = false }
 
-# Preserve the standalone debugger's Linux build intention with an explicit X11
-# backend that CI compile-checks. Wayland stays disabled until its scanner moves
-# off vulnerable quick-xml 0.39.x; clipboard and link openers are also unused.
+# Preserve the standalone debugger's future Linux build path with an explicit X11
+# backend whose resolved feature graph CI verifies. The current native library and
+# debugger binary still build only on macOS/Windows because their embedded source
+# pane uses the Unity shared-surface renderer. Wayland stays disabled until its
+# scanner moves off vulnerable quick-xml 0.39.x; clipboard/link openers are unused.
 [target.'cfg(target_os = "linux")'.dependencies]
 winit = { version = "0.30", default-features = false, features = [
     "rwh_06",

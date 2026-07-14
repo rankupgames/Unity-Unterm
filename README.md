@@ -81,10 +81,11 @@ GPU texture with no CPU copy — an IOSurface (Metal) on macOS, a shared D3D12
 texture on Windows — so the menu item is registered only on those editors; on
 any other platform the package contributes nothing.
 
-The standalone debugger keeps an intentional Linux/X11 build path that CI
-compile-checks, but the Unity package does not yet ship or register a Linux
-native plugin. Wayland is deferred until its scanner dependency supports a
-patched XML parser release.
+The standalone debugger keeps its future Linux/X11 dependency path explicit and
+CI verifies that feature graph, but the native library and debugger binary still
+build only on macOS and Windows because the embedded source pane uses the Unity
+shared-surface renderer. Wayland is deferred until its scanner dependency
+supports a patched XML parser release.
 
 ## Repository layout
 

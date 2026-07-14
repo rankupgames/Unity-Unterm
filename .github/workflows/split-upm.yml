@@ -65,8 +65,17 @@ jobs:
       - name: Verify the locked dependency graph
         run: cargo metadata --manifest-path native/Cargo.toml --locked --format-version 1 > /dev/null
 
-      - name: Compile-check the standalone Linux debugger
-        run: cargo check --manifest-path native/Cargo.toml -p unterm --bin unterm-debugger --locked
+      - name: Verify standalone Linux debugger dependencies
+        run: |
+          linux_tree="$RUNNER_TEMP/unterm-linux-features.txt"
+          cargo tree --manifest-path native/Cargo.toml -p unterm \
+            --target x86_64-unknown-linux-gnu --edges features --invert winit --locked \
+            | tee "$linux_tree"
+          grep -Fq 'winit feature "x11"' "$linux_tree"
+          if grep -Fq 'winit feature "wayland"' "$linux_tree"; then
+            echo "Wayland must remain disabled until wayland-scanner uses a patched quick-xml release."
+            exit 1
+          fi
 
       - name: Deny vulnerable and unsound Rust advisories
         run: cargo audit --file native/Cargo.lock
