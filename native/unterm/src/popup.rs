@@ -19,8 +19,6 @@ use crate::gpu::{self};
 use crate::quads::{Quad, QuadRenderer};
 
 #[cfg(target_os = "macos")]
-use std::ffi::c_void;
-#[cfg(target_os = "macos")]
 use objc2::rc::Retained;
 #[cfg(target_os = "macos")]
 use objc2::runtime::AnyObject;
@@ -32,6 +30,8 @@ use objc2_app_kit::{NSBackingStoreType, NSPanel, NSScreen, NSWindowStyleMask};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 #[cfg(target_os = "macos")]
 use objc2_quartz_core::CAMetalLayer;
+#[cfg(target_os = "macos")]
+use std::ffi::c_void;
 
 #[cfg(windows)]
 use std::num::NonZeroIsize;
@@ -49,8 +49,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, RegisterClassW,
     SetForegroundWindow, SetLayeredWindowAttributes, SetWindowPos, ShowWindow, GWL_EXSTYLE,
     GW_OWNER, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE,
-    WM_LBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    WM_LBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 const ROW: f32 = 18.0; // logical row height (scaled)
@@ -208,12 +208,33 @@ fn create(notify: bool) -> Option<Popup> {
     panel.setAlphaValue(0.0);
     panel.orderFrontRegardless();
 
-    Some(Popup { panel, layer, surface, atlas, viewport, text, quads, swash, format, alpha, w: 0, h: 0 })
+    Some(Popup {
+        panel,
+        layer,
+        surface,
+        atlas,
+        viewport,
+        text,
+        quads,
+        swash,
+        format,
+        alpha,
+        w: 0,
+        h: 0,
+    })
 }
 
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
-fn show_inner(p: &mut Popup, placement: Placement, content: Content, scale: f32, clear: wgpu::Color, text_color: Color, dark: bool) {
+fn show_inner(
+    p: &mut Popup,
+    placement: Placement,
+    content: Content,
+    scale: f32,
+    clear: wgpu::Color,
+    text_color: Color,
+    dark: bool,
+) {
     let s = scale.max(0.5);
     let font_size = 14.0 * s;
     let row_h = ROW * s;
@@ -337,7 +358,9 @@ unsafe extern "system" fn enum_main_window(hwnd: HWND, lparam: LPARAM) -> window
     let search = &mut *(lparam.0 as *mut MainWinSearch);
     let mut wpid = 0u32;
     GetWindowThreadProcessId(hwnd, Some(&mut wpid));
-    let owned = GetWindow(hwnd, GW_OWNER).map(|o| !o.0.is_null()).unwrap_or(false);
+    let owned = GetWindow(hwnd, GW_OWNER)
+        .map(|o| !o.0.is_null())
+        .unwrap_or(false);
     let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
     let is_tool = ex & WS_EX_TOOLWINDOW.0 != 0;
     if wpid == search.pid && !owned && !is_tool && IsWindowVisible(hwnd).as_bool() {
@@ -437,13 +460,34 @@ fn create(notify: bool) -> Option<Popup> {
 
         let (format, alpha) = pick_format_alpha(&surface);
         let (atlas, viewport, text, quads, swash) = make_renderers(format);
-        Some(Popup { hwnd, shown: false, surface, atlas, viewport, text, quads, swash, format, alpha, w: 0, h: 0 })
+        Some(Popup {
+            hwnd,
+            shown: false,
+            surface,
+            atlas,
+            viewport,
+            text,
+            quads,
+            swash,
+            format,
+            alpha,
+            w: 0,
+            h: 0,
+        })
     }
 }
 
 #[cfg(windows)]
 #[allow(clippy::too_many_arguments)]
-fn show_inner(p: &mut Popup, placement: Placement, content: Content, scale: f32, clear: wgpu::Color, text_color: Color, dark: bool) {
+fn show_inner(
+    p: &mut Popup,
+    placement: Placement,
+    content: Content,
+    scale: f32,
+    clear: wgpu::Color,
+    text_color: Color,
+    dark: bool,
+) {
     let s = scale.max(0.5);
     let font_size = 14.0 * s;
     let row_h = ROW * s;
@@ -485,7 +529,15 @@ fn show_inner(p: &mut Popup, placement: Placement, content: Content, scale: f32,
         }
     };
     unsafe {
-        let _ = SetWindowPos(p.hwnd, Some(HWND_TOPMOST), px, py, wpx as i32, hpx as i32, SWP_NOACTIVATE);
+        let _ = SetWindowPos(
+            p.hwnd,
+            Some(HWND_TOPMOST),
+            px,
+            py,
+            wpx as i32,
+            hpx as i32,
+            SWP_NOACTIVATE,
+        );
     }
 
     p.configure(wpx, hpx, s);
@@ -530,7 +582,9 @@ impl Drop for Popup {
 // ------------------------------------------------------------------------- shared
 
 /// Pick a surface format (prefer sRGB) and alpha mode (prefer transparency-capable).
-fn pick_format_alpha(surface: &wgpu::Surface<'static>) -> (wgpu::TextureFormat, wgpu::CompositeAlphaMode) {
+fn pick_format_alpha(
+    surface: &wgpu::Surface<'static>,
+) -> (wgpu::TextureFormat, wgpu::CompositeAlphaMode) {
     let g = gpu::gpu();
     let caps = surface.get_capabilities(&g.adapter);
     let format = caps
@@ -538,22 +592,45 @@ fn pick_format_alpha(surface: &wgpu::Surface<'static>) -> (wgpu::TextureFormat, 
         .iter()
         .copied()
         .find(|f| f.is_srgb())
-        .unwrap_or_else(|| caps.formats.first().copied().unwrap_or(wgpu::TextureFormat::Bgra8UnormSrgb));
+        .unwrap_or_else(|| {
+            caps.formats
+                .first()
+                .copied()
+                .unwrap_or(wgpu::TextureFormat::Bgra8UnormSrgb)
+        });
     let alpha = caps
         .alpha_modes
         .iter()
         .copied()
         .find(|&a| a == wgpu::CompositeAlphaMode::PostMultiplied)
-        .unwrap_or_else(|| caps.alpha_modes.first().copied().unwrap_or(wgpu::CompositeAlphaMode::Auto));
+        .unwrap_or_else(|| {
+            caps.alpha_modes
+                .first()
+                .copied()
+                .unwrap_or(wgpu::CompositeAlphaMode::Auto)
+        });
     (format, alpha)
 }
 
-fn make_renderers(format: wgpu::TextureFormat) -> (TextAtlas, Viewport, TextRenderer, QuadRenderer, glyphon::SwashCache) {
+fn make_renderers(
+    format: wgpu::TextureFormat,
+) -> (
+    TextAtlas,
+    Viewport,
+    TextRenderer,
+    QuadRenderer,
+    glyphon::SwashCache,
+) {
     let g = gpu::gpu();
     let swash = glyphon::SwashCache::new();
     let viewport = Viewport::new(&g.device, &g.cache);
     let mut atlas = TextAtlas::new(&g.device, &g.queue, &g.cache, format);
-    let text = TextRenderer::new(&mut atlas, &g.device, wgpu::MultisampleState::default(), None);
+    let text = TextRenderer::new(
+        &mut atlas,
+        &g.device,
+        wgpu::MultisampleState::default(),
+        None,
+    );
     let quads = QuadRenderer::new(&g.device, format);
     (atlas, viewport, text, quads, swash)
 }
@@ -605,26 +682,72 @@ impl Popup {
 /// '\n'-joined `kind+label` lines; `x`/`y` are the caret's screen position in POINTS
 /// (top-left origin, from Unity's GUIToScreenPoint); `scale` is pixels-per-point.
 #[allow(clippy::too_many_arguments)]
-pub fn show(items: &str, selected: usize, scroll: usize, x: f32, y: f32, scale: f32, clear: wgpu::Color, text_color: Color, dark: bool) {
+pub fn show(
+    items: &str,
+    selected: usize,
+    scroll: usize,
+    x: f32,
+    y: f32,
+    scale: f32,
+    clear: wgpu::Color,
+    text_color: Color,
+    dark: bool,
+) {
     if items.is_empty() {
         hide();
         return;
     }
     let lines: Vec<&str> = items.split('\n').collect();
-    show_slot(0, Placement::Caret { x, y, above: false }, Content::List { lines, selected, scroll, badges: true }, scale, clear, text_color, dark);
+    show_slot(
+        0,
+        Placement::Caret { x, y, above: false },
+        Content::List {
+            lines,
+            selected,
+            scroll,
+            badges: true,
+        },
+        scale,
+        clear,
+        text_color,
+        dark,
+    );
 }
 
 /// Like [`show`], but anchored ABOVE the caret (the list's bottom sits just above
 /// `y`, the caret TOP in points). For a composer docked at the window bottom, where
 /// a below-anchored list would fall off-screen.
 #[allow(clippy::too_many_arguments)]
-pub fn show_above(items: &str, selected: usize, scroll: usize, x: f32, y: f32, scale: f32, clear: wgpu::Color, text_color: Color, dark: bool) {
+pub fn show_above(
+    items: &str,
+    selected: usize,
+    scroll: usize,
+    x: f32,
+    y: f32,
+    scale: f32,
+    clear: wgpu::Color,
+    text_color: Color,
+    dark: bool,
+) {
     if items.is_empty() {
         hide();
         return;
     }
     let lines: Vec<&str> = items.split('\n').collect();
-    show_slot(0, Placement::Caret { x, y, above: true }, Content::List { lines, selected, scroll, badges: false }, scale, clear, text_color, dark);
+    show_slot(
+        0,
+        Placement::Caret { x, y, above: true },
+        Content::List {
+            lines,
+            selected,
+            scroll,
+            badges: false,
+        },
+        scale,
+        clear,
+        text_color,
+        dark,
+    );
 }
 
 /// Hide the completion list.
@@ -636,13 +759,39 @@ pub fn hide() {
 /// is the full signature; `active_start`/`active_len` are CHAR offsets of the active
 /// parameter within `line` to highlight. `x`/`y` are the caret TOP in screen points.
 #[allow(clippy::too_many_arguments)]
-pub fn show_sig(line: &str, active_start: usize, active_len: usize, x: f32, y: f32, scale: f32, clear: wgpu::Color, text_color: Color, dark: bool) {
+pub fn show_sig(
+    line: &str,
+    active_start: usize,
+    active_len: usize,
+    x: f32,
+    y: f32,
+    scale: f32,
+    clear: wgpu::Color,
+    text_color: Color,
+    dark: bool,
+) {
     if line.is_empty() {
         hide_sig();
         return;
     }
-    let accent = if dark { Color::rgb(120, 170, 255) } else { Color::rgb(0, 90, 200) };
-    show_slot(1, Placement::Caret { x, y, above: true }, Content::Sig { line, active: (active_start, active_len), accent }, scale, clear, text_color, dark);
+    let accent = if dark {
+        Color::rgb(120, 170, 255)
+    } else {
+        Color::rgb(0, 90, 200)
+    };
+    show_slot(
+        1,
+        Placement::Caret { x, y, above: true },
+        Content::Sig {
+            line,
+            active: (active_start, active_len),
+            accent,
+        },
+        scale,
+        clear,
+        text_color,
+        dark,
+    );
 }
 
 /// Hide the signature-help hint.
@@ -659,11 +808,41 @@ pub fn show_notify(title: &str, body: &str, scale: f32, dark: bool) {
         return;
     }
     let (clear, text_color, accent) = if dark {
-        (wgpu::Color { r: 0.13, g: 0.13, b: 0.15, a: 1.0 }, Color::rgb(232, 232, 238), Color::rgb(120, 170, 255))
+        (
+            wgpu::Color {
+                r: 0.13,
+                g: 0.13,
+                b: 0.15,
+                a: 1.0,
+            },
+            Color::rgb(232, 232, 238),
+            Color::rgb(120, 170, 255),
+        )
     } else {
-        (wgpu::Color { r: 0.97, g: 0.97, b: 0.98, a: 1.0 }, Color::rgb(28, 28, 34), Color::rgb(0, 100, 210))
+        (
+            wgpu::Color {
+                r: 0.97,
+                g: 0.97,
+                b: 0.98,
+                a: 1.0,
+            },
+            Color::rgb(28, 28, 34),
+            Color::rgb(0, 100, 210),
+        )
     };
-    show_slot(2, Placement::ScreenTopRight, Content::Notify { title, body, accent }, scale, clear, text_color, dark);
+    show_slot(
+        2,
+        Placement::ScreenTopRight,
+        Content::Notify {
+            title,
+            body,
+            accent,
+        },
+        scale,
+        clear,
+        text_color,
+        dark,
+    );
 }
 
 /// Hide the agent notification card.
@@ -672,7 +851,15 @@ pub fn hide_notify() {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn show_slot(slot: u8, placement: Placement, content: Content, scale: f32, clear: wgpu::Color, text_color: Color, dark: bool) {
+fn show_slot(
+    slot: u8,
+    placement: Placement,
+    content: Content,
+    scale: f32,
+    clear: wgpu::Color,
+    text_color: Color,
+    dark: bool,
+) {
     with_slot(slot, |cell| {
         let mut guard = cell.borrow_mut();
         if guard.is_none() {
@@ -722,7 +909,10 @@ fn content_size(content: &Content, font_size: f32, row_h: f32, pad: f32) -> (u32
 }
 
 fn char_to_byte(s: &str, char_idx: usize) -> usize {
-    s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(b, _)| b)
+        .unwrap_or(s.len())
 }
 
 /// One-letter kind badge shown before a completion label. Keeps the editor's kind
@@ -768,13 +958,21 @@ fn render(
             (clear.b as f32 + shade).clamp(0.0, 1.0),
             1.0,
         ],
-        radius: if cfg!(windows) { 0.0 } else { 4.0 * (font_size / 14.0) },
+        radius: if cfg!(windows) {
+            0.0
+        } else {
+            4.0 * (font_size / 14.0)
+        },
     });
 
     // A notification insets its text past the left accent bar and pads the top so
     // the two lines sit centred; the caret panels hug the top-left.
     let is_notify = matches!(&content, Content::Notify { .. });
-    let (text_left, text_top) = if is_notify { (pad * 1.8, pad) } else { (pad * 0.5, pad * 0.5) };
+    let (text_left, text_top) = if is_notify {
+        (pad * 1.8, pad)
+    } else {
+        (pad * 0.5, pad * 0.5)
+    };
 
     let mut fs = gpu::lock_font_system();
     let base = Attrs::new().family(Family::Monospace).color(text_color);
@@ -785,7 +983,12 @@ fn render(
     buf.set_wrap(&mut fs, Wrap::None);
 
     match content {
-        Content::List { lines, selected, scroll, badges } => {
+        Content::List {
+            lines,
+            selected,
+            scroll,
+            badges,
+        } => {
             // The host owns the scroll offset: the wheel scrolls the view without
             // moving the selection, and arrows move the selection. Clamp defensively.
             let total = lines.len();
@@ -832,7 +1035,11 @@ fn render(
                 bl.set_attrs_list(crate::input::popup_label_attrs(&label, kind, &base, dark));
             }
         }
-        Content::Sig { line, active, accent } => {
+        Content::Sig {
+            line,
+            active,
+            accent,
+        } => {
             buf.set_text(&mut fs, line, &base, Shaping::Advanced, None);
             let (cs, cl) = active;
             if cl > 0 {
@@ -847,7 +1054,11 @@ fn render(
                 }
             }
         }
-        Content::Notify { title, body, accent } => {
+        Content::Notify {
+            title,
+            body,
+            accent,
+        } => {
             // A slim left accent bar so the card reads as a notification.
             let bar_w = 3.5 * (font_size / 14.0);
             quads.push(Quad {
@@ -865,7 +1076,11 @@ fn render(
             });
             // Title in the primary text colour, subtitle a touch softer on the second
             // line — but still high-contrast against the card so it stays readable.
-            let dim = if dark { Color::rgb(206, 206, 214) } else { Color::rgb(74, 74, 84) };
+            let dim = if dark {
+                Color::rgb(206, 206, 214)
+            } else {
+                Color::rgb(74, 74, 84)
+            };
             let joined = format!("{title}\n{body}");
             buf.set_text(&mut fs, &joined, &base, Shaping::Advanced, None);
             if let Some(bl) = buf.lines.get_mut(1) {
@@ -875,9 +1090,20 @@ fn render(
     }
     buf.shape_until_scroll(&mut fs, false);
 
-    p.viewport.update(&g.queue, Resolution { width: p.w, height: p.h });
+    p.viewport.update(
+        &g.queue,
+        Resolution {
+            width: p.w,
+            height: p.h,
+        },
+    );
     p.quads.prepare(&g.device, &g.queue, (w, h), &quads);
-    let bounds = TextBounds { left: 0, top: 0, right: p.w as i32, bottom: p.h as i32 };
+    let bounds = TextBounds {
+        left: 0,
+        top: 0,
+        right: p.w as i32,
+        bottom: p.h as i32,
+    };
     p.text
         .prepare(
             &g.device,
@@ -901,7 +1127,12 @@ fn render(
     // On Windows the layered HWND can't show per-pixel alpha, so clear to the opaque
     // background; on macOS clear transparent and let the rounded quad show through.
     let load = if cfg!(windows) {
-        wgpu::LoadOp::Clear(wgpu::Color { r: clear.r, g: clear.g, b: clear.b, a: 1.0 })
+        wgpu::LoadOp::Clear(wgpu::Color {
+            r: clear.r,
+            g: clear.g,
+            b: clear.b,
+            a: 1.0,
+        })
     } else {
         wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
     };
@@ -933,10 +1164,14 @@ fn render(
         }
         _ => return false,
     };
-    let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let view = frame
+        .texture
+        .create_view(&wgpu::TextureViewDescriptor::default());
     let mut enc = g
         .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("unterm-popup") });
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("unterm-popup"),
+        });
     {
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("unterm-popup-pass"),
@@ -944,7 +1179,10 @@ fn render(
                 view: &view,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load,
+                    store: wgpu::StoreOp::Store,
+                },
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,

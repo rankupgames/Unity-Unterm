@@ -65,15 +65,37 @@ pub fn hunks(base: &str, cur: &str) -> Vec<Hunk> {
     for op in capture_diff_slices(Algorithm::Myers, &base_lines, &cur_lines) {
         let h = match op {
             DiffOp::Equal { .. } => continue,
-            DiffOp::Insert { old_index, new_index, new_len } => {
-                Hunk { old_start: old_index, old_len: 0, new_start: new_index, new_len }
-            }
-            DiffOp::Delete { old_index, old_len, new_index } => {
-                Hunk { old_start: old_index, old_len, new_start: new_index, new_len: 0 }
-            }
-            DiffOp::Replace { old_index, old_len, new_index, new_len } => {
-                Hunk { old_start: old_index, old_len, new_start: new_index, new_len }
-            }
+            DiffOp::Insert {
+                old_index,
+                new_index,
+                new_len,
+            } => Hunk {
+                old_start: old_index,
+                old_len: 0,
+                new_start: new_index,
+                new_len,
+            },
+            DiffOp::Delete {
+                old_index,
+                old_len,
+                new_index,
+            } => Hunk {
+                old_start: old_index,
+                old_len,
+                new_start: new_index,
+                new_len: 0,
+            },
+            DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => Hunk {
+                old_start: old_index,
+                old_len,
+                new_start: new_index,
+                new_len,
+            },
         };
         out.push(h);
     }
@@ -88,7 +110,11 @@ pub fn markers_from_hunks(hunks: &[Hunk], n: usize) -> Vec<u8> {
             // Added lines, or a replaced run shown as "modified" for its whole new
             // span (like VS Code; any surplus removed base lines fold into it).
             let bit = if h.old_len > 0 { MODIFIED } else { ADDED };
-            for m in marks.iter_mut().take((h.new_start + h.new_len).min(n)).skip(h.new_start) {
+            for m in marks
+                .iter_mut()
+                .take((h.new_start + h.new_len).min(n))
+                .skip(h.new_start)
+            {
                 *m |= bit;
             }
         } else {
@@ -147,7 +173,11 @@ pub fn apply_staged_bits(marks: &mut [u8], hunks: &[Hunk], staged: &[bool]) {
             continue;
         }
         if h.new_len > 0 {
-            for m in marks.iter_mut().take((h.new_start + h.new_len).min(n)).skip(h.new_start) {
+            for m in marks
+                .iter_mut()
+                .take((h.new_start + h.new_len).min(n))
+                .skip(h.new_start)
+            {
                 *m |= STAGED;
             }
         } else if h.new_start < n {
@@ -170,7 +200,9 @@ fn ranges_touch(a: (usize, usize), b: (usize, usize)) -> bool {
 /// reads it unstaged (the working change no longer matches), but an Unstage there
 /// would still drop the staged version, so the host offers both actions.
 pub fn overlaps_staged(index_hunks: &[Hunk], head_range: (usize, usize)) -> bool {
-    index_hunks.iter().any(|ih| ranges_touch((ih.old_start, ih.old_start + ih.old_len), head_range))
+    index_hunks
+        .iter()
+        .any(|ih| ranges_touch((ih.old_start, ih.old_start + ih.old_len), head_range))
 }
 
 /// One gutter-displayable hunk: a buffer change vs HEAD, or a change that exists
@@ -197,7 +229,9 @@ pub fn display_hunks(
     index_hunks: &[Hunk],
     cur: &str,
 ) -> Vec<DisplayHunk> {
-    let Some(base) = head.or(index) else { return Vec::new() };
+    let Some(base) = head.or(index) else {
+        return Vec::new();
+    };
     let cur_hunks = hunks(base, cur);
     let staged = match (head, index) {
         (Some(_), Some(ix)) => staged_flags(ix, index_hunks, cur, &cur_hunks),
@@ -206,7 +240,11 @@ pub fn display_hunks(
     let mut out: Vec<DisplayHunk> = cur_hunks
         .iter()
         .zip(&staged)
-        .map(|(h, s)| DisplayHunk { hunk: *h, staged: *s, index_new: None })
+        .map(|(h, s)| DisplayHunk {
+            hunk: *h,
+            staged: *s,
+            index_new: None,
+        })
         .collect();
 
     if head.is_some() && index.is_some() {
@@ -215,7 +253,10 @@ pub fn display_hunks(
             // exact staged change is in the buffer (shown via its staged flag) or the
             // region was re-edited (shown as an unstaged buffer hunk).
             let ih_range = (ih.old_start, ih.old_start + ih.old_len);
-            if cur_hunks.iter().any(|h| ranges_touch((h.old_start, h.old_start + h.old_len), ih_range)) {
+            if cur_hunks
+                .iter()
+                .any(|h| ranges_touch((h.old_start, h.old_start + h.old_len), ih_range))
+            {
                 continue;
             }
             // Buffer == HEAD across this region, so map HEAD lines to buffer lines by
@@ -227,7 +268,12 @@ pub fn display_hunks(
                 .sum();
             let new_start = (ih.old_start as isize + offset).max(0) as usize;
             out.push(DisplayHunk {
-                hunk: Hunk { old_start: ih.old_start, old_len: ih.old_len, new_start, new_len: ih.old_len },
+                hunk: Hunk {
+                    old_start: ih.old_start,
+                    old_len: ih.old_len,
+                    new_start,
+                    new_len: ih.old_len,
+                },
                 staged: true,
                 index_new: Some((ih.new_start, ih.new_len)),
             });
@@ -322,7 +368,9 @@ fn blob_text(repo: &git2::Repository, id: git2::Oid) -> Option<String> {
 /// commit yet, no repo…) — the editor uses HEAD as the diff base (falling back to
 /// the index before the first commit) and both together for staged detection.
 pub fn git_texts(path: &Path) -> (Option<String>, Option<String>) {
-    let Some((repo, rel)) = repo_rel(path) else { return (None, None) };
+    let Some((repo, rel)) = repo_rel(path) else {
+        return (None, None);
+    };
     let head = (|| {
         let tree = repo.head().ok()?.peel_to_tree().ok()?;
         let entry = tree.get_path(Path::new(&rel)).ok()?;
@@ -353,13 +401,17 @@ pub fn stage_blob(path: &Path, content_lf: &str) -> bool {
         let (repo, rel) = repo_rel(path)?;
         let mut index = repo.index().ok()?;
         let entry = index.get_path(Path::new(&rel), 0)?; // reuse mode/path/flags
-        // Match the existing blob's line endings so an autocrlf repo isn't rewritten.
+                                                         // Match the existing blob's line endings so an autocrlf repo isn't rewritten.
         let crlf = repo
             .find_blob(entry.id)
             .ok()
             .map(|b| b.content().windows(2).any(|w| w == b"\r\n"))
             .unwrap_or(false);
-        let bytes = if crlf { content_lf.replace('\n', "\r\n") } else { content_lf.to_string() };
+        let bytes = if crlf {
+            content_lf.replace('\n', "\r\n")
+        } else {
+            content_lf.to_string()
+        };
         index.add_frombuffer(&entry, bytes.as_bytes()).ok()?;
         index.write().ok()?;
         Some(())
@@ -382,7 +434,11 @@ pub struct DiffFetcher {
 
 impl DiffFetcher {
     pub fn new() -> Self {
-        Self { path: None, gen: 0, rx: None }
+        Self {
+            path: None,
+            gen: 0,
+            rx: None,
+        }
     }
 
     /// Point at a new file (empty/none clears markers) and kick a fetch.
@@ -441,7 +497,9 @@ impl DiffFetcher {
     /// index. The index write is fast (one blob) so it runs synchronously; returns
     /// false when there's no path or the write failed.
     pub fn stage(&mut self, content_lf: &str) -> bool {
-        let Some(path) = self.path.clone() else { return false };
+        let Some(path) = self.path.clone() else {
+            return false;
+        };
         let ok = stage_blob(&path, content_lf);
         if ok {
             self.request(); // re-read the (now updated) index
@@ -516,24 +574,58 @@ mod tests {
         let base = "a\nb\nc";
         let cur = "a\nB\nc";
         let hs = hunks(base, cur);
-        assert_eq!(hs, vec![Hunk { old_start: 1, old_len: 1, new_start: 1, new_len: 1 }]);
+        assert_eq!(
+            hs,
+            vec![Hunk {
+                old_start: 1,
+                old_len: 1,
+                new_start: 1,
+                new_len: 1
+            }]
+        );
         let old: Vec<&str> = base.split('\n').collect();
-        assert_eq!(&old[hs[0].old_start..hs[0].old_start + hs[0].old_len], &["b"]);
+        assert_eq!(
+            &old[hs[0].old_start..hs[0].old_start + hs[0].old_len],
+            &["b"]
+        );
 
         // Pure deletion: new_len 0, boundary at the line the removed text sat above.
         let hs = hunks("a\nb\nc", "a\nc");
-        assert_eq!(hs, vec![Hunk { old_start: 1, old_len: 1, new_start: 1, new_len: 0 }]);
+        assert_eq!(
+            hs,
+            vec![Hunk {
+                old_start: 1,
+                old_len: 1,
+                new_start: 1,
+                new_len: 0
+            }]
+        );
 
         // Pure addition: nothing removed (old_len 0), so no peek content.
         let hs = hunks("a\nc", "a\nb\nc");
-        assert_eq!(hs, vec![Hunk { old_start: 1, old_len: 0, new_start: 1, new_len: 1 }]);
+        assert_eq!(
+            hs,
+            vec![Hunk {
+                old_start: 1,
+                old_len: 0,
+                new_start: 1,
+                new_len: 1
+            }]
+        );
     }
 
     #[test]
     fn markers_match_the_direct_path() {
         // markers_from_hunks(hunks(..)) is what line_markers is built on.
-        for (b, c) in [("a\nb\nc", "a\nB\nc"), ("a\nb", "a\nb\nc\nd"), ("a\nb\nc", "a\nb")] {
-            assert_eq!(line_markers(b, c), markers_from_hunks(&hunks(b, c), c.split('\n').count()));
+        for (b, c) in [
+            ("a\nb\nc", "a\nB\nc"),
+            ("a\nb", "a\nb\nc\nd"),
+            ("a\nb\nc", "a\nb"),
+        ] {
+            assert_eq!(
+                line_markers(b, c),
+                markers_from_hunks(&hunks(b, c), c.split('\n').count())
+            );
         }
     }
 
@@ -546,19 +638,37 @@ mod tests {
         assert_eq!(hs.len(), 2);
 
         // Stage the first hunk: index starts equal to HEAD.
-        let idx1 = stage_apply(head, cur, (hs[0].new_start, hs[0].new_start + hs[0].new_len)).unwrap();
+        let idx1 = stage_apply(
+            head,
+            cur,
+            (hs[0].new_start, hs[0].new_start + hs[0].new_len),
+        )
+        .unwrap();
         assert_eq!(idx1, "a\nB\nc\nd\ne", "only the b→B hunk staged");
 
         // Stage the second hunk against the UPDATED index: B must be preserved
         // (this is the clobber the index-space diff avoids).
-        let idx2 = stage_apply(&idx1, cur, (hs[1].new_start, hs[1].new_start + hs[1].new_len)).unwrap();
-        assert_eq!(idx2, "a\nB\nc\nD\ne", "second stage keeps the earlier staged hunk");
+        let idx2 = stage_apply(
+            &idx1,
+            cur,
+            (hs[1].new_start, hs[1].new_start + hs[1].new_len),
+        )
+        .unwrap();
+        assert_eq!(
+            idx2, "a\nB\nc\nD\ne",
+            "second stage keeps the earlier staged hunk"
+        );
 
         // Pure deletion: buffer removed "b"; staging drops it from the index.
         let head = "a\nb\nc";
         let cur = "a\nc";
         let hd = hunks(head, cur);
-        let idx = stage_apply(head, cur, (hd[0].new_start, hd[0].new_start + hd[0].new_len)).unwrap();
+        let idx = stage_apply(
+            head,
+            cur,
+            (hd[0].new_start, hd[0].new_start + hd[0].new_len),
+        )
+        .unwrap();
         assert_eq!(idx, "a\nc");
 
         // Nothing to stage (buffer == index) → None.
@@ -572,7 +682,12 @@ mod tests {
         let index = "a\nB\nc\nD\ne";
         let sh = hunks(head, index);
         assert_eq!(sh.len(), 2);
-        let idx = unstage_apply(head, index, (sh[0].old_start, sh[0].old_start + sh[0].old_len)).unwrap();
+        let idx = unstage_apply(
+            head,
+            index,
+            (sh[0].old_start, sh[0].old_start + sh[0].old_len),
+        )
+        .unwrap();
         assert_eq!(idx, "a\nb\nc\nD\ne", "only the first hunk reverted to HEAD");
 
         // Unstaging a staged deletion restores the removed line.
@@ -622,10 +737,23 @@ mod tests {
         let d = &ds[0];
         assert!(d.staged);
         assert_eq!(d.index_new, Some((1, 1)));
-        assert_eq!(d.hunk, Hunk { old_start: 1, old_len: 1, new_start: 1, new_len: 1 });
+        assert_eq!(
+            d.hunk,
+            Hunk {
+                old_start: 1,
+                old_len: 1,
+                new_start: 1,
+                new_len: 1
+            }
+        );
 
         // Unstaging it from the synthesized hunk's HEAD range restores the index.
-        let restored = unstage_apply(head, index, (d.hunk.old_start, d.hunk.old_start + d.hunk.old_len)).unwrap();
+        let restored = unstage_apply(
+            head,
+            index,
+            (d.hunk.old_start, d.hunk.old_start + d.hunk.old_len),
+        )
+        .unwrap();
         assert_eq!(restored, head);
     }
 
@@ -639,7 +767,10 @@ mod tests {
         let ds = display_hunks(Some(head), Some(index), &ih, cur);
         let so: Vec<_> = ds.iter().filter(|d| d.index_new.is_some()).collect();
         assert_eq!(so.len(), 1);
-        assert_eq!(so[0].hunk.new_start, 3, "staged-only hunk mapped past the insertion");
+        assert_eq!(
+            so[0].hunk.new_start, 3,
+            "staged-only hunk mapped past the insertion"
+        );
 
         // And the ordinary insertion hunk is still there, unstaged.
         assert!(ds.iter().any(|d| d.index_new.is_none() && !d.staged));
@@ -671,7 +802,10 @@ mod tests {
         //    staged-only hunk), and the index is untouched by the edit.
         let ds = display_hunks(Some(head), Some(index), &ih, cur);
         assert_eq!(ds.len(), 1);
-        assert!(!ds[0].staged, "further-edited staged hunk must read unstaged");
+        assert!(
+            !ds[0].staged,
+            "further-edited staged hunk must read unstaged"
+        );
         assert!(ds[0].index_new.is_none(), "no duplicate staged-only hunk");
 
         // 2. Re-staging replaces the old staged version with the current content.
@@ -683,7 +817,10 @@ mod tests {
         //    menu offers Unstage alongside Stage — and unstage_apply drops the old
         //    staged version wholesale.
         assert!(overlaps_staged(&ih, (h.old_start, h.old_start + h.old_len)));
-        assert!(!overlaps_staged(&ih, (10, 12)), "untouched region has nothing staged");
+        assert!(
+            !overlaps_staged(&ih, (10, 12)),
+            "untouched region has nothing staged"
+        );
         let dropped = unstage_apply(head, index, (h.old_start, h.old_start + h.old_len)).unwrap();
         assert_eq!(dropped, head);
     }
@@ -721,7 +858,8 @@ mod tests {
         // commit so HEAD exists
         let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
         let sig = git2::Signature::now("t", "t@t").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
 
         assert!(stage_blob(&file, "a\nB\nc\n"), "stage_blob returned false");
 
@@ -734,7 +872,10 @@ mod tests {
         let diff = repo
             .diff_tree_to_index(Some(&head_tree), Some(&fresh), None)
             .unwrap();
-        let changed: Vec<_> = diff.deltas().map(|d| d.new_file().path().unwrap().to_path_buf()).collect();
+        let changed: Vec<_> = diff
+            .deltas()
+            .map(|d| d.new_file().path().unwrap().to_path_buf())
+            .collect();
         assert!(
             changed.iter().any(|p| p.ends_with("foo.txt")),
             "staged change not visible vs HEAD; deltas = {changed:?}"
@@ -760,9 +901,16 @@ mod tests {
         assert_eq!(git_base(&file).as_deref(), Some("a\nB\nc\n")); // LF-normalized read
 
         let repo2 = git2::Repository::discover(&dir).unwrap();
-        let entry = repo2.index().unwrap().get_path(Path::new("foo.txt"), 0).unwrap();
+        let entry = repo2
+            .index()
+            .unwrap()
+            .get_path(Path::new("foo.txt"), 0)
+            .unwrap();
         let raw = repo2.find_blob(entry.id).unwrap().content().to_vec();
-        assert_eq!(raw, b"a\r\nB\r\nc\r\n", "line endings preserved in the index blob");
+        assert_eq!(
+            raw, b"a\r\nB\r\nc\r\n",
+            "line endings preserved in the index blob"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -785,9 +933,13 @@ mod tests {
         // Commit, then stage a different version: head and index diverge.
         let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
         let sig = git2::Signature::now("t", "t@t").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
         assert!(stage_blob(&file, "two\n"));
-        assert_eq!(git_texts(&file), (Some("one\n".into()), Some("two\n".into())));
+        assert_eq!(
+            git_texts(&file),
+            (Some("one\n".into()), Some("two\n".into()))
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

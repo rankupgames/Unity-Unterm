@@ -47,7 +47,8 @@ fn main() {
     index.write().unwrap();
     let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
     let sig = git2::Signature::now("t", "t@t").unwrap();
-    repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+        .unwrap();
 
     let id = unterm_editor_create(900, 500, 2.0);
     assert!(id != 0, "editor create failed");
@@ -85,13 +86,22 @@ fn main() {
     // then render — exercises line_at_y / hunk lookup / tooltip overlay without panic.
     // scale 2.0 → line_height 40, pad 12: line 1 sits around y≈52..92.
     let shown = unterm_editor_hover(id, 6.0, 72.0);
-    assert!(shown, "hover over a modified line's gutter marker should show the tooltip");
+    assert!(
+        shown,
+        "hover over a modified line's gutter marker should show the tooltip"
+    );
     unterm_editor_render(id);
     println!("gutter-marker hover + tooltip render OK");
     // Moving off the marker hides the tooltip: the first away-hover returns true (a
     // repaint is needed to clear it), and a second one returns false (nothing shown).
-    assert!(unterm_editor_hover(id, 400.0, 300.0), "away-hover should request a clear repaint");
-    assert!(!unterm_editor_hover(id, 400.0, 300.0), "tooltip should now be hidden");
+    assert!(
+        unterm_editor_hover(id, 400.0, 300.0),
+        "away-hover should request a clear repaint"
+    );
+    assert!(
+        !unterm_editor_hover(id, 400.0, 300.0),
+        "tooltip should now be hidden"
+    );
     unterm_editor_render(id);
     println!("tooltip hide (hover away) + render OK");
 
@@ -101,7 +111,10 @@ fn main() {
     unterm_editor_refresh_diff(id);
     let deadline = Instant::now() + Duration::from_millis(1500);
     while Instant::now() < deadline {
-        assert!(!unterm_editor_poll_diff(id), "unchanged refresh must not report a change");
+        assert!(
+            !unterm_editor_poll_diff(id),
+            "unchanged refresh must not report a change"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
     unterm_editor_render(id);
@@ -109,15 +122,31 @@ fn main() {
 
     // --- hunk_at + STAGE (HEAD base: the marker must SURVIVE staging, hollow) ---
     let hi = unterm_editor_hunk_at(id, 6.0, 72.0);
-    assert!(hi >= 0, "hunk_at should find the modified hunk in the gutter");
-    assert!(!unterm_editor_hunk_staged(id, hi as u32), "hunk should start unstaged");
+    assert!(
+        hi >= 0,
+        "hunk_at should find the modified hunk in the gutter"
+    );
+    assert!(
+        !unterm_editor_hunk_staged(id, hi as u32),
+        "hunk should start unstaged"
+    );
     println!("hunk_at found hunk {hi} (unstaged)");
-    assert!(unterm_editor_stage_hunk(id, hi as u32), "stage_hunk should succeed");
+    assert!(
+        unterm_editor_stage_hunk(id, hi as u32),
+        "stage_hunk should succeed"
+    );
     // Only hunk here == the whole change, so the index blob should now equal the buffer.
     let repo2 = git2::Repository::discover(&dir).unwrap();
-    let entry = repo2.index().unwrap().get_path(Path::new("foo.cs"), 0).unwrap();
+    let entry = repo2
+        .index()
+        .unwrap()
+        .get_path(Path::new("foo.cs"), 0)
+        .unwrap();
     let staged = String::from_utf8(repo2.find_blob(entry.id).unwrap().content().to_vec()).unwrap();
-    assert_eq!(staged, "class A {\n    int x = 1;\n    int z;\n}\n", "index updated by stage_hunk");
+    assert_eq!(
+        staged, "class A {\n    int x = 1;\n    int z;\n}\n",
+        "index updated by stage_hunk"
+    );
     println!("stage_hunk updated the index OK");
 
     // Pick up the refreshed git texts: the hunk is still there (buffer != HEAD) but
@@ -126,41 +155,73 @@ fn main() {
     unterm_editor_render(id);
     let hi2 = unterm_editor_hunk_at(id, 6.0, 72.0);
     assert!(hi2 >= 0, "marker must survive staging (HEAD base)");
-    assert!(unterm_editor_hunk_staged(id, hi2 as u32), "hunk should now read staged");
+    assert!(
+        unterm_editor_hunk_staged(id, hi2 as u32),
+        "hunk should now read staged"
+    );
     println!("marker survives staging and reads staged OK");
 
     // --- UNSTAGE: the index goes back to HEAD, the hunk reads unstaged again ---
-    assert!(unterm_editor_unstage_hunk(id, hi2 as u32), "unstage_hunk should succeed");
+    assert!(
+        unterm_editor_unstage_hunk(id, hi2 as u32),
+        "unstage_hunk should succeed"
+    );
     let entry = {
         let repo3 = git2::Repository::discover(&dir).unwrap();
-        repo3.index().unwrap().get_path(Path::new("foo.cs"), 0).unwrap()
+        repo3
+            .index()
+            .unwrap()
+            .get_path(Path::new("foo.cs"), 0)
+            .unwrap()
     };
     let repo3 = git2::Repository::discover(&dir).unwrap();
-    let unstaged = String::from_utf8(repo3.find_blob(entry.id).unwrap().content().to_vec()).unwrap();
-    assert_eq!(unstaged, "class A {\n    int x;\n    int y;\n}\n", "index restored to HEAD");
+    let unstaged =
+        String::from_utf8(repo3.find_blob(entry.id).unwrap().content().to_vec()).unwrap();
+    assert_eq!(
+        unstaged, "class A {\n    int x;\n    int y;\n}\n",
+        "index restored to HEAD"
+    );
     wait_diff(id);
     unterm_editor_render(id);
     let hi3 = unterm_editor_hunk_at(id, 6.0, 72.0);
-    assert!(hi3 >= 0 && !unterm_editor_hunk_staged(id, hi3 as u32), "hunk reads unstaged again");
+    assert!(
+        hi3 >= 0 && !unterm_editor_hunk_staged(id, hi3 as u32),
+        "hunk reads unstaged again"
+    );
     println!("unstage_hunk restored the index OK");
 
     // --- STAGED-ONLY: stage, then revert the buffer back to HEAD. The change now
     // lives only in the index (`git diff --cached` shows it) — the editor must keep
     // showing a (hollow, staged) hunk there and allow unstaging it.
-    assert!(unterm_editor_stage_hunk(id, hi3 as u32), "re-stage should succeed");
+    assert!(
+        unterm_editor_stage_hunk(id, hi3 as u32),
+        "re-stage should succeed"
+    );
     wait_diff(id);
     let head_buf = CString::new("class A {\n    int x;\n    int y;\n}\n").unwrap();
     unsafe { unterm_editor_set_text(id, head_buf.as_ptr()) }; // buffer back at HEAD
     unterm_editor_render(id);
     let so = unterm_editor_hunk_at(id, 6.0, 72.0);
     assert!(so >= 0, "staged-only hunk must still show a marker");
-    assert!(unterm_editor_hunk_staged(id, so as u32), "staged-only hunk reads staged");
-    assert!(unterm_editor_hover(id, 6.0, 72.0), "staged-only hunk is peekable");
+    assert!(
+        unterm_editor_hunk_staged(id, so as u32),
+        "staged-only hunk reads staged"
+    );
+    assert!(
+        unterm_editor_hover(id, 6.0, 72.0),
+        "staged-only hunk is peekable"
+    );
     unterm_editor_render(id);
-    assert!(unterm_editor_unstage_hunk(id, so as u32), "unstage staged-only should succeed");
+    assert!(
+        unterm_editor_unstage_hunk(id, so as u32),
+        "unstage staged-only should succeed"
+    );
     wait_diff(id);
     unterm_editor_render(id);
-    assert!(unterm_editor_hunk_at(id, 6.0, 72.0) < 0, "everything clean → no markers");
+    assert!(
+        unterm_editor_hunk_at(id, 6.0, 72.0) < 0,
+        "everything clean → no markers"
+    );
     println!("staged-only hunk shown, peeked, and unstaged OK");
 
     unterm_editor_destroy(id);
@@ -189,7 +250,11 @@ fn main() {
     let hi2 = unterm_editor_hunk_at(id2, 6.0, 72.0);
     assert!(hi2 >= 0, "hunk_at should find the modified hunk (revert)");
     unterm_editor_revert_hunk(id2, hi2 as u32);
-    assert_eq!(editor_text(id2), "class B {\n    int p;\n}\n", "revert restored the base content");
+    assert_eq!(
+        editor_text(id2),
+        "class B {\n    int p;\n}\n",
+        "revert restored the base content"
+    );
     println!("revert_hunk restored the base content OK");
 
     // --- pure ADDITION is peekable (VS Code parity: its peek shows the + lines) ---

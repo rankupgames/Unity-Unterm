@@ -48,7 +48,13 @@ fn init_gpu() -> Gpu {
     let (device, queue, adapter) = open_device(&instance);
 
     let cache = Cache::new(&device);
-    Gpu { device, queue, cache, instance, adapter }
+    Gpu {
+        device,
+        queue,
+        cache,
+        instance,
+        adapter,
+    }
 }
 
 /// The device descriptor shared by every adapter open. Uses the adapter's real
@@ -95,9 +101,12 @@ fn open_device(instance: &wgpu::Instance) -> (wgpu::Device, wgpu::Queue, wgpu::A
     .expect("unterm: no suitable GPU adapter");
 
     let Some(device) = crate::unity::unity_device() else {
-        log::info!("unterm: editor MTLDevice unavailable (UnityPluginLoad not run); using default adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(&device_descriptor(&adapter)))
-            .expect("unterm: failed to create device");
+        log::info!(
+            "unterm: editor MTLDevice unavailable (UnityPluginLoad not run); using default adapter"
+        );
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&device_descriptor(&adapter)))
+                .expect("unterm: failed to create device");
         return (device, queue, adapter);
     };
 
@@ -117,7 +126,9 @@ fn open_device(instance: &wgpu::Instance) -> (wgpu::Device, wgpu::Queue, wgpu::A
 #[cfg(target_os = "macos")]
 unsafe fn unity_open_device(
     device: objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDevice>>,
-    queue: Option<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLCommandQueue>>>,
+    queue: Option<
+        objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLCommandQueue>>,
+    >,
 ) -> wgpu::hal::OpenDevice<wgpu::hal::api::Metal> {
     use objc2_metal::MTLDevice;
 

@@ -84,30 +84,30 @@ const DARK: &[(u8, u8, u8)] = &[
 
 /// Foreground colors for the light theme, parallel to [`HL_NAMES`] (GitHub-ish).
 const LIGHT: &[(u8, u8, u8)] = &[
-    (207, 34, 46),  // keyword
-    (130, 80, 223), // function
-    (130, 80, 223), // function.method
-    (149, 56, 0),   // type
-    (10, 48, 105),  // string
+    (207, 34, 46),   // keyword
+    (130, 80, 223),  // function
+    (130, 80, 223),  // function.method
+    (149, 56, 0),    // type
+    (10, 48, 105),   // string
     (110, 119, 129), // comment
-    (5, 80, 174),   // number
-    (5, 80, 174),   // constant
-    (5, 80, 174),   // constant.builtin
-    (17, 99, 41),   // property
-    (31, 35, 40),   // variable
-    (5, 80, 174),   // operator
-    (31, 35, 40),   // punctuation
-    (17, 99, 41),   // attribute
-    (149, 56, 0),   // constructor
-    (36, 41, 47),   // namespace
-    (130, 80, 223), // label
-    (5, 80, 174),   // escape
-    (207, 34, 46),  // text.title (heading) — red
-    (17, 99, 41),   // text.literal (code) — green
-    (130, 80, 223), // text.emphasis (italic) — purple
-    (149, 56, 0),   // text.strong (bold) — brown
-    (5, 80, 174),   // text.uri (link) — blue
-    (5, 80, 174),   // text.reference — blue
+    (5, 80, 174),    // number
+    (5, 80, 174),    // constant
+    (5, 80, 174),    // constant.builtin
+    (17, 99, 41),    // property
+    (31, 35, 40),    // variable
+    (5, 80, 174),    // operator
+    (31, 35, 40),    // punctuation
+    (17, 99, 41),    // attribute
+    (149, 56, 0),    // constructor
+    (36, 41, 47),    // namespace
+    (130, 80, 223),  // label
+    (5, 80, 174),    // escape
+    (207, 34, 46),   // text.title (heading) — red
+    (17, 99, 41),    // text.literal (code) — green
+    (130, 80, 223),  // text.emphasis (italic) — purple
+    (149, 56, 0),    // text.strong (bold) — brown
+    (5, 80, 174),    // text.uri (link) — blue
+    (5, 80, 174),    // text.reference — blue
 ];
 
 fn color_for(index: usize, dark: bool) -> Color {
@@ -176,9 +176,24 @@ fn md_config() -> Option<&'static MdConfig> {
         let inline_q = Query::new(&inline_lang, tree_sitter_md::HIGHLIGHT_QUERY_INLINE)
             .map_err(|e| log::warn!("unterm: md inline query failed: {e}"))
             .ok()?;
-        let block_cap = block_q.capture_names().iter().map(|n| name_to_index(n)).collect();
-        let inline_cap = inline_q.capture_names().iter().map(|n| name_to_index(n)).collect();
-        Some(MdConfig { block_lang, inline_lang, block_q, block_cap, inline_q, inline_cap })
+        let block_cap = block_q
+            .capture_names()
+            .iter()
+            .map(|n| name_to_index(n))
+            .collect();
+        let inline_cap = inline_q
+            .capture_names()
+            .iter()
+            .map(|n| name_to_index(n))
+            .collect();
+        Some(MdConfig {
+            block_lang,
+            inline_lang,
+            block_q,
+            block_cap,
+            inline_q,
+            inline_cap,
+        })
     })
     .as_ref()
 }
@@ -187,8 +202,16 @@ fn build_config(language: Language, highlights: &str) -> Option<LangConfig> {
     let query = Query::new(&language, highlights)
         .map_err(|e| log::warn!("unterm: highlight query failed: {e}"))
         .ok()?;
-    let cap_color = query.capture_names().iter().map(|n| name_to_index(n)).collect();
-    Some(LangConfig { language, query, cap_color })
+    let cap_color = query
+        .capture_names()
+        .iter()
+        .map(|n| name_to_index(n))
+        .collect();
+    Some(LangConfig {
+        language,
+        query,
+        cap_color,
+    })
 }
 
 /// Map a query capture name to a color-table index by longest dotted-prefix match
@@ -257,7 +280,12 @@ impl Highlighter {
             .set_language(&cfg.language)
             .map_err(|e| log::warn!("unterm: set_language failed: {e}"))
             .ok()?;
-        Some(Highlighter::Ts { cfg, parser, tree: None, prev: String::new() })
+        Some(Highlighter::Ts {
+            cfg,
+            parser,
+            tree: None,
+            prev: String::new(),
+        })
     }
 
     /// (Re)highlight `text` into per-logical-line colored spans (split on `\n`,
@@ -265,7 +293,12 @@ impl Highlighter {
     /// tree via an incremental edit when the text changed since the last call.
     pub fn highlight(&mut self, text: &str, dark: bool) -> Vec<LineSpans> {
         match self {
-            Highlighter::Ts { cfg, parser, tree, prev } => {
+            Highlighter::Ts {
+                cfg,
+                parser,
+                tree,
+                prev,
+            } => {
                 if let Some(t) = tree.as_mut() {
                     if let Some(edit) = text_edit(prev, text) {
                         t.edit(&edit);
@@ -277,11 +310,25 @@ impl Highlighter {
                 let line_start = build_line_starts(text);
                 let mut out = empty_line_spans(line_start.len());
                 if let Some(t) = tree.as_ref() {
-                    run_query_into(&cfg.query, &cfg.cap_color, t, text, &line_start, dark, &mut out);
+                    run_query_into(
+                        &cfg.query,
+                        &cfg.cap_color,
+                        t,
+                        text,
+                        &line_start,
+                        dark,
+                        &mut out,
+                    );
                 }
                 out
             }
-            Highlighter::Md { cfg, block_parser, inline_parser, block_tree, prev } => {
+            Highlighter::Md {
+                cfg,
+                block_parser,
+                inline_parser,
+                block_tree,
+                prev,
+            } => {
                 if let Some(t) = block_tree.as_mut() {
                     if let Some(edit) = text_edit(prev, text) {
                         t.edit(&edit);
@@ -299,7 +346,15 @@ impl Highlighter {
                     // win any overlap. Inline nodes carry raw text the block grammar
                     // leaves unparsed; we reparse each range via included-ranges (the
                     // resulting node offsets stay in document coordinates).
-                    run_query_into(&cfg.block_q, &cfg.block_cap, bt, text, &line_start, dark, &mut out);
+                    run_query_into(
+                        &cfg.block_q,
+                        &cfg.block_cap,
+                        bt,
+                        text,
+                        &line_start,
+                        dark,
+                        &mut out,
+                    );
                     let mut ranges = Vec::new();
                     collect_inline_ranges(bt.root_node(), &mut ranges);
                     for r in ranges {
@@ -307,7 +362,15 @@ impl Highlighter {
                             continue;
                         }
                         if let Some(it) = inline_parser.parse(text, None) {
-                            run_query_into(&cfg.inline_q, &cfg.inline_cap, &it, text, &line_start, dark, &mut out);
+                            run_query_into(
+                                &cfg.inline_q,
+                                &cfg.inline_cap,
+                                &it,
+                                text,
+                                &line_start,
+                                dark,
+                                &mut out,
+                            );
                         }
                     }
                 }
@@ -346,7 +409,9 @@ fn build_line_starts(text: &str) -> Vec<usize> {
 
 /// One empty [`LineSpans`] per logical line.
 fn empty_line_spans(n_lines: usize) -> Vec<LineSpans> {
-    (0..n_lines).map(|_| LineSpans { spans: Vec::new() }).collect()
+    (0..n_lines)
+        .map(|_| LineSpans { spans: Vec::new() })
+        .collect()
 }
 
 /// Run `query` over `tree` and clip each capture onto the logical lines it
@@ -375,7 +440,9 @@ fn run_query_into(
     let mut caps = cursor.captures(query, tree.root_node(), text.as_bytes());
     while let Some((m, ci)) = caps.next() {
         let cap = m.captures[*ci];
-        let Some(Some(idx)) = cap_color.get(cap.index as usize) else { continue };
+        let Some(Some(idx)) = cap_color.get(cap.index as usize) else {
+            continue;
+        };
         let color = color_for(*idx, dark);
         let (start, end) = (cap.node.start_byte(), cap.node.end_byte());
         let mut line = match line_start.binary_search(&start) {
@@ -450,7 +517,12 @@ mod tests {
         assert_eq!(lines.len(), line_lens.len());
         for (i, ls) in lines.iter().enumerate() {
             for (r, _) in &ls.spans {
-                assert!(r.end <= line_lens[i], "line {i} span {:?} > {}", r, line_lens[i]);
+                assert!(
+                    r.end <= line_lens[i],
+                    "line {i} span {:?} > {}",
+                    r,
+                    line_lens[i]
+                );
                 assert!(r.start < r.end);
             }
         }
@@ -463,7 +535,11 @@ mod tests {
         let lines = hl.highlight(src, true);
         // The first line ("public class Foo {") must get at least a couple of
         // colored spans (keyword `public`/`class`, type `Foo`).
-        assert!(lines[0].spans.len() >= 2, "spans: {:?}", lines[0].spans.len());
+        assert!(
+            lines[0].spans.len() >= 2,
+            "spans: {:?}",
+            lines[0].spans.len()
+        );
         assert_well_formed(src, &lines);
     }
 
@@ -502,14 +578,22 @@ mod tests {
         // The heading line gets colored spans (the `# ` marker and/or the title text).
         assert!(!lines[0].spans.is_empty(), "heading line had no spans");
         // The inline line gets spans from the inline grammar (bold + code span).
-        assert!(lines[2].spans.len() >= 2, "inline spans: {}", lines[2].spans.len());
+        assert!(
+            lines[2].spans.len() >= 2,
+            "inline spans: {}",
+            lines[2].spans.len()
+        );
         // An incremental edit must match a from-scratch parse.
         let src2 = "# Title!\n\nSome **bold** and `code` here.\n";
         let inc = hl.highlight(src2, true);
         let fresh = Highlighter::new("md").unwrap().highlight(src2, true);
         assert_eq!(inc.len(), fresh.len());
         for (a, f) in inc.iter().zip(fresh.iter()) {
-            assert_eq!(a.spans.len(), f.spans.len(), "line span-count mismatch after edit");
+            assert_eq!(
+                a.spans.len(),
+                f.spans.len(),
+                "line span-count mismatch after edit"
+            );
         }
     }
 }

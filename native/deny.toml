@@ -2,7 +2,6 @@
 version = 2
 yanked = "deny"
 unmaintained = "workspace"
-unsound = "all"
 ignore = []
 
 [bans]

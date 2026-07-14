@@ -207,7 +207,9 @@ impl Connection {
                         "reply id {rid} != expected {id}"
                     )));
                 }
-                Packet::Command { cmd_set, cmd, data, .. } => {
+                Packet::Command {
+                    cmd_set, cmd, data, ..
+                } => {
                     self.absorb_command(cmd_set, cmd, &data);
                 }
             }
@@ -222,7 +224,9 @@ impl Connection {
         }
         loop {
             match wire::read_packet(&mut self.stream)? {
-                Packet::Command { cmd_set, cmd, data, .. } => {
+                Packet::Command {
+                    cmd_set, cmd, data, ..
+                } => {
                     if let Some(ev) = decode_command(cmd_set, cmd, &data) {
                         return Ok(ev);
                     }
@@ -307,10 +311,7 @@ impl Connection {
     /// (on Unity, user types load into a child domain at play time — prefer the
     /// TYPE_LOAD event path for arming pending breakpoints).
     pub fn types_for_source_file(&mut self, file: &str, ignore_case: bool) -> Result<Vec<u32>> {
-        let payload = Encoder::new()
-            .string(file)
-            .byte(ignore_case as u8)
-            .finish();
+        let payload = Encoder::new().string(file).byte(ignore_case as u8).finish();
         let data = self.request(cs::VM, vm::GET_TYPES_FOR_SOURCE_FILE, &payload)?;
         let mut d = Decoder::new(&data);
         let n = d.uint()? as usize;
@@ -407,7 +408,9 @@ impl Connection {
         for m in modifiers {
             match m {
                 Modifier::LocationOnly { method, il } => {
-                    enc.byte(wire::modifier::LOCATION_ONLY).id(*method).long(*il);
+                    enc.byte(wire::modifier::LOCATION_ONLY)
+                        .id(*method)
+                        .long(*il);
                 }
                 Modifier::SourceFileOnly(files) => {
                     enc.byte(wire::modifier::SOURCE_FILE_ONLY)
@@ -522,7 +525,10 @@ impl Connection {
         let payload = enc.finish();
         let data = self.request(cs::STACK_FRAME, wire::frame::GET_VALUES, &payload)?;
         let mut d = Decoder::new(&data);
-        positions.iter().map(|_| value::decode_value(&mut d)).collect()
+        positions
+            .iter()
+            .map(|_| value::decode_value(&mut d))
+            .collect()
     }
 
     pub fn frame_this(&mut self, thread: u32, frame: i32) -> Result<value::Value> {
@@ -588,7 +594,10 @@ impl Connection {
         let payload = enc.finish();
         let data = self.request(cs::OBJECT_REF, wire::object::GET_VALUES, &payload)?;
         let mut d = Decoder::new(&data);
-        field_ids.iter().map(|_| value::decode_value(&mut d)).collect()
+        field_ids
+            .iter()
+            .map(|_| value::decode_value(&mut d))
+            .collect()
     }
 
     /// The element count of an array (first dimension; SZARRAYs are one-dimensional).
@@ -630,7 +639,11 @@ impl Connection {
         let mut d = Decoder::new(&data);
         let ns = d.string()?;
         let name = d.string()?;
-        Ok(if ns.is_empty() { name } else { format!("{ns}.{name}") })
+        Ok(if ns.is_empty() {
+            name
+        } else {
+            format!("{ns}.{name}")
+        })
     }
 }
 
@@ -874,7 +887,9 @@ fn local_ipv4_interfaces() -> Vec<std::net::Ipv4Addr> {
             if !addr.is_null() && (*addr).sa_family as i32 == libc::AF_INET {
                 let sin = addr as *const libc::sockaddr_in;
                 // s_addr is stored in network byte order, i.e. the [a,b,c,d] octets.
-                out.push(std::net::Ipv4Addr::from((*sin).sin_addr.s_addr.to_ne_bytes()));
+                out.push(std::net::Ipv4Addr::from(
+                    (*sin).sin_addr.s_addr.to_ne_bytes(),
+                ));
             }
             p = (*p).ifa_next;
         }

@@ -17,7 +17,11 @@ struct GrowBuffer {
 
 impl GrowBuffer {
     fn new(label: &'static str) -> Self {
-        Self { label, buf: None, capacity: 0 }
+        Self {
+            label,
+            buf: None,
+            capacity: 0,
+        }
     }
 
     fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, bytes: &[u8]) {
@@ -278,8 +282,16 @@ impl MeshRenderer {
             array_stride: std::mem::size_of::<MeshVertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 },
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 8, shader_location: 1 },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 8,
+                    shader_location: 1,
+                },
             ],
         };
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -307,7 +319,13 @@ impl MeshRenderer {
             multiview_mask: None,
             cache: None,
         });
-        Self { pipeline, bind_group, uniform_buf, verts: GrowBuffer::new("unterm-mesh-verts"), count: 0 }
+        Self {
+            pipeline,
+            bind_group,
+            uniform_buf,
+            verts: GrowBuffer::new("unterm-mesh-verts"),
+            count: 0,
+        }
     }
 
     pub fn prepare(
@@ -320,10 +338,14 @@ impl MeshRenderer {
         queue.write_buffer(
             &self.uniform_buf,
             0,
-            bytemuck::bytes_of(&Uniforms { resolution: [resolution.0, resolution.1], _pad: [0.0; 2] }),
+            bytemuck::bytes_of(&Uniforms {
+                resolution: [resolution.0, resolution.1],
+                _pad: [0.0; 2],
+            }),
         );
         self.count = verts.len() as u32;
-        self.verts.upload(device, queue, bytemuck::cast_slice(verts));
+        self.verts
+            .upload(device, queue, bytemuck::cast_slice(verts));
     }
 
     pub fn render<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {

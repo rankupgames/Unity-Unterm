@@ -360,7 +360,9 @@ pub unsafe extern "C" fn unterm_set_preedit(id: u64, text: *const c_char) {
     let s = if text.is_null() {
         String::new()
     } else {
-        unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(text) }
+            .to_string_lossy()
+            .into_owned()
     };
     with_term(id, (), |t| t.set_preedit(&s));
 }
@@ -646,18 +648,6 @@ pub unsafe extern "C" fn unterm_mcp_respond(id: u64, result_json: *const c_char)
 }
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
-
-
-
-
-
-
-
-
-
-
-
-
 // ===========================================================================
 // Agent view: a single id-handled object owning the conversation, the transcript
 // renderer, and the composer. It composes the transcript (history + pending +
@@ -707,7 +697,17 @@ pub unsafe extern "C" fn unterm_agentview_create(
     init_log();
     let mcp = ensure_mcp_dispatcher();
     let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
-    let v = AgentView::new(cstr(cwd), mcp, None, pw.max(1), ph.max(1), iw.max(1), ih.max(1), cstr(effort), cstr(claude_cmd));
+    let v = AgentView::new(
+        cstr(cwd),
+        mcp,
+        None,
+        pw.max(1),
+        ph.max(1),
+        iw.max(1),
+        ih.max(1),
+        cstr(effort),
+        cstr(claude_cmd),
+    );
     lock_views().insert(id, Box::new(v));
     id
 }
@@ -734,7 +734,17 @@ pub unsafe extern "C" fn unterm_agentview_load(
         (!s.is_empty()).then_some(s)
     };
     let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
-    let v = AgentView::new(cstr(cwd), mcp, resume, pw.max(1), ph.max(1), iw.max(1), ih.max(1), cstr(effort), cstr(claude_cmd));
+    let v = AgentView::new(
+        cstr(cwd),
+        mcp,
+        resume,
+        pw.max(1),
+        ph.max(1),
+        iw.max(1),
+        ih.max(1),
+        cstr(effort),
+        cstr(claude_cmd),
+    );
     lock_views().insert(id, Box::new(v));
     id
 }
@@ -814,7 +824,12 @@ pub unsafe extern "C" fn unterm_agentview_set_fonts(
     bold_italic: *const c_char,
 ) {
     if let Some(v) = lock_views().get_mut(&id) {
-        v.set_fonts(&cstr(regular), &cstr(bold), &cstr(italic), &cstr(bold_italic));
+        v.set_fonts(
+            &cstr(regular),
+            &cstr(bold),
+            &cstr(italic),
+            &cstr(bold_italic),
+        );
     }
 }
 
@@ -835,7 +850,6 @@ pub extern "C" fn unterm_agentview_input_texture(id: u64) -> *mut c_void {
         None => std::ptr::null_mut(),
     }
 }
-
 
 /// Transcript content height in physical px (for the host scrollbar).
 #[no_mangle]
@@ -916,7 +930,9 @@ pub extern "C" fn unterm_agentview_browsing(id: u64) -> u8 {
 /// hover state changed (host should re-render + repaint).
 #[no_mangle]
 pub extern "C" fn unterm_agentview_browse_hover(id: u64, x: f32, y: f32) -> u8 {
-    lock_views().get_mut(&id).map_or(0, |v| v.browse_hover(x, y) as u8)
+    lock_views()
+        .get_mut(&id)
+        .map_or(0, |v| v.browse_hover(x, y) as u8)
 }
 
 /// Toggle listing archived sessions in the browser.
@@ -927,11 +943,12 @@ pub extern "C" fn unterm_agentview_browse_toggle_archived(id: u64) {
     }
 }
 
-
 /// How many of the browser's listed sessions are archived.
 #[no_mangle]
 pub extern "C" fn unterm_agentview_browse_archived_count(id: u64) -> u64 {
-    lock_views().get(&id).map_or(0, |v| v.browse_archived_count())
+    lock_views()
+        .get(&id)
+        .map_or(0, |v| v.browse_archived_count())
 }
 
 /// Set an interactive permission mode (`default`/`auto`/`plan`/`acceptEdits`).
@@ -951,7 +968,10 @@ pub unsafe extern "C" fn unterm_agentview_set_permission_mode(id: u64, mode: *co
 /// # Safety
 /// `out_len` writable or null. Pointer valid until the next call on this view.
 #[no_mangle]
-pub unsafe extern "C" fn unterm_agentview_permission_mode(id: u64, out_len: *mut usize) -> *const c_char {
+pub unsafe extern "C" fn unterm_agentview_permission_mode(
+    id: u64,
+    out_len: *mut usize,
+) -> *const c_char {
     view_string(id, out_len, |v| v.permission_mode())
 }
 
@@ -1004,7 +1024,10 @@ pub unsafe extern "C" fn unterm_agentview_commands(id: u64, out_len: *mut usize)
 /// # Safety
 /// `out_len` writable or null. Pointer valid until the next call on this view.
 #[no_mangle]
-pub unsafe extern "C" fn unterm_agentview_input_slash_prefix(id: u64, out_len: *mut usize) -> *const c_char {
+pub unsafe extern "C" fn unterm_agentview_input_slash_prefix(
+    id: u64,
+    out_len: *mut usize,
+) -> *const c_char {
     view_string(id, out_len, |v| v.input_slash_prefix())
 }
 
@@ -1014,7 +1037,11 @@ pub unsafe extern "C" fn unterm_agentview_input_slash_prefix(id: u64, out_len: *
 /// # Safety
 /// `text` must be a valid C string or null.
 #[no_mangle]
-pub unsafe extern "C" fn unterm_agentview_input_complete(id: u64, prefix_len: u32, text: *const c_char) {
+pub unsafe extern "C" fn unterm_agentview_input_complete(
+    id: u64,
+    prefix_len: u32,
+    text: *const c_char,
+) {
     let text = cstr(text);
     with_view(id, (), |v| v.input_complete(prefix_len as usize, &text));
 }
@@ -1038,7 +1065,10 @@ pub extern "C" fn unterm_agentview_cancel_queued(id: u64, index: u32) {
 /// # Safety
 /// `out_len` writable or null. Pointer valid until the next call on this view.
 #[no_mangle]
-pub unsafe extern "C" fn unterm_agentview_session_id(id: u64, out_len: *mut usize) -> *const c_char {
+pub unsafe extern "C" fn unterm_agentview_session_id(
+    id: u64,
+    out_len: *mut usize,
+) -> *const c_char {
     view_string(id, out_len, |v| v.session_id())
 }
 
@@ -1058,7 +1088,10 @@ pub unsafe extern "C" fn unterm_agentview_title(id: u64, out_len: *mut usize) ->
 /// # Safety
 /// `out_len` writable or null. Pointer valid until the next call on this view.
 #[no_mangle]
-pub unsafe extern "C" fn unterm_agentview_take_host_command(id: u64, out_len: *mut usize) -> *const c_char {
+pub unsafe extern "C" fn unterm_agentview_take_host_command(
+    id: u64,
+    out_len: *mut usize,
+) -> *const c_char {
     view_string(id, out_len, |v| v.take_host_command())
 }
 
@@ -1066,7 +1099,12 @@ pub unsafe extern "C" fn unterm_agentview_take_host_command(id: u64, out_len: *m
 /// for the host to open if it resolves to a file. Empty when not on a token.
 /// `out_len` writable or null; pointer valid until the next call on this view.
 #[no_mangle]
-pub unsafe extern "C" fn unterm_agentview_panel_token_at(id: u64, x: f32, y: f32, out_len: *mut usize) -> *const c_char {
+pub unsafe extern "C" fn unterm_agentview_panel_token_at(
+    id: u64,
+    x: f32,
+    y: f32,
+    out_len: *mut usize,
+) -> *const c_char {
     view_string(id, out_len, |v| v.panel_token_at(x, y))
 }
 
@@ -1091,7 +1129,10 @@ fn relative_snap() -> &'static Mutex<CString> {
 /// # Safety
 /// `out_len` must be writable or null.
 #[no_mangle]
-pub unsafe extern "C" fn unterm_format_relative(unix_secs: u64, out_len: *mut usize) -> *const c_char {
+pub unsafe extern "C" fn unterm_format_relative(
+    unix_secs: u64,
+    out_len: *mut usize,
+) -> *const c_char {
     ffi_guard(std::ptr::null(), || {
         let label = clock::format_relative(unix_secs, clock::now_secs());
         let mut snap = relative_snap().lock_recover();
@@ -1354,7 +1395,10 @@ pub extern "C" fn unterm_agentview_input_select_all(id: u64) {
 /// # Safety
 /// `out_len` writable or null. Pointer valid until the next call on this view.
 #[no_mangle]
-pub unsafe extern "C" fn unterm_agentview_input_copy(id: u64, out_len: *mut usize) -> *const c_char {
+pub unsafe extern "C" fn unterm_agentview_input_copy(
+    id: u64,
+    out_len: *mut usize,
+) -> *const c_char {
     view_string(id, out_len, |v| v.input_copy())
 }
 
@@ -1372,7 +1416,10 @@ pub unsafe extern "C" fn unterm_agentview_input_cut(id: u64, out_len: *mut usize
 /// # Safety
 /// `out_len` writable or null. Pointer valid until the next call on this view.
 #[no_mangle]
-pub unsafe extern "C" fn unterm_agentview_input_text(id: u64, out_len: *mut usize) -> *const c_char {
+pub unsafe extern "C" fn unterm_agentview_input_text(
+    id: u64,
+    out_len: *mut usize,
+) -> *const c_char {
     view_string(id, out_len, |v| v.input_text())
 }
 
@@ -1394,58 +1441,6 @@ unsafe fn view_string(
     drop(map);
     ptr
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // ===========================================================================
 // Code editor view: an id-handled editing surface (tree-sitter highlighting +
@@ -2038,7 +2033,11 @@ pub unsafe extern "C" fn unterm_editor_word_prefix(id: u64, out_len: *mut usize)
 /// # Safety
 /// `items` must be a valid C string or null.
 #[no_mangle]
-pub unsafe extern "C" fn unterm_editor_set_completions(id: u64, items: *const c_char, selected: u32) {
+pub unsafe extern "C" fn unterm_editor_set_completions(
+    id: u64,
+    items: *const c_char,
+    selected: u32,
+) {
     let items = cstr(items);
     with_editor(id, (), |e| e.set_completions(&items, selected as usize));
 }
@@ -2046,7 +2045,9 @@ pub unsafe extern "C" fn unterm_editor_set_completions(id: u64, items: *const c_
 /// The caret's absolute character offset in the document (for semantic completion).
 #[no_mangle]
 pub extern "C" fn unterm_editor_caret_offset(id: u64) -> u32 {
-    lock_editors().get(&id).map_or(0, |e| e.caret_offset() as u32)
+    lock_editors()
+        .get(&id)
+        .map_or(0, |e| e.caret_offset() as u32)
 }
 
 /// Show/refresh the native completion popup (a non-activating NSPanel) at screen
@@ -2072,9 +2073,24 @@ pub extern "C" fn unterm_popup_show(
     dark: u8,
 ) {
     let items = cstr(items);
-    let clear = wgpu::Color { r: br as f64, g: bg as f64, b: bb as f64, a: 1.0 };
+    let clear = wgpu::Color {
+        r: br as f64,
+        g: bg as f64,
+        b: bb as f64,
+        a: 1.0,
+    };
     let text = glyphon::Color::rgb(fr, fg, fb);
-    popup::show(&items, selected as usize, scroll as usize, x, y, scale, clear, text, dark != 0);
+    popup::show(
+        &items,
+        selected as usize,
+        scroll as usize,
+        x,
+        y,
+        scale,
+        clear,
+        text,
+        dark != 0,
+    );
 }
 
 /// Like `unterm_popup_show`, but anchored ABOVE the caret (`x`,`y` is the caret TOP
@@ -2098,9 +2114,24 @@ pub extern "C" fn unterm_popup_show_above(
     dark: u8,
 ) {
     let items = cstr(items);
-    let clear = wgpu::Color { r: br as f64, g: bg as f64, b: bb as f64, a: 1.0 };
+    let clear = wgpu::Color {
+        r: br as f64,
+        g: bg as f64,
+        b: bb as f64,
+        a: 1.0,
+    };
     let text = glyphon::Color::rgb(fr, fg, fb);
-    popup::show_above(&items, selected as usize, scroll as usize, x, y, scale, clear, text, dark != 0);
+    popup::show_above(
+        &items,
+        selected as usize,
+        scroll as usize,
+        x,
+        y,
+        scale,
+        clear,
+        text,
+        dark != 0,
+    );
 }
 
 /// Hide the native completion popup. macOS only.
@@ -2133,9 +2164,24 @@ pub extern "C" fn unterm_popup_sig_show(
     dark: u8,
 ) {
     let line = cstr(line);
-    let clear = wgpu::Color { r: br as f64, g: bg as f64, b: bb as f64, a: 1.0 };
+    let clear = wgpu::Color {
+        r: br as f64,
+        g: bg as f64,
+        b: bb as f64,
+        a: 1.0,
+    };
     let text = glyphon::Color::rgb(fr, fg, fb);
-    popup::show_sig(&line, active_start as usize, active_len as usize, x, y, scale, clear, text, dark != 0);
+    popup::show_sig(
+        &line,
+        active_start as usize,
+        active_len as usize,
+        x,
+        y,
+        scale,
+        clear,
+        text,
+        dark != 0,
+    );
 }
 
 /// Hide the native signature-help hint. macOS only.
@@ -2154,7 +2200,12 @@ pub extern "C" fn unterm_popup_sig_hide() {
 /// `title` and `body` must be valid C strings or null.
 #[cfg(any(target_os = "macos", windows))]
 #[no_mangle]
-pub unsafe extern "C" fn unterm_notify_show(title: *const c_char, body: *const c_char, scale: f32, dark: u8) {
+pub unsafe extern "C" fn unterm_notify_show(
+    title: *const c_char,
+    body: *const c_char,
+    scale: f32,
+    dark: u8,
+) {
     let title = cstr(title);
     let body = cstr(body);
     popup::show_notify(&title, &body, scale, dark != 0);

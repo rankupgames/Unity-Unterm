@@ -427,7 +427,10 @@ impl Terminal {
                 // glyph: the wide char re-creates its own spacer when the dump is
                 // re-parsed, so emitting this cell's space would add an extra column
                 // — widening every CJK glyph's gap on restore.
-                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
                     continue;
                 }
                 let fg = palette::resolve(cell.fg, theme);
@@ -470,7 +473,11 @@ impl Terminal {
     /// pid (so it doesn't depend on the shell emitting OSC 7). Empty if there's no
     /// live shell or the cwd can't be read. Used to restore the cwd on resume.
     pub fn cwd(&mut self) -> String {
-        self.shared.cwd.lock().map(|c| c.clone()).unwrap_or_default()
+        self.shared
+            .cwd
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_default()
     }
 
     /// [`cwd`](Self::cwd) as a stable C string (valid until the next call).
@@ -505,8 +512,8 @@ impl Terminal {
                 t.resize(TermSize { cols, rows });
             }
             if let Some(pty) = &self.pty {
-            pty.resize(cols as u16, rows as u16);
-        }
+                pty.resize(cols as u16, rows as u16);
+            }
         }
         self.shared.dirty.store(true, Ordering::Relaxed);
     }
@@ -521,8 +528,8 @@ impl Terminal {
                 t.resize(TermSize { cols, rows });
             }
             if let Some(pty) = &self.pty {
-            pty.resize(cols as u16, rows as u16);
-        }
+                pty.resize(cols as u16, rows as u16);
+            }
         }
         self.shared.dirty.store(true, Ordering::Relaxed);
     }
@@ -547,7 +554,8 @@ impl Terminal {
     pub fn render(&mut self) {
         self.shared.dirty.store(false, Ordering::Relaxed);
         if let Ok(term) = self.term.lock() {
-            self.renderer.render(&term, &self.theme, self.focused, &self.preedit);
+            self.renderer
+                .render(&term, &self.theme, self.focused, &self.preedit);
         }
     }
 
@@ -563,7 +571,11 @@ impl Terminal {
     }
 
     pub fn title(&self) -> String {
-        self.shared.title.lock().map(|g| g.clone()).unwrap_or_default()
+        self.shared
+            .title
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     pub fn is_alive(&mut self) -> bool {

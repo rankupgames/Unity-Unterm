@@ -159,12 +159,18 @@ impl Conv {
         if let Some(name) = tag_inner(t, "command-name") {
             let args = tag_inner(t, "command-args").unwrap_or_default();
             let (name, args) = (name.trim(), args.trim());
-            let line = if args.is_empty() { name.to_string() } else { format!("{name} {args}") };
+            let line = if args.is_empty() {
+                name.to_string()
+            } else {
+                format!("{name} {args}")
+            };
             self.push_block('u', line);
             return;
         }
         // A command's stdout → a plain result line (agent role: no user bubble).
-        if let Some(out) = tag_inner(t, "local-command-stdout").or_else(|| tag_inner(t, "local-command-stderr")) {
+        if let Some(out) =
+            tag_inner(t, "local-command-stdout").or_else(|| tag_inner(t, "local-command-stderr"))
+        {
             let out = out.trim();
             if !out.is_empty() {
                 self.push_block('a', out.to_string());
@@ -269,10 +275,20 @@ impl Conv {
         } else {
             let idx = self.blocks.len();
             self.push_block('x', String::new());
-            let title = if name.is_empty() { "(tool)".to_string() } else { name.to_string() };
+            let title = if name.is_empty() {
+                "(tool)".to_string()
+            } else {
+                name.to_string()
+            };
             self.tools.insert(
                 id.to_string(),
-                ToolEntry { idx, title, glyph: "▸", input, output: String::new() },
+                ToolEntry {
+                    idx,
+                    title,
+                    glyph: "▸",
+                    input,
+                    output: String::new(),
+                },
             );
         }
         self.rebuild_tool(id);
@@ -291,7 +307,13 @@ impl Conv {
             self.push_block('x', String::new());
             self.tools.insert(
                 id.to_string(),
-                ToolEntry { idx, title: "(tool)".to_string(), glyph, input: String::new(), output },
+                ToolEntry {
+                    idx,
+                    title: "(tool)".to_string(),
+                    glyph,
+                    input: String::new(),
+                    output,
+                },
             );
         }
         self.rebuild_tool(id);
@@ -679,7 +701,6 @@ impl State {
             "request": { "subtype": subtype, key: value }
         }));
     }
-
 }
 
 /// A live control-protocol session: the spawned `claude` child plus its reader
@@ -729,7 +750,11 @@ impl Driver {
             args.push("--effort".into());
             args.push(effort);
         }
-        let workdir: std::path::PathBuf = if cwd.is_empty() { ".".into() } else { cwd.into() };
+        let workdir: std::path::PathBuf = if cwd.is_empty() {
+            ".".into()
+        } else {
+            cwd.into()
+        };
         // Ground the agent in its host up front: it runs embedded in the Unity
         // Editor, so name the editor version / project and point it at the
         // unterm-unity MCP tools. Spawn-time only — live editor state (scene,
@@ -979,7 +1004,8 @@ impl Driver {
         }
         *self.state.permission_mode.lock_recover() = safe_mode.to_string();
         if self.state.ready.load(Ordering::Relaxed) {
-            self.state.send_control("set_permission_mode", "mode", safe_mode);
+            self.state
+                .send_control("set_permission_mode", "mode", safe_mode);
         }
     }
     pub fn permission_mode(&self) -> String {
@@ -1049,7 +1075,6 @@ impl Driver {
         self.state.conv.lock_recover().has_relative_stamp(now)
     }
 
-
     pub fn status(&self) -> String {
         self.state.status.lock_recover().clone()
     }
@@ -1106,7 +1131,11 @@ impl Driver {
                     .iter()
                     .map(|o| (o.label.clone(), o.label.clone(), "answer".to_string()))
                     .collect();
-                opts.push(("__skip__".to_string(), "Skip".to_string(), "skip".to_string()));
+                opts.push((
+                    "__skip__".to_string(),
+                    "Skip".to_string(),
+                    "skip".to_string(),
+                ));
                 Some((title, opts))
             }
             Pending::Plan { .. } => {
@@ -1222,7 +1251,9 @@ fn describe_tool(input: &Value) -> String {
         }
     }
     match input {
-        Value::Null | Value::Object(_) if input.as_object().map(|m| m.is_empty()).unwrap_or(true) => {
+        Value::Null | Value::Object(_)
+            if input.as_object().map(|m| m.is_empty()).unwrap_or(true) =>
+        {
             String::new()
         }
         _ => truncate(&input.to_string(), 400),
@@ -1301,7 +1332,10 @@ fn parse_questions(input: &Value) -> Vec<Question> {
                             os.iter()
                                 .map(|o| QOption {
                                     label: o["label"].as_str().unwrap_or("").to_string(),
-                                    description: o["description"].as_str().unwrap_or("").to_string(),
+                                    description: o["description"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string(),
                                 })
                                 .collect()
                         })
@@ -1330,8 +1364,7 @@ fn unity_context(project: &std::path::Path) -> Option<String> {
     // The real project name is PlayerSettings.productName, not the folder name
     // (they diverge once the repo is cloned/renamed); the agent already knows the
     // folder from its cwd, so name the product. Fall back to "this project".
-    let name =
-        unity_product_name(project).unwrap_or_else(|| "this project".to_string());
+    let name = unity_product_name(project).unwrap_or_else(|| "this project".to_string());
     Some(format!(
         "You are running embedded inside the Unity Editor (Unity {version}) in the Unity project {name}; \
          the working directory is the project root. Editor operations and live editor state \
@@ -1345,9 +1378,12 @@ fn unity_context(project: &std::path::Path) -> Option<String> {
 /// Unity project's display name (line-scanned; the field is a top-level scalar
 /// that appears once). `None` when the file is missing or the name is empty.
 fn unity_product_name(project: &std::path::Path) -> Option<String> {
-    let text =
-        std::fs::read_to_string(project.join("ProjectSettings").join("ProjectSettings.asset"))
-            .ok()?;
+    let text = std::fs::read_to_string(
+        project
+            .join("ProjectSettings")
+            .join("ProjectSettings.asset"),
+    )
+    .ok()?;
     text.lines()
         .find_map(|l| l.trim_start().strip_prefix("productName:"))
         .map(str::trim)
@@ -1530,10 +1566,7 @@ fn handle_control_request(state: &Arc<State>, v: &Value) {
             // "Ready to code?" approval (accept → also set the next permission mode)
             // rather than a generic allow/deny.
             if tool_name == "ExitPlanMode" {
-                *state.pending.lock_recover() = Some(Pending::Plan {
-                    request_id,
-                    input,
-                });
+                *state.pending.lock_recover() = Some(Pending::Plan { request_id, input });
                 return;
             }
 
@@ -1628,7 +1661,10 @@ mod tests {
             "AWS_SECRET_ACCESS_KEY",
             "UNITY_PASSWORD",
         ] {
-            assert!(!SAFE_CHILD_ENVIRONMENT.contains(&key), "{key} must not cross the child boundary");
+            assert!(
+                !SAFE_CHILD_ENVIRONMENT.contains(&key),
+                "{key} must not cross the child boundary"
+            );
         }
     }
 
@@ -1647,7 +1683,12 @@ mod tests {
         // reply in between carries none. → [s, first, reply, s, after lunch].
         assert_eq!(blocks.len(), 5, "opening + lull separators: {s:?}");
         // Separators carry the raw stamp; the panel formats it at layout time.
-        assert_eq!(blocks[0], &format!("s{US}{}", 1_000_000), "opening: {:?}", blocks[0]);
+        assert_eq!(
+            blocks[0],
+            &format!("s{US}{}", 1_000_000),
+            "opening: {:?}",
+            blocks[0]
+        );
         let lull = format!("s{US}{}", 1_000_000 + 60 + TIME_GAP_SECS);
         assert_eq!(blocks[3], &lull, "lull separator: {:?}", blocks[3]);
         // The lull is fresh relative to "now" just after it → minute ticks on;

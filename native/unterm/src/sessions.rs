@@ -358,7 +358,11 @@ fn compute(req: &Request) -> Vec<Session> {
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
-        let Some(id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+        let Some(id) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+        else {
             continue;
         };
         let is_archived = archived.contains(&id);
@@ -490,7 +494,11 @@ fn user_title(body: &str) -> Option<String> {
 }
 
 fn first_line(s: &str) -> String {
-    let line = s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let line = s
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
     truncate_chars(line, 80)
 }
 
@@ -577,7 +585,10 @@ mod tests {
         .join("\n");
         // body-only term matches and yields a snippet.
         let (_, snip) = scan(&text, cwd, "frobnicator").unwrap();
-        assert!(snip.to_lowercase().contains("frobnicator"), "snippet={snip:?}");
+        assert!(
+            snip.to_lowercase().contains("frobnicator"),
+            "snippet={snip:?}"
+        );
         // title term matches.
         assert!(scan(&text, cwd, "widgets").is_some());
         // miss -> None.
@@ -587,9 +598,15 @@ mod tests {
     #[test]
     fn commands_and_caveats_are_not_titles() {
         assert_eq!(user_title("<command-name>/model</command-name>"), None);
-        assert_eq!(user_title("<local-command-caveat>whatever</local-command-caveat>"), None);
+        assert_eq!(
+            user_title("<local-command-caveat>whatever</local-command-caveat>"),
+            None
+        );
         assert_eq!(user_title("   "), None);
-        assert_eq!(user_title("real prose\nsecond").as_deref(), Some("real prose"));
+        assert_eq!(
+            user_title("real prose\nsecond").as_deref(),
+            Some("real prose")
+        );
     }
 
     #[test]

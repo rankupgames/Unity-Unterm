@@ -84,7 +84,9 @@ impl SharedSurface {
 
     /// Block until the frame is done so Unity samples a finished IOSurface.
     pub fn present(&mut self) {
-        let _ = crate::gpu::gpu().device.poll(wgpu::PollType::wait_indefinitely());
+        let _ = crate::gpu::gpu()
+            .device
+            .poll(wgpu::PollType::wait_indefinitely());
     }
 
     /// Single-buffered — nothing to advance on idle ticks.

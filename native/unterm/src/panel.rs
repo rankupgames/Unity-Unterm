@@ -28,8 +28,8 @@ use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
 use crate::gpu::{self, FORMAT};
-use crate::surface::{self, SharedSurface};
 use crate::quads::{Quad, QuadRenderer};
+use crate::surface::{self, SharedSurface};
 use std::ffi::c_void;
 
 /// Record/unit separators used to encode role-tagged blocks in `set_text`.
@@ -111,14 +111,14 @@ struct Measured {
     buffer: Arc<Buffer>,
     text: String, // visible text (must match the buffer, for selection)
     height: f32,
-    card_alpha: f32, // 0 = no card background
-    indent: f32,     // left indent in physical px (lists / quotes)
-    code: bool,      // a code block: rendered unwrapped + horizontally scrollable
-    natural_w: f32,  // unwrapped content width (code blocks only)
+    card_alpha: f32,              // 0 = no card background
+    indent: f32,                  // left indent in physical px (lists / quotes)
+    code: bool,                   // a code block: rendered unwrapped + horizontally scrollable
+    natural_w: f32,               // unwrapped content width (code blocks only)
     table: Option<TableMeasured>, // a drawn grid of cells (overrides `buffer`)
-    tool_key: Option<u64>, // tool blocks: fold-state key (click-to-toggle target)
-    header_h: f32,         // tool blocks: height of the header line(s), for the hit rect
-    stamp: u64,            // time separators: raw unix stamp (0 otherwise)
+    tool_key: Option<u64>,        // tool blocks: fold-state key (click-to-toggle target)
+    header_h: f32,                // tool blocks: height of the header line(s), for the hit rect
+    stamp: u64,                   // time separators: raw unix stamp (0 otherwise)
 }
 
 /// A measured table: positioned cell buffers plus the grid-line/header rects to
@@ -223,7 +223,14 @@ fn parse_blocks(text: &str) -> Vec<Block> {
                 continue; // same time as the previous separator → merge
             }
             last_stamp_label = Some(label.clone());
-            out.push(Block { role, text: label, stamp, tool_id: None, tool_preview: String::new(), tool_detail: String::new() });
+            out.push(Block {
+                role,
+                text: label,
+                stamp,
+                tool_id: None,
+                tool_preview: String::new(),
+                tool_detail: String::new(),
+            });
             continue;
         }
         out.push(Block {
@@ -339,8 +346,12 @@ impl PanelRenderer {
         let swash_cache = SwashCache::new();
         let viewport = Viewport::new(&g.device, &g.cache);
         let mut atlas = TextAtlas::new(&g.device, &g.queue, &g.cache, FORMAT);
-        let text_renderer =
-            TextRenderer::new(&mut atlas, &g.device, wgpu::MultisampleState::default(), None);
+        let text_renderer = TextRenderer::new(
+            &mut atlas,
+            &g.device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
         let quads = QuadRenderer::new(&g.device, FORMAT);
 
         Self {
@@ -498,8 +509,14 @@ impl PanelRenderer {
         }
         let last = self.laid.len() - 1;
         self.sel = Some((
-            TextPos { block: 0, offset: 0 },
-            TextPos { block: last, offset: self.laid[last].text.len() },
+            TextPos {
+                block: 0,
+                offset: 0,
+            },
+            TextPos {
+                block: last,
+                offset: self.laid[last].text.len(),
+            },
         ));
     }
 
@@ -593,8 +610,7 @@ impl PanelRenderer {
         while end < n && !text.is_char_boundary(end) {
             end += 1;
         }
-        let tok = text[start..end]
-            .trim_matches(|c: char| "()[]{}<>,;:\"'`".contains(c));
+        let tok = text[start..end].trim_matches(|c: char| "()[]{}<>,;:\"'`".contains(c));
         if tok.is_empty() {
             None
         } else {
@@ -615,7 +631,11 @@ impl PanelRenderer {
         for bi in lo.block..=hi.block.min(self.laid.len().saturating_sub(1)) {
             let blk = &self.laid[bi];
             let sel_start = if bi == lo.block { lo.offset } else { 0 };
-            let sel_end = if bi == hi.block { hi.offset } else { blk.text.len() };
+            let sel_end = if bi == hi.block {
+                hi.offset
+            } else {
+                blk.text.len()
+            };
             let line_starts = line_starts(&blk.buffer);
             for run in blk.buffer.layout_runs() {
                 let line_off = line_starts.get(run.line_i).copied().unwrap_or(0);
@@ -713,9 +733,11 @@ impl PanelRenderer {
             let (Some(key), Some(c)) = (l.code_key, l.clip) else {
                 continue;
             };
-            if x >= c[0] && x <= c[0] + c[2] && y >= c[1] && y <= c[1] + c[3] && l.max_hscroll > 0.5 {
+            if x >= c[0] && x <= c[0] + c[2] && y >= c[1] && y <= c[1] + c[3] && l.max_hscroll > 0.5
+            {
                 let cur = self.hscroll.get(&key).copied().unwrap_or(0.0);
-                self.hscroll.insert(key, (cur + dx).clamp(0.0, l.max_hscroll));
+                self.hscroll
+                    .insert(key, (cur + dx).clamp(0.0, l.max_hscroll));
                 return true;
             }
         }
@@ -727,8 +749,7 @@ impl PanelRenderer {
     /// doesn't scroll the whole transcript).
     pub fn scroll_v(&mut self, x: f32, y: f32, dy: f32) -> bool {
         if let Some(r) = self.plan_rect {
-            if self.plan_max > 0.5
-                && x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]
+            if self.plan_max > 0.5 && x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]
             {
                 self.plan_scroll = (self.plan_scroll + dy).clamp(0.0, self.plan_max);
                 return true;
@@ -811,7 +832,12 @@ impl PanelRenderer {
         self.scale.to_bits().hash(&mut h);
         self.scroll.to_bits().hash(&mut h);
         self.plan_scroll.to_bits().hash(&mut h);
-        (self.clear.r.to_bits(), self.clear.g.to_bits(), self.clear.b.to_bits(), self.clear.a.to_bits())
+        (
+            self.clear.r.to_bits(),
+            self.clear.g.to_bits(),
+            self.clear.b.to_bits(),
+            self.clear.a.to_bits(),
+        )
             .hash(&mut h);
         self.text_color.0.hash(&mut h);
         self.font_family.hash(&mut h);
@@ -828,8 +854,11 @@ impl PanelRenderer {
         let mut expanded: Vec<(u64, bool)> = self.expanded.iter().map(|(k, v)| (*k, *v)).collect();
         expanded.sort_unstable();
         expanded.hash(&mut h);
-        let mut hscroll: Vec<(u64, u32)> =
-            self.hscroll.iter().map(|(k, v)| (*k, v.to_bits())).collect();
+        let mut hscroll: Vec<(u64, u32)> = self
+            .hscroll
+            .iter()
+            .map(|(k, v)| (*k, v.to_bits()))
+            .collect();
         hscroll.sort_unstable();
         hscroll.hash(&mut h);
         // The render target's identity: resize and the Windows placeholder→shared
@@ -883,8 +912,16 @@ impl PanelRenderer {
             .as_deref()
             .map(Family::Name)
             .unwrap_or(Family::Monospace);
-        let bold = self.font_bold.as_deref().map(Family::Name).unwrap_or(regular);
-        let italic = self.font_italic.as_deref().map(Family::Name).unwrap_or(regular);
+        let bold = self
+            .font_bold
+            .as_deref()
+            .map(Family::Name)
+            .unwrap_or(regular);
+        let italic = self
+            .font_italic
+            .as_deref()
+            .map(Family::Name)
+            .unwrap_or(regular);
         let bold_italic = self
             .font_bold_italic
             .as_deref()
@@ -936,8 +973,9 @@ impl PanelRenderer {
             // Fold state first: it's a measure input (an unfolded tool shapes its
             // detail), so it participates in the cache key.
             let has_detail = !b.tool_detail.is_empty();
-            let fold_key =
-                (b.role == Role::Tool).then(|| b.tool_id.as_deref().filter(|_| has_detail).map(hash_str)).flatten();
+            let fold_key = (b.role == Role::Tool)
+                .then(|| b.tool_id.as_deref().filter(|_| has_detail).map(hash_str))
+                .flatten();
             if let Some(k) = fold_key {
                 live_tool_keys.push(k);
             }
@@ -960,12 +998,23 @@ impl PanelRenderer {
             let items = if let Some(items) = old_cache.remove(&key) {
                 items // unchanged since last frame: reuse the shaped buffers
             } else if (b.role == Role::Agent || b.role == Role::Plan) && !b.text.is_empty() {
-                let w = if b.role == Role::Plan { plan_w } else { content_w };
+                let w = if b.role == Role::Plan {
+                    plan_w
+                } else {
+                    content_w
+                };
                 markdown::parse(&b.text)
                     .iter()
                     .filter_map(|mb| {
                         build_md(
-                            &mut fs, mb, w, font_size, line_height, card_pad, faces, text_color,
+                            &mut fs,
+                            mb,
+                            w,
+                            font_size,
+                            line_height,
+                            card_pad,
+                            faces,
+                            text_color,
                             lum < 0.5,
                         )
                     })
@@ -982,14 +1031,32 @@ impl PanelRenderer {
                 // unfolded) the detail render smaller. Build the folded form first for
                 // the click-target height, then re-build with the detail if open.
                 let mut m = build_tool(
-                    &mut fs, &b.text, &b.tool_preview, None, content_w, reserve, font_size,
-                    line_height, card_pad, faces.regular, text_color,
+                    &mut fs,
+                    &b.text,
+                    &b.tool_preview,
+                    None,
+                    content_w,
+                    reserve,
+                    font_size,
+                    line_height,
+                    card_pad,
+                    faces.regular,
+                    text_color,
                 );
                 let header_h = (m.height - card_pad * 2.0).max(0.0);
                 if unfolded {
                     m = build_tool(
-                        &mut fs, &b.text, &b.tool_preview, Some(&b.tool_detail), content_w, reserve,
-                        font_size, line_height, card_pad, faces.regular, text_color,
+                        &mut fs,
+                        &b.text,
+                        &b.tool_preview,
+                        Some(&b.tool_detail),
+                        content_w,
+                        reserve,
+                        font_size,
+                        line_height,
+                        card_pad,
+                        faces.regular,
+                        text_color,
                     );
                 }
                 m.tool_key = fold_key;
@@ -997,7 +1064,14 @@ impl PanelRenderer {
                 vec![m]
             } else {
                 let mut m = build_plain(
-                    &mut fs, b, content_w, font_size, line_height, card_pad, faces.regular, text_color,
+                    &mut fs,
+                    b,
+                    content_w,
+                    font_size,
+                    line_height,
+                    card_pad,
+                    faces.regular,
+                    text_color,
                 );
                 // Timestamp separators sit at the right edge: `indent` shifts a
                 // block's left edge, so indent by the leftover width. Keep the raw
@@ -1071,7 +1145,11 @@ impl PanelRenderer {
         // Buttons scroll inline with the transcript (not pinned to the bottom), so
         // no bottom strip is reserved; they're added to the content total below and
         // placed right after the last block, `gap` beneath it.
-        let buttons_h = if rows.is_empty() { 0.0 } else { gap + button_block_h };
+        let buttons_h = if rows.is_empty() {
+            0.0
+        } else {
+            gap + button_block_h
+        };
         let content_bottom = height - pad;
 
         // The plan box is capped: it contributes at most `plan_region_h` to the
@@ -1088,7 +1166,11 @@ impl PanelRenderer {
             None => (0.0, 0.0),
         };
         // The drawn box adds `card_pad` of inner padding above and below the content.
-        let plan_box_h = if plan_range.is_some() { plan_inner_h + card_pad * 2.0 } else { 0.0 };
+        let plan_box_h = if plan_range.is_some() {
+            plan_inner_h + card_pad * 2.0
+        } else {
+            0.0
+        };
         self.plan_max = (plan_total - plan_inner_h).max(0.0);
         self.plan_scroll = self.plan_scroll.clamp(0.0, self.plan_max);
 
@@ -1160,14 +1242,28 @@ impl PanelRenderer {
                     if let Some(tbl) = &m.table {
                         for c in &tbl.cells {
                             self.laid.push(LaidBlock {
-                                buffer: c.buffer.clone(), text: c.text.clone(), tx: tx + c.dx, ty: plan_y + c.dy,
-                                hscroll: 0.0, clip: Some(clip), code_key: None, max_hscroll: 0.0, stamp: 0,
+                                buffer: c.buffer.clone(),
+                                text: c.text.clone(),
+                                tx: tx + c.dx,
+                                ty: plan_y + c.dy,
+                                hscroll: 0.0,
+                                clip: Some(clip),
+                                code_key: None,
+                                max_hscroll: 0.0,
+                                stamp: 0,
                             });
                         }
                     } else {
                         self.laid.push(LaidBlock {
-                            buffer: m.buffer.clone(), text: m.text.clone(), tx, ty: plan_y,
-                            hscroll: 0.0, clip: Some(clip), code_key: None, max_hscroll: 0.0, stamp: 0,
+                            buffer: m.buffer.clone(),
+                            text: m.text.clone(),
+                            tx,
+                            ty: plan_y,
+                            hscroll: 0.0,
+                            clip: Some(clip),
+                            code_key: None,
+                            max_hscroll: 0.0,
+                            stamp: 0,
                         });
                     }
                     plan_y += m.height + gap;
@@ -1176,11 +1272,16 @@ impl PanelRenderer {
                         if self.plan_max > 0.5 && plan_total > 0.0 {
                             let track = plan_inner_h;
                             let thumb_h = (track * plan_inner_h / plan_total).max(20.0 * s);
-                            let thumb_y = plan_box_top + card_pad
+                            let thumb_y = plan_box_top
+                                + card_pad
                                 + (self.plan_scroll / self.plan_max) * (track - thumb_h);
                             quads.push(Quad {
-                                x: pad + content_w - 4.0 * s, y: thumb_y, w: 3.0 * s, h: thumb_h,
-                                color: [overlay, overlay, overlay, 0.45], radius: 1.5 * s,
+                                x: pad + content_w - 4.0 * s,
+                                y: thumb_y,
+                                w: 3.0 * s,
+                                h: thumb_h,
+                                color: [overlay, overlay, overlay, 0.45],
+                                radius: 1.5 * s,
                             });
                         }
                         y = plan_box_top + plan_box_h + gap;
@@ -1248,7 +1349,8 @@ impl PanelRenderer {
             // triangle (▶ folded / ▼ open) is pinned to the header's right edge.
             if let Some(key) = m.tool_key {
                 let hit_h = (card_pad * 2.0 + m.header_h).min(m.height);
-                self.tool_rects.push((key, [x0, y, (content_w - m.indent).max(1.0), hit_h]));
+                self.tool_rects
+                    .push((key, [x0, y, (content_w - m.indent).max(1.0), hit_h]));
                 let glyph = if self.expanded.get(&key).copied().unwrap_or(false) {
                     "▼"
                 } else {
@@ -1259,7 +1361,9 @@ impl PanelRenderer {
                 gb.set_text(
                     &mut fs,
                     glyph,
-                    &Attrs::new().family(faces.regular).color(dim(text_color, 150)),
+                    &Attrs::new()
+                        .family(faces.regular)
+                        .color(dim(text_color, 150)),
                     Shaping::Advanced,
                     None,
                 );
@@ -1274,7 +1378,12 @@ impl PanelRenderer {
                 let inner_w = (content_w - card_pad * 2.0).max(1.0);
                 let max_h = (m.natural_w - inner_w).max(0.0);
                 let key = hash_str(&m.text);
-                let cur = self.hscroll.get(&key).copied().unwrap_or(0.0).clamp(0.0, max_h);
+                let cur = self
+                    .hscroll
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(0.0)
+                    .clamp(0.0, max_h);
                 self.hscroll.insert(key, cur);
                 live_keys.push(key);
                 let left = tx.max(0.0);
@@ -1434,7 +1543,10 @@ impl PanelRenderer {
                 multiview_mask: None,
             });
             self.quads.render(&mut pass);
-            if let Err(e) = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass) {
+            if let Err(e) = self
+                .text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+            {
                 // Draw the frame without text rather than abort; next frame retries.
                 log::error!("unterm: panel glyphon render failed: {e}");
             }
@@ -1452,7 +1564,6 @@ impl PanelRenderer {
         // Keep this frame's shaped blocks for the next one (see `block_cache`).
         self.block_cache = groups.into_iter().collect();
     }
-
 }
 
 /// Stable content hash, used to key a code block's horizontal scroll.
@@ -1472,7 +1583,11 @@ fn syntax_set() -> &'static SyntaxSet {
 fn theme(dark: bool) -> &'static Theme {
     static T: OnceLock<ThemeSet> = OnceLock::new();
     let ts = T.get_or_init(ThemeSet::load_defaults);
-    let name = if dark { "base16-ocean.dark" } else { "InspiredGitHub" };
+    let name = if dark {
+        "base16-ocean.dark"
+    } else {
+        "InspiredGitHub"
+    };
     &ts.themes[name]
 }
 
@@ -1544,7 +1659,11 @@ fn build_plain(
     text_color: Color,
 ) -> Measured {
     let carded = b.role.carded();
-    let inner_w = if carded { content_w - card_pad * 2.0 } else { content_w };
+    let inner_w = if carded {
+        content_w - card_pad * 2.0
+    } else {
+        content_w
+    };
     let color = match b.role {
         Role::Thought => dim(text_color, 150),
         Role::Tool => dim(text_color, 205),
@@ -1578,7 +1697,11 @@ fn build_plain(
         Role::Queued => 0.05,
         _ => 0.0,
     };
-    let height = if carded { text_h + card_pad * 2.0 } else { text_h };
+    let height = if carded {
+        text_h + card_pad * 2.0
+    } else {
+        text_h
+    };
     Measured {
         buffer: Arc::new(buffer),
         text: b.text.clone(),
@@ -1615,7 +1738,10 @@ fn build_tool(
     let inner_w = content_w - card_pad * 2.0 - reserve_right;
     let small = Metrics::new(font_size * 0.84, line_height * 0.84);
     let head_attrs = Attrs::new().family(family).color(dim(text_color, 205));
-    let small_attrs = Attrs::new().family(family).color(dim(text_color, 165)).metrics(small);
+    let small_attrs = Attrs::new()
+        .family(family)
+        .color(dim(text_color, 165))
+        .metrics(small);
 
     // Owned span texts (kept alive for the borrowed slices set_rich_text takes).
     let mut texts: Vec<String> = vec![header.to_string()];
@@ -1725,10 +1851,30 @@ fn build_md(
     use markdown::Block as MB;
     match mb {
         MB::Paragraph(spans) => {
-            let (buffer, text) =
-                shape_spans(fs, spans, content_w, font_size, line_height, false, text_color, faces);
+            let (buffer, text) = shape_spans(
+                fs,
+                spans,
+                content_w,
+                font_size,
+                line_height,
+                false,
+                text_color,
+                faces,
+            );
             let height = measure_height(&buffer);
-            Some(Measured { buffer: Arc::new(buffer), text, height, card_alpha: 0.0, indent: 0.0, code: false, natural_w: 0.0, table: None, tool_key: None, header_h: 0.0, stamp: 0 })
+            Some(Measured {
+                buffer: Arc::new(buffer),
+                text,
+                height,
+                card_alpha: 0.0,
+                indent: 0.0,
+                code: false,
+                natural_w: 0.0,
+                table: None,
+                tool_key: None,
+                header_h: 0.0,
+                stamp: 0,
+            })
         }
         MB::Heading { level, spans } => {
             let scale = match level {
@@ -1748,7 +1894,19 @@ fn build_md(
                 faces,
             );
             let height = measure_height(&buffer);
-            Some(Measured { buffer: Arc::new(buffer), text, height, card_alpha: 0.0, indent: 0.0, code: false, natural_w: 0.0, table: None, tool_key: None, header_h: 0.0, stamp: 0 })
+            Some(Measured {
+                buffer: Arc::new(buffer),
+                text,
+                height,
+                card_alpha: 0.0,
+                indent: 0.0,
+                code: false,
+                natural_w: 0.0,
+                table: None,
+                tool_key: None,
+                header_h: 0.0,
+                stamp: 0,
+            })
         }
         MB::Code { text, lang, diff } => {
             // Code is rendered unwrapped and clipped to the card; the panel
@@ -1763,7 +1921,8 @@ fn build_md(
             };
             if *diff {
                 // Color +/- lines like a diff (kept whole, including newlines).
-                let lines: Vec<String> = text.split_inclusive('\n').map(|l| l.to_string()).collect();
+                let lines: Vec<String> =
+                    text.split_inclusive('\n').map(|l| l.to_string()).collect();
                 let parts: Vec<(&str, Attrs)> = lines
                     .iter()
                     .map(|l| {
@@ -1823,7 +1982,11 @@ fn build_md(
                 header_h: 0.0,
             })
         }
-        MB::ListItem { depth, marker, spans } => {
+        MB::ListItem {
+            depth,
+            marker,
+            spans,
+        } => {
             let indent = (*depth as f32) * (font_size * 1.2);
             let mut all: Vec<markdown::Span> = Vec::with_capacity(spans.len() + 1);
             all.push(markdown::Span {
@@ -1842,7 +2005,19 @@ fn build_md(
                 faces,
             );
             let height = measure_height(&buffer);
-            Some(Measured { buffer: Arc::new(buffer), text, height, card_alpha: 0.0, indent, code: false, natural_w: 0.0, table: None, tool_key: None, header_h: 0.0, stamp: 0 })
+            Some(Measured {
+                buffer: Arc::new(buffer),
+                text,
+                height,
+                card_alpha: 0.0,
+                indent,
+                code: false,
+                natural_w: 0.0,
+                table: None,
+                tool_key: None,
+                header_h: 0.0,
+                stamp: 0,
+            })
         }
         MB::Quote(spans) => {
             let indent = font_size;
@@ -1857,11 +2032,30 @@ fn build_md(
                 faces,
             );
             let height = measure_height(&buffer);
-            Some(Measured { buffer: Arc::new(buffer), text, height, card_alpha: 0.0, indent, code: false, natural_w: 0.0, table: None, tool_key: None, header_h: 0.0, stamp: 0 })
+            Some(Measured {
+                buffer: Arc::new(buffer),
+                text,
+                height,
+                card_alpha: 0.0,
+                indent,
+                code: false,
+                natural_w: 0.0,
+                table: None,
+                tool_key: None,
+                header_h: 0.0,
+                stamp: 0,
+            })
         }
-        MB::Table { headers, rows } => {
-            build_table(fs, headers, rows, content_w, font_size, line_height, faces, text_color)
-        }
+        MB::Table { headers, rows } => build_table(
+            fs,
+            headers,
+            rows,
+            content_w,
+            font_size,
+            line_height,
+            faces,
+            text_color,
+        ),
         MB::Rule => None,
     }
 }
@@ -1900,7 +2094,16 @@ fn build_table(
     let mut col_w = vec![0.0_f32; cols];
     for row in &all {
         for (i, cell) in row.iter().enumerate() {
-            let (buf, _) = shape_spans(fs, cell, 1.0e6, font_size, line_height, false, text_color, faces);
+            let (buf, _) = shape_spans(
+                fs,
+                cell,
+                1.0e6,
+                font_size,
+                line_height,
+                false,
+                text_color,
+                faces,
+            );
             col_w[i] = col_w[i].max(measure_width(&buf) + pad_x * 2.0);
         }
     }
@@ -1923,8 +2126,16 @@ fn build_table(
         for (i, cell) in row.iter().enumerate() {
             let inner = (col_w[i] - pad_x * 2.0).max(1.0);
             let header = r == 0;
-            let (buf, text) =
-                shape_spans(fs, cell, inner, font_size, line_height, header, text_color, faces);
+            let (buf, text) = shape_spans(
+                fs,
+                cell,
+                inner,
+                font_size,
+                line_height,
+                header,
+                text_color,
+                faces,
+            );
             let h = measure_height(&buf);
             row_h[r] = row_h[r].max(h);
             out_row.push((buf, text, h));

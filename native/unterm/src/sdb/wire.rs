@@ -217,8 +217,17 @@ pub type Result<T> = std::result::Result<T, SdbError>;
 /// unsolicited command from the agent (composite events arrive this way).
 #[derive(Debug)]
 pub enum Packet {
-    Reply { id: u32, error: u16, data: Vec<u8> },
-    Command { id: u32, cmd_set: u8, cmd: u8, data: Vec<u8> },
+    Reply {
+        id: u32,
+        error: u16,
+        data: Vec<u8>,
+    },
+    Command {
+        id: u32,
+        cmd_set: u8,
+        cmd: u8,
+        data: Vec<u8>,
+    },
 }
 
 /// Big-endian payload builder. Ids are encoded as 4-byte ints (verified on Unity).

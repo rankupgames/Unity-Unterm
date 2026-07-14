@@ -185,10 +185,14 @@ mod windows_gfx {
                     "unterm: captured Unity device kind={kind:?} adapter=vendor:0x{vendor:04x} device:0x{dev_id:04x}"
                 );
             } else {
-                log::warn!("unterm: captured Unity device kind={kind:?} but adapter id unavailable");
+                log::warn!(
+                    "unterm: captured Unity device kind={kind:?} but adapter id unavailable"
+                );
             }
         } else {
-            log::info!("unterm: Unity graphics device not ready yet (kind={kind:?}); will retry on init");
+            log::info!(
+                "unterm: Unity graphics device not ready yet (kind={kind:?}); will retry on init"
+            );
         }
     }
 

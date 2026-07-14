@@ -21,13 +21,20 @@ pub struct Span {
 /// A block-level element.
 pub enum Block {
     Paragraph(Vec<Span>),
-    Heading { level: u8, spans: Vec<Span> },
+    Heading {
+        level: u8,
+        spans: Vec<Span>,
+    },
     Code {
         text: String,
         lang: Option<String>,
         diff: bool,
     },
-    ListItem { depth: u8, marker: String, spans: Vec<Span> },
+    ListItem {
+        depth: u8,
+        marker: String,
+        spans: Vec<Span>,
+    },
     Quote(Vec<Span>),
     /// A table: a header row then body rows; each cell is a run of spans.
     Table {
@@ -220,4 +227,3 @@ pub fn parse(md: &str) -> Vec<Block> {
 
     out
 }
-

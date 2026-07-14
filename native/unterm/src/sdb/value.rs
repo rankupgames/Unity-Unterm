@@ -49,7 +49,10 @@ pub enum Value {
     /// A managed string object id (fetch contents via STRING_REF.GET_VALUE).
     String(u32),
     /// A reference object id (Class/Object/Array/SzArray). `tag` keeps the kind.
-    Object { tag: u8, id: u32 },
+    Object {
+        tag: u8,
+        id: u32,
+    },
     /// A boxed/inline value type with its fields.
     ValueType {
         klass: u32,

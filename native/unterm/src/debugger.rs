@@ -46,7 +46,10 @@ enum Cmd {
     /// Inspect a different call-stack frame (0 = innermost).
     SelectFrame(usize),
     /// Lazily fetch the children (fields or elements) of an expandable value.
-    ExpandVar { id: u32, array: bool },
+    ExpandVar {
+        id: u32,
+        array: bool,
+    },
     /// Attach to a different target (the editor, or a discovered player).
     SelectTarget(Target),
 }
@@ -84,7 +87,11 @@ struct SourcePaneOut {
 
 impl Default for SourcePaneOut {
     fn default() -> Self {
-        Self { rect: egui::Rect::NOTHING, acts: Vec::new(), hover: None }
+        Self {
+            rect: egui::Rect::NOTHING,
+            acts: Vec::new(),
+            hover: None,
+        }
     }
 }
 
@@ -322,7 +329,11 @@ impl ApplicationHandler<Wake> for App {
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: caps.alpha_modes.first().copied().unwrap_or(wgpu::CompositeAlphaMode::Auto),
+            alpha_mode: caps
+                .alpha_modes
+                .first()
+                .copied()
+                .unwrap_or(wgpu::CompositeAlphaMode::Auto),
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -507,29 +518,37 @@ impl App {
                 }
             }
         }
-        gfx.egui_state.handle_platform_output(&gfx.window, full.platform_output);
+        gfx.egui_state
+            .handle_platform_output(&gfx.window, full.platform_output);
         let tris = gfx.egui_ctx.tessellate(full.shapes, full.pixels_per_point);
         let screen = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [gfx.config.width, gfx.config.height],
             pixels_per_point: full.pixels_per_point,
         };
         for (id, delta) in &full.textures_delta.set {
-            gfx.egui_renderer.update_texture(&g.device, &g.queue, *id, delta);
+            gfx.egui_renderer
+                .update_texture(&g.device, &g.queue, *id, delta);
         }
         let mut encoder = g
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("egui") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("egui"),
+            });
         let user_cmds =
-            gfx.egui_renderer.update_buffers(&g.device, &g.queue, &mut encoder, &tris, &screen);
+            gfx.egui_renderer
+                .update_buffers(&g.device, &g.queue, &mut encoder, &tris, &screen);
 
         let frame = match gfx.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             _ => {
                 gfx.surface.configure(&g.device, &gfx.config);
                 return;
             }
         };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
         {
             let mut pass = encoder
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -539,7 +558,12 @@ impl App {
                         depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.13, g: 0.13, b: 0.13, a: 1.0 }),
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.13,
+                                g: 0.13,
+                                b: 0.13,
+                                a: 1.0,
+                            }),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -551,7 +575,8 @@ impl App {
                 .forget_lifetime();
             gfx.egui_renderer.render(&mut pass, &tris, &screen);
         }
-        g.queue.submit(user_cmds.into_iter().chain([encoder.finish()]));
+        g.queue
+            .submit(user_cmds.into_iter().chain([encoder.finish()]));
         frame.present();
         for id in &full.textures_delta.free {
             gfx.egui_renderer.free_texture(id);
@@ -691,8 +716,7 @@ impl App {
             .map(|&l| (l - 1) as u32)
             .collect();
         ed.set_breakpoints(&bp0);
-        let viewing_stopped =
-            snap.stopped && basename(&self.view_file) == basename(&snap.cur_file);
+        let viewing_stopped = snap.stopped && basename(&self.view_file) == basename(&snap.cur_file);
         ed.set_exec_line(if viewing_stopped && snap.cur_line > 0 {
             (snap.cur_line - 1) as usize
         } else {
@@ -713,7 +737,8 @@ impl App {
 /// Absolute path to a Unity-bundled font (`Contents/Resources/Fonts/<name>`), if present.
 fn unity_font_path(name: &str) -> Option<String> {
     let inst = sdb::find_editor_instance(&std::env::current_dir().ok()?)?;
-    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(inst).ok()?).ok()?;
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(inst).ok()?).ok()?;
     let contents = json.get("app_contents_path")?.as_str()?;
     let p = std::path::Path::new(contents)
         .join("Resources")
@@ -734,7 +759,9 @@ fn setup_theme(ctx: &egui::Context) {
     // Fonts: Unity's Inter (UI) + RobotoMono (code), if available.
     let mut fonts = egui::FontDefinitions::default();
     if let Some(b) = unity_font_bytes("Inter-Regular.ttf") {
-        fonts.font_data.insert("inter".into(), Arc::new(egui::FontData::from_owned(b)));
+        fonts
+            .font_data
+            .insert("inter".into(), Arc::new(egui::FontData::from_owned(b)));
         fonts
             .families
             .entry(egui::FontFamily::Proportional)
@@ -742,7 +769,9 @@ fn setup_theme(ctx: &egui::Context) {
             .insert(0, "inter".into());
     }
     if let Some(b) = unity_font_bytes("RobotoMono-Regular.ttf") {
-        fonts.font_data.insert("robotomono".into(), Arc::new(egui::FontData::from_owned(b)));
+        fonts
+            .font_data
+            .insert("robotomono".into(), Arc::new(egui::FontData::from_owned(b)));
         fonts
             .families
             .entry(egui::FontFamily::Monospace)
@@ -765,7 +794,9 @@ fn setup_theme(ctx: &egui::Context) {
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
     ] {
         if let Ok(b) = std::fs::read(jp) {
-            fonts.font_data.insert("jp".into(), Arc::new(egui::FontData::from_owned(b)));
+            fonts
+                .font_data
+                .insert("jp".into(), Arc::new(egui::FontData::from_owned(b)));
             for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
                 fonts.families.entry(fam).or_default().push("jp".into());
             }
@@ -776,11 +807,23 @@ fn setup_theme(ctx: &egui::Context) {
 
     use egui::{FontFamily, TextStyle};
     let text_styles: std::collections::BTreeMap<TextStyle, FontId> = [
-        (TextStyle::Small, FontId::new(10.0, FontFamily::Proportional)),
+        (
+            TextStyle::Small,
+            FontId::new(10.0, FontFamily::Proportional),
+        ),
         (TextStyle::Body, FontId::new(12.0, FontFamily::Proportional)),
-        (TextStyle::Button, FontId::new(12.0, FontFamily::Proportional)),
-        (TextStyle::Heading, FontId::new(13.0, FontFamily::Proportional)),
-        (TextStyle::Monospace, FontId::new(12.0, FontFamily::Monospace)),
+        (
+            TextStyle::Button,
+            FontId::new(12.0, FontFamily::Proportional),
+        ),
+        (
+            TextStyle::Heading,
+            FontId::new(13.0, FontFamily::Proportional),
+        ),
+        (
+            TextStyle::Monospace,
+            FontId::new(12.0, FontFamily::Monospace),
+        ),
     ]
     .into();
 
@@ -822,7 +865,8 @@ fn setup_theme(ctx: &egui::Context) {
 
 fn unity_font_bytes(name: &str) -> Option<Vec<u8>> {
     let inst = sdb::find_editor_instance(&std::env::current_dir().ok()?)?;
-    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(inst).ok()?).ok()?;
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(inst).ok()?).ok()?;
     let contents = json.get("app_contents_path")?.as_str()?;
     let p = std::path::Path::new(contents)
         .join("Resources")
@@ -882,7 +926,11 @@ fn build_ui(
                 }
             });
             ui.add_enabled_ui(s.attached && !s.stopped, |ui| {
-                if ui.button("⏸").on_hover_text("Pause / Break All (p)").clicked() {
+                if ui
+                    .button("⏸")
+                    .on_hover_text("Pause / Break All (p)")
+                    .clicked()
+                {
                     cmds.push(Cmd::Pause);
                 }
             });
@@ -914,11 +962,18 @@ fn build_ui(
 
             // Target picker: the editor, plus any debuggable players found on the network.
             ui.separator();
-            let cur = if s.cur_target.is_empty() { "Editor" } else { s.cur_target.as_str() };
+            let cur = if s.cur_target.is_empty() {
+                "Editor"
+            } else {
+                s.cur_target.as_str()
+            };
             egui::ComboBox::from_id_salt("target")
                 .selected_text(cur)
                 .show_ui(ui, |ui| {
-                    if ui.selectable_label(cur == "Editor", "Editor (this project)").clicked() {
+                    if ui
+                        .selectable_label(cur == "Editor", "Editor (this project)")
+                        .clicked()
+                    {
                         cmds.push(Cmd::SelectTarget(Target {
                             ip: String::new(),
                             port: 0,
@@ -972,9 +1027,18 @@ fn build_ui(
         .resizable(true)
         .default_size(210.0)
         .show(ui, |ui| {
-            egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-                tree_panel(ui, ctx.tree, *focus == Focus::Tree, expanded, tree_sel, new_view);
-            });
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    tree_panel(
+                        ui,
+                        ctx.tree,
+                        *focus == Focus::Tree,
+                        expanded,
+                        tree_sel,
+                        new_view,
+                    );
+                });
         });
 
     // --- right: three vertically-stacked, resizable panes ---
@@ -987,102 +1051,153 @@ fn build_ui(
             let min = 46.0_f32;
             let total = ui.available_height();
             let stack_max = (total - 2.0 * min).max(min);
-            egui::Panel::top("p_stack").resizable(true).default_size(150.0).size_range(egui::Rangef::new(min, stack_max)).show(ui, |ui| {
-                // Threads strip: only when the stop involves more than one managed thread.
-                if s.threads.len() > 1 {
-                    ui.label(RichText::new("Threads").strong());
-                    egui::ScrollArea::both().id_salt("sa_threads").max_height(72.0).auto_shrink([false, false]).show(ui, |ui| {
-                        for t in &s.threads {
-                            let selected = t.id == s.cur_thread;
-                            let col = if selected { accent } else { c(0xc4, 0xc4, 0xc4) };
-                            let resp = ui.add(
-                                egui::Label::new(
-                                    RichText::new(format!("{}  ·  {}", t.name, t.location)).monospace().color(col),
-                                )
-                                .selectable(false)
-                                .truncate()
-                                .sense(egui::Sense::click()),
-                            );
-                            if selected {
-                                ui.painter().rect_filled(
-                                    resp.rect.expand2(egui::vec2(4.0, 1.0)),
-                                    2.0,
-                                    accent.gamma_multiply(0.18),
-                                );
-                            }
-                            if resp.clicked() && !selected {
-                                cmds.push(Cmd::SelectThread(t.id));
-                            }
-                        }
-                    });
-                    ui.separator();
-                }
-                ui.label(RichText::new("Call Stack").strong());
-                egui::ScrollArea::both().id_salt("sa_stack").auto_shrink([false, false]).show(ui, |ui| {
-                    for (i, f) in s.stack.iter().enumerate() {
-                        let selected = i == s.cur_frame;
-                        let col = if selected { accent } else { c(0xc4, 0xc4, 0xc4) };
-                        let resp = ui.add(
-                            egui::Label::new(RichText::new(f).monospace().color(col))
-                                .selectable(false)
-                                .sense(egui::Sense::click()),
-                        );
-                        if selected {
-                            ui.painter().rect_filled(
-                                resp.rect.expand2(egui::vec2(4.0, 1.0)),
-                                2.0,
-                                accent.gamma_multiply(0.18),
-                            );
-                        }
-                        if resp.clicked() && i != s.cur_frame {
-                            cmds.push(Cmd::SelectFrame(i));
-                        }
-                    }
-                });
-            });
-            let vars_max = (ui.available_height() - min).max(min);
-            egui::Panel::top("p_vars").resizable(true).default_size(240.0).size_range(egui::Rangef::new(min, vars_max)).show(ui, |ui| {
-                ui.label(RichText::new("Variables").strong());
-                egui::ScrollArea::both().id_salt("sa_vars").auto_shrink([false, false]).show(ui, |ui| {
-                    egui::CollapsingHeader::new("Local").default_open(true).show(ui, |ui| {
-                        if s.locals.is_empty() {
-                            ui.label(RichText::new("(none)").weak());
-                        }
-                        var_tree(ui, &s.locals, &s.children, var_open, cmds, 0, &mut Vec::new());
-                    });
-                    if !s.this_label.is_empty() {
-                        egui::CollapsingHeader::new(format!("this : {}", s.this_label))
-                            .default_open(true)
+            egui::Panel::top("p_stack")
+                .resizable(true)
+                .default_size(150.0)
+                .size_range(egui::Rangef::new(min, stack_max))
+                .show(ui, |ui| {
+                    // Threads strip: only when the stop involves more than one managed thread.
+                    if s.threads.len() > 1 {
+                        ui.label(RichText::new("Threads").strong());
+                        egui::ScrollArea::both()
+                            .id_salt("sa_threads")
+                            .max_height(72.0)
+                            .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                var_tree(ui, &s.members, &s.children, var_open, cmds, 0, &mut Vec::new());
+                                for t in &s.threads {
+                                    let selected = t.id == s.cur_thread;
+                                    let col = if selected {
+                                        accent
+                                    } else {
+                                        c(0xc4, 0xc4, 0xc4)
+                                    };
+                                    let resp = ui.add(
+                                        egui::Label::new(
+                                            RichText::new(format!("{}  ·  {}", t.name, t.location))
+                                                .monospace()
+                                                .color(col),
+                                        )
+                                        .selectable(false)
+                                        .truncate()
+                                        .sense(egui::Sense::click()),
+                                    );
+                                    if selected {
+                                        ui.painter().rect_filled(
+                                            resp.rect.expand2(egui::vec2(4.0, 1.0)),
+                                            2.0,
+                                            accent.gamma_multiply(0.18),
+                                        );
+                                    }
+                                    if resp.clicked() && !selected {
+                                        cmds.push(Cmd::SelectThread(t.id));
+                                    }
+                                }
                             });
+                        ui.separator();
                     }
+                    ui.label(RichText::new("Call Stack").strong());
+                    egui::ScrollArea::both()
+                        .id_salt("sa_stack")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for (i, f) in s.stack.iter().enumerate() {
+                                let selected = i == s.cur_frame;
+                                let col = if selected {
+                                    accent
+                                } else {
+                                    c(0xc4, 0xc4, 0xc4)
+                                };
+                                let resp = ui.add(
+                                    egui::Label::new(RichText::new(f).monospace().color(col))
+                                        .selectable(false)
+                                        .sense(egui::Sense::click()),
+                                );
+                                if selected {
+                                    ui.painter().rect_filled(
+                                        resp.rect.expand2(egui::vec2(4.0, 1.0)),
+                                        2.0,
+                                        accent.gamma_multiply(0.18),
+                                    );
+                                }
+                                if resp.clicked() && i != s.cur_frame {
+                                    cmds.push(Cmd::SelectFrame(i));
+                                }
+                            }
+                        });
                 });
-            });
+            let vars_max = (ui.available_height() - min).max(min);
+            egui::Panel::top("p_vars")
+                .resizable(true)
+                .default_size(240.0)
+                .size_range(egui::Rangef::new(min, vars_max))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Variables").strong());
+                    egui::ScrollArea::both()
+                        .id_salt("sa_vars")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            egui::CollapsingHeader::new("Local")
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    if s.locals.is_empty() {
+                                        ui.label(RichText::new("(none)").weak());
+                                    }
+                                    var_tree(
+                                        ui,
+                                        &s.locals,
+                                        &s.children,
+                                        var_open,
+                                        cmds,
+                                        0,
+                                        &mut Vec::new(),
+                                    );
+                                });
+                            if !s.this_label.is_empty() {
+                                egui::CollapsingHeader::new(format!("this : {}", s.this_label))
+                                    .default_open(true)
+                                    .show(ui, |ui| {
+                                        var_tree(
+                                            ui,
+                                            &s.members,
+                                            &s.children,
+                                            var_open,
+                                            cmds,
+                                            0,
+                                            &mut Vec::new(),
+                                        );
+                                    });
+                            }
+                        });
+                });
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.label(RichText::new("Breakpoints").strong());
-                egui::ScrollArea::both().id_salt("sa_bps").auto_shrink([false, false]).show(ui, |ui| {
-                    if s.all_bps.is_empty() {
-                        ui.label(RichText::new("(none)").weak());
-                    }
-                    for (file, line) in &s.all_bps {
-                        let resp = ui
-                            .horizontal(|ui| {
-                                ui.label(RichText::new("●").color(c(0xc8, 0x3a, 0x3a)));
-                                ui.add(
-                                    egui::Label::new(RichText::new(format!("{file}:{line}")).monospace())
+                egui::ScrollArea::both()
+                    .id_salt("sa_bps")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if s.all_bps.is_empty() {
+                            ui.label(RichText::new("(none)").weak());
+                        }
+                        for (file, line) in &s.all_bps {
+                            let resp = ui
+                                .horizontal(|ui| {
+                                    ui.label(RichText::new("●").color(c(0xc8, 0x3a, 0x3a)));
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(format!("{file}:{line}")).monospace(),
+                                        )
                                         .sense(egui::Sense::click()),
-                                )
-                            })
-                            .inner;
-                        if resp.clicked() {
-                            if let Some((abs, _)) = ctx.files.iter().find(|(_, n)| n == file) {
-                                *new_view = Some(abs.clone());
-                                *goto = Some(*line);
+                                    )
+                                })
+                                .inner;
+                            if resp.clicked() {
+                                if let Some((abs, _)) = ctx.files.iter().find(|(_, n)| n == file) {
+                                    *new_view = Some(abs.clone());
+                                    *goto = Some(*line);
+                                }
                             }
                         }
-                    }
-                });
+                    });
             });
         });
 
@@ -1133,9 +1248,13 @@ fn var_tree(
                         .sense(egui::Sense::click()),
                 );
                 let name = ui.add(
-                    egui::Label::new(RichText::new(&v.name).monospace().color(c(0xa0, 0xa0, 0xa0)))
-                        .selectable(false)
-                        .sense(egui::Sense::click()),
+                    egui::Label::new(
+                        RichText::new(&v.name)
+                            .monospace()
+                            .color(c(0xa0, 0xa0, 0xa0)),
+                    )
+                    .selectable(false)
+                    .sense(egui::Sense::click()),
                 );
                 if hit.clicked() || name.clicked() {
                     if open {
@@ -1143,20 +1262,31 @@ fn var_tree(
                     } else {
                         var_open.insert(e.id);
                         if !children.contains_key(&e.id) {
-                            cmds.push(Cmd::ExpandVar { id: e.id, array: e.array });
+                            cmds.push(Cmd::ExpandVar {
+                                id: e.id,
+                                array: e.array,
+                            });
                         }
                     }
                 }
             } else {
                 ui.add_space(12.0);
-                ui.label(RichText::new(&v.name).monospace().color(c(0xa0, 0xa0, 0xa0)));
+                ui.label(
+                    RichText::new(&v.name)
+                        .monospace()
+                        .color(c(0xa0, 0xa0, 0xa0)),
+                );
             }
             if !v.value.is_empty() {
                 ui.label(RichText::new("=").weak());
                 // The value is selectable (copy it); names/triangles are not.
                 ui.add(
-                    egui::Label::new(RichText::new(&v.value).monospace().color(c(0xd2, 0xd2, 0xd2)))
-                        .selectable(true),
+                    egui::Label::new(
+                        RichText::new(&v.value)
+                            .monospace()
+                            .color(c(0xd2, 0xd2, 0xd2)),
+                    )
+                    .selectable(true),
                 );
             }
         });
@@ -1234,7 +1364,10 @@ fn source_view(ui: &mut egui::Ui, ctx: &UiCtx, focused: bool, out: &mut SourcePa
     if resp.hovered() {
         let d = ui.input(|i| i.smooth_scroll_delta);
         if d.x != 0.0 || d.y != 0.0 {
-            out.acts.push(EditorAct::Scroll { dx: -d.x * ppp, dy: -d.y * ppp });
+            out.acts.push(EditorAct::Scroll {
+                dx: -d.x * ppp,
+                dy: -d.y * ppp,
+            });
         }
         out.hover = resp.hover_pos();
     }
@@ -1256,10 +1389,20 @@ fn source_view(ui: &mut egui::Ui, ctx: &UiCtx, focused: bool, out: &mut SourcePa
     if focused {
         let events = ui.input(|i| i.events.clone());
         for ev in events {
-            if let egui::Event::Key { key, pressed: true, modifiers, .. } = ev {
+            if let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = ev
+            {
                 if let Some(name) = map_editor_key(key, &modifiers) {
-                    out.acts
-                        .push(EditorAct::Key(name, modifiers.ctrl, modifiers.alt, modifiers.shift));
+                    out.acts.push(EditorAct::Key(
+                        name,
+                        modifiers.ctrl,
+                        modifiers.alt,
+                        modifiers.shift,
+                    ));
                 }
             }
         }
@@ -1614,7 +1757,11 @@ fn session_thread(
     };
     // Default target: this project's editor; the user can switch to a discovered player.
     // An empty ip is the "Editor" sentinel — resolved fresh (its pid can change) below.
-    let mut target = Target { ip: String::new(), port: 0, label: "Editor".to_string() };
+    let mut target = Target {
+        ip: String::new(),
+        port: 0,
+        label: "Editor".to_string(),
+    };
     loop {
         if target.ip.is_empty() {
             match sdb::editor_endpoint(&root) {
@@ -1635,7 +1782,9 @@ fn session_thread(
         let conn = match sdb::connect(&target.ip, target.port) {
             Ok(c) => c,
             Err(e) => {
-                set(&state, &proxy, |s| s.status = format!("{}: connect failed: {e}", target.label));
+                set(&state, &proxy, |s| {
+                    s.status = format!("{}: connect failed: {e}", target.label)
+                });
                 // Nothing to do until the user picks a (different) target.
                 match wait_for_target(&rx) {
                     Some(t) => {
@@ -1646,7 +1795,14 @@ fn session_thread(
                 }
             }
         };
-        match run_connection(conn, &seed, state.clone(), &rx, proxy.clone(), &target.label) {
+        match run_connection(
+            conn,
+            &seed,
+            state.clone(),
+            &rx,
+            proxy.clone(),
+            &target.label,
+        ) {
             Some(t) => target = t, // switch targets and reconnect
             None => return,        // disconnected / died / channel closed
         }
@@ -1679,7 +1835,12 @@ fn run_connection(
     let mut bps: Vec<Bp> = seed
         .iter()
         .cloned()
-        .map(|(file, line)| Bp { file, line, armed: false, req: None })
+        .map(|(file, line)| Bp {
+            file,
+            line,
+            armed: false,
+            req: None,
+        })
         .collect();
     set(&state, &proxy, |s| {
         s.attached = true;
@@ -1691,7 +1852,8 @@ fn run_connection(
 
     // Watch for a new play-mode AppDomain: the Play domain reload invalidates any
     // breakpoint armed on an edit-mode method, so we re-sync + re-arm on the fresh types.
-    conn.set_event(wire::kind::APPDOMAIN_CREATE, wire::suspend::NONE, &[]).ok();
+    conn.set_event(wire::kind::APPDOMAIN_CREATE, wire::suspend::NONE, &[])
+        .ok();
     let mut watch_req: Option<i32> = None;
     rewatch(&mut conn, &bps, &mut watch_req);
     arm_loaded(&mut conn, &mut bps, &state, &proxy);
@@ -1706,13 +1868,19 @@ fn run_connection(
     // The editor menu, re-opened while this debugger is already running, touches
     // `focus.request` to ask us to come forward instead of spawning a second window.
     let focus_path = unterm_state_path("focus.request");
-    let mut last_focus = std::fs::metadata(&focus_path).ok().and_then(|m| m.modified().ok());
+    let mut last_focus = std::fs::metadata(&focus_path)
+        .ok()
+        .and_then(|m| m.modified().ok());
 
     // Live breakpoint sync: watch the shared store for edits the editor makes while we
     // run, and reconcile. `last_bp` is bumped after our own writes so we don't re-read
     // them back.
     let bp_path = unterm_state_path("breakpoints.json");
-    let bp_mtime = || std::fs::metadata(&bp_path).ok().and_then(|m| m.modified().ok());
+    let bp_mtime = || {
+        std::fs::metadata(&bp_path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+    };
     let mut last_bp = bp_mtime();
 
     // Retry arming: when we attach mid-play the agent may not answer type queries yet,
@@ -1721,7 +1889,9 @@ fn run_connection(
     let mut last_arm = std::time::Instant::now();
 
     loop {
-        let f = std::fs::metadata(&focus_path).ok().and_then(|m| m.modified().ok());
+        let f = std::fs::metadata(&focus_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
         if f != last_focus {
             last_focus = f;
             proxy.send_event(Wake::Focus).ok();
@@ -1734,9 +1904,7 @@ fn run_connection(
             reconcile_breakpoints(&mut conn, &mut bps, &state, &proxy, &ui_view);
         }
 
-        if bps.iter().any(|b| !b.armed)
-            && last_arm.elapsed() >= Duration::from_millis(500)
-        {
+        if bps.iter().any(|b| !b.armed) && last_arm.elapsed() >= Duration::from_millis(500) {
             last_arm = std::time::Instant::now();
             arm_loaded(&mut conn, &mut bps, &state, &proxy);
             sync_bps(&state, &proxy, &bps, &ui_view);
@@ -1758,15 +1926,25 @@ fn run_connection(
                     if base.is_empty() {
                         continue;
                     }
-                    if let Some(pos) = bps.iter().position(|b| basename(&b.file) == base && b.line == line) {
+                    if let Some(pos) = bps
+                        .iter()
+                        .position(|b| basename(&b.file) == base && b.line == line)
+                    {
                         let req = bps[pos].req;
                         req.map(|q| conn.clear_event(wire::kind::BREAKPOINT, q));
                         bps.remove(pos);
                     } else {
-                        let mut bp = Bp { file: base.clone(), line, armed: false, req: None };
+                        let mut bp = Bp {
+                            file: base.clone(),
+                            line,
+                            armed: false,
+                            req: None,
+                        };
                         if let Ok(types) = conn.types_for_source_file(&bp.file, true) {
                             if !types.is_empty() {
-                                if let Some(req) = arm(&mut conn, &types, &bp.file, bp.line, &state, &proxy) {
+                                if let Some(req) =
+                                    arm(&mut conn, &types, &bp.file, bp.line, &state, &proxy)
+                                {
                                     bp.armed = true;
                                     bp.req = Some(req);
                                 }
@@ -1790,7 +1968,9 @@ fn run_connection(
                                 conn.frames(t)
                                     .ok()
                                     .and_then(|f| f.into_iter().next())
-                                    .and_then(|f| conn.debug_info(f.method).ok().map(|i| (i, f.il_offset)))
+                                    .and_then(|f| {
+                                        conn.debug_info(f.method).ok().map(|i| (i, f.il_offset))
+                                    })
                                     .and_then(|(i, il)| il_to_source(&i, il))
                                     .map(|(_, ln)| ln > 0)
                                     .unwrap_or(false)
@@ -1850,7 +2030,8 @@ fn run_connection(
                 // jump the source view to its location.
                 Cmd::SelectFrame(idx) if cur_thread != 0 => {
                     if let Some(frame) = cur_frames.get(*idx).cloned() {
-                        let (locals, members, this_label) = frame_vars(&mut conn, cur_thread, &frame);
+                        let (locals, members, this_label) =
+                            frame_vars(&mut conn, cur_thread, &frame);
                         let (file, line) = conn
                             .debug_info(frame.method)
                             .ok()
@@ -1930,7 +2111,12 @@ fn run_connection(
                             if let Some(fresh) = load_breakpoints() {
                                 bps = fresh
                                     .into_iter()
-                                    .map(|(file, line)| Bp { file, line, armed: false, req: None })
+                                    .map(|(file, line)| Bp {
+                                        file,
+                                        line,
+                                        armed: false,
+                                        req: None,
+                                    })
                                     .collect();
                             }
                             rewatch(&mut conn, &bps, &mut watch_req);
@@ -1939,9 +2125,14 @@ fn run_connection(
                         wire::kind::TYPE_LOAD => {
                             for bp in &mut bps {
                                 if !bp.armed {
-                                    if let Some(req) =
-                                        arm(&mut conn, &[ev.type_id], &bp.file, bp.line, &state, &proxy)
-                                    {
+                                    if let Some(req) = arm(
+                                        &mut conn,
+                                        &[ev.type_id],
+                                        &bp.file,
+                                        bp.line,
+                                        &state,
+                                        &proxy,
+                                    ) {
                                         bp.armed = true;
                                         bp.req = Some(req);
                                     }
@@ -2126,7 +2317,10 @@ fn reconcile_breakpoints(
     // Drop breakpoints no longer in the store (clearing their agent request).
     let mut i = 0;
     while i < bps.len() {
-        if fresh.iter().any(|(f, l)| *f == bps[i].file && *l == bps[i].line) {
+        if fresh
+            .iter()
+            .any(|(f, l)| *f == bps[i].file && *l == bps[i].line)
+        {
             i += 1;
         } else {
             if let Some(req) = bps[i].req.take() {
@@ -2141,7 +2335,12 @@ fn reconcile_breakpoints(
         if bps.iter().any(|b| b.file == file && b.line == line) {
             continue;
         }
-        let mut bp = Bp { file: file.clone(), line, armed: false, req: None };
+        let mut bp = Bp {
+            file: file.clone(),
+            line,
+            armed: false,
+            req: None,
+        };
         if let Ok(types) = conn.types_for_source_file(&bp.file, true) {
             if !types.is_empty() {
                 if let Some(req) = arm(conn, &types, &bp.file, bp.line, state, proxy) {
@@ -2158,7 +2357,10 @@ fn reconcile_breakpoints(
 /// Read the shared breakpoint store as (basename, 1-based line) pairs. Returns `None`
 /// on a missing/unreadable file so a transient error can't wipe live breakpoints.
 fn load_breakpoints() -> Option<Vec<(String, i32)>> {
-    let path = project_root().join("Library").join("Unterm").join("breakpoints.json");
+    let path = project_root()
+        .join("Library")
+        .join("Unterm")
+        .join("breakpoints.json");
     let text = std::fs::read_to_string(&path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     let mut out = Vec::new();
@@ -2201,7 +2403,9 @@ fn arm(
     match conn.set_breakpoint(method, il) {
         Ok(req) => {
             let name = conn.method_name(method).unwrap_or_default();
-            set(state, proxy, |s| s.push_log(format!("breakpoint: {name}+0x{il:x}")));
+            set(state, proxy, |s| {
+                s.push_log(format!("breakpoint: {name}+0x{il:x}"))
+            });
             Some(req)
         }
         Err(_) => None,
@@ -2225,7 +2429,11 @@ fn collect_threads(conn: &mut sdb::Connection) -> Vec<ThreadInfo> {
             continue; // native/threadpool thread with no managed frame: skip
         };
         let raw = conn.thread_name(id).unwrap_or_default();
-        let name = if raw.is_empty() { format!("Thread {id}") } else { raw };
+        let name = if raw.is_empty() {
+            format!("Thread {id}")
+        } else {
+            raw
+        };
         let mname = conn.method_name(method).unwrap_or_default();
         out.push(ThreadInfo {
             id,
@@ -2252,7 +2460,11 @@ fn dump(conn: &mut sdb::Connection, thread: u32) -> Stop {
             file = src.clone();
             line = ln;
         }
-        let loc = if ln > 0 { format!("{}:{ln}", basename(&src)) } else { String::new() };
+        let loc = if ln > 0 {
+            format!("{}:{ln}", basename(&src))
+        } else {
+            String::new()
+        };
         stack.push(format!("#{i} {name}  {loc}"));
     }
 
@@ -2260,7 +2472,15 @@ fn dump(conn: &mut sdb::Connection, thread: u32) -> Stop {
         Some(top) => frame_vars(conn, thread, top),
         None => (Vec::new(), Vec::new(), String::new()),
     };
-    Stop { stack, frames, locals, members, this_label, file, line }
+    Stop {
+        stack,
+        frames,
+        locals,
+        members,
+        this_label,
+        file,
+        line,
+    }
 }
 
 /// Locals, `this` members, and the `this` type label for a single call-stack frame.
@@ -2379,7 +2599,11 @@ fn render_value(conn: &mut sdb::Connection, v: &value::Value) -> String {
             .unwrap_or_else(|| format!("obj#{id}")),
         Value::ValueType { fields, .. } => format!(
             "({})",
-            fields.iter().map(|f| render_value(conn, f)).collect::<Vec<_>>().join(", ")
+            fields
+                .iter()
+                .map(|f| render_value(conn, f))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         other => other.summary(),
     }
@@ -2464,8 +2688,11 @@ fn write_pid_file() {
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn editor_pid() -> Option<i32> {
     let inst = sdb::find_editor_instance(&std::env::current_dir().ok()?)?;
-    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(inst).ok()?).ok()?;
-    json.get("process_id").and_then(|v| v.as_i64()).map(|v| v as i32)
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(inst).ok()?).ok()?;
+    json.get("process_id")
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32)
 }
 
 /// Observe `NSWorkspace` app-activation; when our editor becomes frontmost, post
@@ -2666,8 +2893,8 @@ fn install_activation_observer(proxy: EventLoopProxy<Wake>) {
 
 #[cfg(windows)]
 fn order_behind_editor(window: &Window) {
-    use std::sync::atomic::Ordering;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use std::sync::atomic::Ordering;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
         GetForegroundWindow, GetWindowThreadProcessId, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE,
@@ -2695,7 +2922,15 @@ fn order_behind_editor(window: &Window) {
             return; // the editor isn't actually the foreground window
         }
         // Insert our window directly below the editor's in z-order (no move/size/focus).
-        let _ = SetWindowPos(ours, Some(fg), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        let _ = SetWindowPos(
+            ours,
+            Some(fg),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
     }
 }
 
@@ -2718,7 +2953,11 @@ fn scan_cs_files() -> Vec<(String, String)> {
                 }
                 walk(&p, out);
             } else if p.extension().and_then(|s| s.to_str()) == Some("cs") {
-                let disp = p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                let disp = p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
                 out.push((p.to_string_lossy().into_owned(), disp));
             }
         }

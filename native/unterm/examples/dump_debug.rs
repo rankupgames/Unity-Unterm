@@ -24,7 +24,10 @@ fn main() {
     let mut conn = match sdb::connect_editor(&root) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("connect failed: {e} (is the Unity editor open under {}?)", root.display());
+            eprintln!(
+                "connect failed: {e} (is the Unity editor open under {}?)",
+                root.display()
+            );
             std::process::exit(1);
         }
     };
@@ -36,7 +39,9 @@ fn main() {
 
     // Arm: subscribe to TYPE_LOAD for the target file. Types already loaded resolve
     // immediately; everything else resolves when the play-mode domain loads them.
-    let watch = conn.watch_source_files(&[file.clone()]).expect("watch source");
+    let watch = conn
+        .watch_source_files(&[file.clone()])
+        .expect("watch source");
     println!("watching TYPE_LOAD for {file} (request {watch})");
     let mut armed = false;
     if let Ok(types) = conn.types_for_source_file(&file, true) {
@@ -113,7 +118,9 @@ fn try_arm(conn: &mut sdb::Connection, types: &[u32], file: &str, line: i32) -> 
             let name = conn.method_name(method).unwrap_or_default();
             match conn.set_breakpoint(method, il) {
                 Ok(req) => {
-                    println!("armed breakpoint at {file}:{line} -> {name}+0x{il:x} (request {req})");
+                    println!(
+                        "armed breakpoint at {file}:{line} -> {name}+0x{il:x} (request {req})"
+                    );
                     true
                 }
                 Err(e) => {
@@ -123,7 +130,10 @@ fn try_arm(conn: &mut sdb::Connection, types: &[u32], file: &str, line: i32) -> 
             }
         }
         None => {
-            println!("could not resolve {file}:{line} in {} method(s) yet", candidates.len());
+            println!(
+                "could not resolve {file}:{line} in {} method(s) yet",
+                candidates.len()
+            );
             false
         }
     }
@@ -170,7 +180,12 @@ fn dump_stop(conn: &mut sdb::Connection, thread: u32) {
         .enumerate()
         .filter(|(_, l)| top.il_offset >= l.live_start && top.il_offset < l.live_end)
         .collect();
-    println!("locals ({}/{} in scope at il 0x{:x}):", in_scope.len(), locals.len(), top.il_offset);
+    println!(
+        "locals ({}/{} in scope at il 0x{:x}):",
+        in_scope.len(),
+        locals.len(),
+        top.il_offset
+    );
     if in_scope.is_empty() {
         return;
     }
@@ -193,8 +208,16 @@ fn il_to_source(info: &DebugInfo, il: i32) -> Option<String> {
         .iter()
         .filter(|s| !s.is_hidden() && s.il_offset <= il)
         .max_by_key(|s| s.il_offset)?;
-    let src = info.sources.get(sp.source_idx as usize).cloned().unwrap_or_default();
-    Some(format!("{}:{}", src.rsplit(['/', '\\']).next().unwrap_or(&src), sp.line))
+    let src = info
+        .sources
+        .get(sp.source_idx as usize)
+        .cloned()
+        .unwrap_or_default();
+    Some(format!(
+        "{}:{}",
+        src.rsplit(['/', '\\']).next().unwrap_or(&src),
+        sp.line
+    ))
 }
 
 /// Sanity-check the GET_DEBUG_INFO decoder against a loaded method (mscorlib is
