@@ -729,3 +729,37 @@ fn spawn_reader(
         shared.dirty.store(true, Ordering::Relaxed);
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    struct IgnoreEvents;
+
+    impl EventListener for IgnoreEvents {
+        fn send_event(&self, _event: Event) {}
+    }
+
+    #[test]
+    fn ansi_red_sgr_sets_red_until_reset() {
+        // Arrange
+        let mut term = Term::new(
+            Config::default(),
+            &TermSize { cols: 8, rows: 2 },
+            IgnoreEvents,
+        );
+        let mut parser: Processor = Processor::new();
+
+        // Act
+        parser.advance(&mut term, b"\x1b[31mR\x1b[0mN");
+
+        // Assert
+        let grid = term.grid();
+        assert_eq!(grid[Line(0)][Column(0)].fg, Color::Named(NamedColor::Red));
+        assert_eq!(
+            grid[Line(0)][Column(1)].fg,
+            Color::Named(NamedColor::Foreground)
+        );
+    }
+}

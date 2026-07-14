@@ -7,6 +7,27 @@
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 
+fn configure_terminal_environment(cmd: &mut CommandBuilder) {
+    // The host process can be launched from a non-interactive agent or build
+    // environment that disables color globally. Unterm is a color-capable PTY,
+    // so do not leak that host-only preference into its interactive shell. Keep
+    // an explicit NO_COLOR inherited from a real terminal, where it can represent
+    // the user's preference rather than the host agent's output policy.
+    let host_is_noninteractive = cmd.get_env("TERM") == Some(std::ffi::OsStr::new("dumb"));
+    if host_is_noninteractive {
+        cmd.env_remove("NO_COLOR");
+    }
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+
+    // macOS ships /etc/zshrc_Apple_Terminal (and a bash equivalent) that reports
+    // the shell's working directory via OSC 7 — but only when TERM_PROGRAM marks
+    // an Apple terminal. Set it so the shell emits OSC 7 on every prompt; the
+    // reader captures it for cwd-on-resume (no sysinfo, no rc injection).
+    #[cfg(target_os = "macos")]
+    cmd.env("TERM_PROGRAM", "Apple_Terminal");
+}
+
 pub struct Pty {
     pub master: Box<dyn MasterPty + Send>,
     pub child: Box<dyn Child + Send + Sync>,
@@ -48,16 +69,7 @@ pub fn spawn(
     if !cwd.is_empty() && std::path::Path::new(cwd).is_dir() {
         cmd.cwd(cwd);
     }
-    // Advertise a capable terminal so programs emit colors/cursor sequences.
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("COLORTERM", "truecolor");
-
-    // macOS ships /etc/zshrc_Apple_Terminal (and a bash equivalent) that reports
-    // the shell's working directory via OSC 7 — but only when TERM_PROGRAM marks
-    // an Apple terminal. Set it so the shell emits OSC 7 on every prompt; the
-    // reader captures it for cwd-on-resume (no sysinfo, no rc injection).
-    #[cfg(target_os = "macos")]
-    cmd.env("TERM_PROGRAM", "Apple_Terminal");
+    configure_terminal_environment(&mut cmd);
 
     // Ensure a UTF-8 locale so the shell's line editor handles multibyte input
     // (e.g. Japanese) instead of garbling it. GUI hosts like Unity often launch
@@ -116,5 +128,42 @@ impl Drop for Pty {
         // Best-effort: ensure the shell goes away with the terminal.
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn terminal_environment_enables_color_when_host_disables_it() {
+        // Arrange
+        let mut cmd = CommandBuilder::new("dummy");
+        cmd.env("TERM", "dumb");
+        cmd.env("COLORTERM", "");
+        cmd.env("NO_COLOR", "1");
+
+        // Act
+        configure_terminal_environment(&mut cmd);
+
+        // Assert
+        assert_eq!(cmd.get_env("TERM"), Some(OsStr::new("xterm-256color")));
+        assert_eq!(cmd.get_env("COLORTERM"), Some(OsStr::new("truecolor")));
+        assert_eq!(cmd.get_env("NO_COLOR"), None);
+    }
+
+    #[test]
+    fn terminal_environment_preserves_explicit_no_color_from_interactive_host() {
+        // Arrange
+        let mut cmd = CommandBuilder::new("dummy");
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("NO_COLOR", "1");
+
+        // Act
+        configure_terminal_environment(&mut cmd);
+
+        // Assert
+        assert_eq!(cmd.get_env("NO_COLOR"), Some(OsStr::new("1")));
     }
 }
