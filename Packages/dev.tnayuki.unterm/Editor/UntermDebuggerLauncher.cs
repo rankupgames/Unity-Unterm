@@ -76,10 +76,10 @@ namespace Unterm.Editor
         /// arms the current breakpoints and waits for Play — you can also use Pause).
         /// Greyed out until debugging is enabled in Preferences > Unterm.
         [MenuItem("Window/Unterm/Debugger (Standalone Process) %#d")]
-        private static void Open() => EnsureRunning();
+        internal static void Open() => EnsureRunning();
 
         [MenuItem("Window/Unterm/Debugger (Standalone Process) %#d", validate = true)]
-        private static bool OpenValidate() => UntermDebuggerPrefs.Enabled;
+        internal static bool OpenValidate() => UntermDebuggerPrefs.Enabled;
 
         private static void OnPlayModeChanged(PlayModeStateChange state)
         {

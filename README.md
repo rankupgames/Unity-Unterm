@@ -41,15 +41,14 @@ start in the project root.
 Unterm has an in-Editor Claude Code agent panel — a transcript and composer that
 drive Anthropic's standalone Claude Code engine in-process, no Node required.
 
-1. Open **Preferences ▸ Unterm** and click **Download Claude Code**. The reviewed,
-   pinned engine release is fetched from Anthropic's official npm registry into a
-   per-user folder shared by all your projects. The archive is size-bounded,
-   layout-validated, and verified against its platform-specific SHA-512 digest
-   before installation.
+1. Install and manage the `claude` executable outside Unity. Unterm does not
+   download or update Claude Code; it passively discovers an existing executable
+   from `UNTERM_CLAUDE_PATH`, `PATH`, common user install locations, or a legacy
+   Unterm-managed install.
 2. Sign in with your own Anthropic account: run `claude login` (or type `/login`
    in the panel, which opens a terminal for the browser sign-in).
 3. Open the panel from **Window ▸ Unterm ▸ Claude Code**. The menu item stays
-   disabled until the engine has been downloaded.
+   disabled until an existing executable is found.
 
 ## Code editor
 
@@ -63,12 +62,16 @@ transcript all open there.
 ## Security boundary
 
 Unity MCP tools are disabled by default. Enabling them requires confirmation in
-**Preferences ▸ Unterm**. Read-only calls can then run unattended, while every
-mutating or dangerous call requires a fresh Editor approval. Approval-required
-calls are denied in batch mode, unknown tools fail closed, and arbitrary C#
-execution is always dangerous. Claude Code permission-bypass modes are rejected.
+**Preferences ▸ Unterm** and stores trust only in this project's uncommitted
+Editor user settings. The default Prompt policy allows reads and requires fresh
+approval for mutations and dangerous actions; confirmed Allow Mutating and Allow
+Dangerous policies can permit known actions unattended. Requests outside the
+selected policy are denied in batch mode, and unclassified tools never auto-run.
+Arbitrary C# remains dangerous and runs unattended only with both Allow Dangerous
+and its separate full-machine-access confirmation. Claude Code permission-bypass
+modes are rejected.
 
-The managed Claude child process receives an explicit environment allowlist, so
+The discovered Claude child process receives an explicit environment allowlist, so
 host credentials and unrelated secrets are not inherited by default.
 
 ## Platform
@@ -78,6 +81,12 @@ GPU texture with no CPU copy — an IOSurface (Metal) on macOS, a shared D3D12
 texture on Windows — so the menu item is registered only on those editors; on
 any other platform the package contributes nothing.
 
+The standalone debugger keeps its future Linux/X11 dependency path explicit and
+CI verifies that feature graph, but the native library and debugger binary still
+build only on macOS and Windows because the embedded source pane uses the Unity
+shared-surface renderer. Wayland is deferred until its scanner dependency
+supports a patched XML parser release.
+
 ## Repository layout
 
 - `Packages/dev.tnayuki.unterm/` — the vendorable UPM package source. Native
@@ -86,7 +95,7 @@ any other platform the package contributes nothing.
   `native/build-macos.sh` (or `native/build-windows.ps1`) to build the native
   binary into the package for in-editor development. Not part of the published source.
 - `provenance/` — the audited upstream revision, dependency remediation, and
-  reviewed downloader pin.
+  reviewed source baseline.
 
 Feature-branch pushes, `main`, and version tags build both native platforms,
 generate an SBOM and notices, publish checksums and build metadata, and attest
