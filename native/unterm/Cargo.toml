@@ -68,13 +68,10 @@ isolang = { version = "2.4.0", default-features = false }
 # Standalone debugger window (`unterm-debugger` bin / `debugger` module): its own
 # winit event loop + wgpu surface, so it stays live while the editor is frozen at a
 # breakpoint. Only entered by the bin; the Unity-loaded cdylib never calls into it.
-# The debugger ships only for macOS and Windows. Disable winit/egui-winit's
-# default Linux X11/Wayland backends so unused platform crates do not enter the
-# audited lockfile (and the shipped dependency surface stays target-accurate).
-winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+# Platform-specific winit/egui-winit features are declared below so Linux keeps
+# an intentional debugger path without expanding macOS/Windows builds.
 egui-wgpu = "0.35.0"
 egui = "0.35"
-egui-winit = { version = "0.35", default-features = false }
 # Player discovery: bind the Unity multicast group with SO_REUSEPORT (shared with the
 # editor's own listener) — std's UdpSocket can't set the sockopt before bind.
 socket2 = { version = "0.5", features = ["all"] }
@@ -86,6 +83,22 @@ tree-sitter-md = "0.5.3"
 # joined on each (macOS won't receive from a secondary interface via INADDR_ANY alone).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# The Unity-integrated package currently ships on macOS and Windows. Keep their
+# debugger windowing dependencies free of Linux-only X11/Wayland backends.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+egui-winit = { version = "0.35", default-features = false }
+
+# Preserve the standalone debugger's Linux build intention with an explicit X11
+# backend that CI compile-checks. Wayland stays disabled until its scanner moves
+# off vulnerable quick-xml 0.39.x; clipboard and link openers are also unused.
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30", default-features = false, features = [
+    "rwh_06",
+    "x11",
+] }
+egui-winit = { version = "0.35", default-features = false, features = ["x11"] }
 
 # IOSurface zero-copy path (macOS). Uses the same objc2-metal/objc2-io-surface
 # bindings wgpu-hal 29 builds on, so the raw MTLDevice/MTLTexture handed to

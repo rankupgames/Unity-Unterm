@@ -18,6 +18,11 @@
     "supportedEditorPlatforms": [
       "macOS",
       "Windows"
+    ],
+    "debuggerCompileValidationPlatforms": [
+      "macOS",
+      "Windows",
+      "Linux"
     ]
   },
   "rustRemediation": {

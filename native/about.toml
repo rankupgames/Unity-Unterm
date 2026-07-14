@@ -1,7 +1,7 @@
 # Config for `cargo about` — generates the third-party license notices bundled
-# with the native plugin. We filter to the shipped targets (macOS + Windows) so
-# the scan covers every crate that ends up in a distributed cdylib and drops
-# build/dev-only and other-platform crates.
+# with the native plugin. We cover the shipped editor targets (macOS + Windows)
+# plus the intentionally supported standalone Linux debugger build so every
+# distributed or compile-validated runtime dependency has a bundled notice.
 accepted = [
     "MIT",
     "Apache-2.0",
@@ -24,11 +24,12 @@ accepted = [
     "Ubuntu-font-1.0",
 ]
 
-# The shipped targets: macOS aarch64/x86_64 and Windows x86_64. This prunes
-# Linux-only deps while still covering the Windows-only crates (windows, d3d12,
-# gpu-allocator, hassle-rs, …) that go into unterm.dll.
+# Shipped targets: macOS aarch64/x86_64 and Windows x86_64. Linux x86_64 is the
+# CI compile-validation target for the standalone debugger; it is not yet a
+# shipped Unity native plugin.
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
     "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
 ]

@@ -81,6 +81,11 @@ GPU texture with no CPU copy — an IOSurface (Metal) on macOS, a shared D3D12
 texture on Windows — so the menu item is registered only on those editors; on
 any other platform the package contributes nothing.
 
+The standalone debugger keeps an intentional Linux/X11 build path that CI
+compile-checks, but the Unity package does not yet ship or register a Linux
+native plugin. Wayland is deferred until its scanner dependency supports a
+patched XML parser release.
+
 ## Repository layout
 
 - `Packages/dev.tnayuki.unterm/` — the vendorable UPM package source. Native

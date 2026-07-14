@@ -71,6 +71,11 @@ editor a GPU texture with no CPU copy: an IOSurface (Metal) on macOS, a shared
 D3D12 texture on Windows. The menu item is registered only on those editors; on
 any other platform the package contributes nothing.
 
+The standalone debugger keeps an intentional Linux/X11 build path that CI
+compile-checks, but the Unity package does not yet ship or register a Linux
+native plugin. Wayland is deferred until its scanner dependency supports a
+patched XML parser release.
+
 The package ships prebuilt native binaries — a universal (arm64 + x86_64)
 `unterm.dylib` for macOS and an `unterm.dll` for Windows (x86_64). To rebuild
 from the Rust source, run `native/build-macos.sh` or `native/build-windows.ps1`
