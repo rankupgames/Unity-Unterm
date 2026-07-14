@@ -20,19 +20,6 @@
       "Windows"
     ]
   },
-  "claudeCode": {
-    "packageVersion": "0.3.183",
-    "embeddedCliVersion": "2.1.183",
-    "publishedAt": "2026-06-18T23:58:59.358Z",
-    "reviewedAt": "2026-07-13",
-    "minimumReleaseAgeDays": 7,
-    "registry": "https://registry.npmjs.org",
-    "integrity": {
-      "darwin-arm64": "sha512-o/+sxwKgXuw6RG5cERWjvcvL1CDSPe/TaXMhax+dq+V4lDOI5iTqg3y5Wfb6dL3xlWoTA2OhWowDQllKbE04LQ==",
-      "darwin-x64": "sha512-V7Cf8JeD5EPf4MPomFUlEblCIQI0wg+aWdOSqvfMsDmCBEHljd52CQ3a7W263oVt6I7QUfRTpX2KNvdma56rDA==",
-      "win32-x64": "sha512-h/XzbrSmXGroTk/FYKR6J4/8G9vDb1HUUUeNXeBGqGW1kppIiWPJKLRzjtSe0brVjADOKOT6tE5IHK0mV/1gBw=="
-    }
-  },
   "rustRemediation": {
     "plist": "1.10.0",
     "quick-xml": "0.41.0",

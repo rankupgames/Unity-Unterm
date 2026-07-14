@@ -32,14 +32,14 @@ start in the project root.
 Unterm has an in-Editor Claude Code agent panel — a transcript and composer that
 drive Anthropic's standalone Claude Code engine in-process, no Node required.
 
-1. Open **Preferences ▸ Unterm** and click **Download Claude Code**. A reviewed,
-   pinned engine release is fetched from Anthropic's official npm registry into a
-   per-user folder shared by all your projects. Its archive is size-bounded,
-   layout-validated, and verified against a platform-specific SHA-512 digest.
+1. Install and manage the `claude` executable outside Unity. Unterm does not
+   download or update Claude Code; it passively discovers an existing executable
+   from `UNTERM_CLAUDE_PATH`, `PATH`, common user install locations, or a legacy
+   Unterm-managed install.
 2. Sign in with your own Anthropic account: run `claude login` (or type `/login`
    in the panel, which opens a terminal for the browser sign-in).
 3. Open the panel from **Window ▸ Unterm ▸ Claude Code**. The menu item stays
-   disabled until the engine has been downloaded.
+   disabled until an existing executable is found.
 
 ## Code editor
 
@@ -60,7 +60,7 @@ and Allow Dangerous policies can permit known actions unattended. Requests
 outside the selected policy are denied in batch mode, and unclassified tools
 never auto-run. Arbitrary C# remains dangerous and runs unattended only with
 both Allow Dangerous and its separate full-machine-access confirmation. Claude
-permission-bypass modes are rejected, and the managed Claude process receives
+permission-bypass modes are rejected, and the discovered Claude process receives
 an explicit environment allowlist.
 
 ## Platform
