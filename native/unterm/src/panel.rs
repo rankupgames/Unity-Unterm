@@ -257,8 +257,13 @@ pub struct PanelRenderer {
     /// HiDPI factor: the panel renders at physical pixels and scales all sizes
     /// by this so text is crisp (no upscaling blur) on Retina displays.
     scale: f32,
-    /// Vertical scroll offset in physical px (0 = bottom-anchored / latest).
+    /// Vertical scroll offset in physical px. Chat: 0 = bottom-anchored (latest).
+    /// Document mode: 0 = top, increasing reveals content below.
     scroll: f32,
+    /// Document-viewer mode: content is TOP-anchored (a Markdown file read
+    /// top-down) rather than the chat's bottom-anchored transcript. No buttons /
+    /// tools / plan box / stamps appear for a plain file, so those paths stay inert.
+    document: bool,
     /// Laid-out content height in physical px (for the host's scrollbar).
     content_h: f32,
     /// Action buttons (e.g. permission options) drawn pinned at the bottom.
@@ -290,6 +295,14 @@ pub struct PanelRenderer {
     /// resolves to an existing file here, so the underline matches what a click
     /// can actually open.
     root: std::path::PathBuf,
+    /// Memoized `token_is_file` results. The underline pass stats every
+    /// whitespace token in the transcript, so without this a re-render during
+    /// streaming would hit the filesystem thousands of times per frame. Cleared
+    /// when the block count changes (new message — files mentioned mid-stream may
+    /// exist by then) or the root changes.
+    link_stat_cache: std::cell::RefCell<HashMap<String, bool>>,
+    /// Block count `link_stat_cache` was filled at (invalidation key).
+    link_stat_blocks: usize,
 
     /// Hash of every input the last fully-submitted frame was laid out from
     /// (text, geometry, scroll, selection, fold state, fonts, colors, target).
@@ -348,11 +361,14 @@ impl PanelRenderer {
             font_bold_italic: None,
             scale: 1.0,
             scroll: 0.0,
+            document: false,
             content_h: 0.0,
             plan_scroll: 0.0,
             plan_max: 0.0,
             plan_rect: None,
             root: std::path::PathBuf::new(),
+            link_stat_cache: std::cell::RefCell::new(HashMap::new()),
+            link_stat_blocks: 0,
             buttons: Vec::new(),
             button_rects: Vec::new(),
             laid: Vec::new(),
@@ -407,23 +423,37 @@ impl PanelRenderer {
     /// used to gate the clickable-path underline on the file actually existing.
     pub fn set_root(&mut self, root: std::path::PathBuf) {
         self.root = root;
+        self.link_stat_cache.borrow_mut().clear();
     }
 
     /// Whether `tok` resolves (against `self.root`) to an existing file — i.e. a
-    /// path a click could actually open.
+    /// path a click could actually open. Memoized in `link_stat_cache`.
     fn token_is_file(&self, tok: &str) -> bool {
+        if let Some(&hit) = self.link_stat_cache.borrow().get(tok) {
+            return hit;
+        }
         let p = std::path::Path::new(tok);
         let full = if p.is_absolute() {
             p.to_path_buf()
         } else {
             self.root.join(p)
         };
-        full.is_file()
+        let is_file = full.is_file();
+        self.link_stat_cache
+            .borrow_mut()
+            .insert(tok.to_string(), is_file);
+        is_file
     }
 
     /// Scroll offset in physical px (0 = bottom). Clamped during layout.
     pub fn set_scroll(&mut self, scroll: f32) {
         self.scroll = scroll.max(0.0);
+    }
+
+    /// Document-viewer mode: top-anchor the content (0 = top) instead of the
+    /// chat transcript's bottom anchor. Used by the code editor's Markdown preview.
+    pub fn set_document(&mut self, on: bool) {
+        self.document = on;
     }
 
     /// Total laid-out content height in physical px (from the last render).
@@ -614,10 +644,11 @@ impl PanelRenderer {
         quads
     }
 
-    /// Dotted-underline quads (physical px) under tokens that look like an
-    /// openable file path, so the user can see the path is clickable. The token
-    /// test mirrors the host's `IsEditable` (ends in a known extension) so the
-    /// underline marks exactly what a click opens. Fenced code blocks are skipped
+    /// Dotted-underline quads (physical px) under every token that resolves to an
+    /// existing file, so the user can see the path is clickable. Existence is the
+    /// only gate — the host routes a click through the configured script editor
+    /// and falls back to Unity (`AssetDatabase.OpenAsset` / the OS default app),
+    /// so anything real is openable somewhere. Fenced code blocks are skipped
     /// (their content isn't a clickable reference).
     fn link_underline_quads(&self) -> Vec<Quad> {
         let s = self.scale;
@@ -631,7 +662,7 @@ impl PanelRenderer {
             if blk.code_key.is_some() {
                 continue;
             }
-            let ranges: Vec<_> = path_token_ranges(&blk.text)
+            let ranges: Vec<_> = token_ranges(&blk.text)
                 .into_iter()
                 .filter(|r| self.token_is_file(&blk.text[r.start..r.end]))
                 .collect();
@@ -1070,7 +1101,12 @@ impl PanelRenderer {
             + buttons_h;
         self.content_h = total + pad * 2.0;
         let viewport_h = content_bottom - pad;
-        let mut y = if total <= viewport_h {
+        let mut y = if self.document {
+            // Document viewer: top-anchored. `scroll` (0 = top) reveals content
+            // below; clamped so the last line can't scroll past the bottom.
+            let max_scroll = (total - viewport_h).max(0.0);
+            pad - self.scroll.min(max_scroll)
+        } else if total <= viewport_h {
             pad
         } else {
             let max_scroll = total - viewport_h;
@@ -1269,6 +1305,12 @@ impl PanelRenderer {
         quads.extend(self.selection_quads(overlay));
 
         // Dotted underline under clickable file-path tokens (below the text).
+        // A new block means new content whose paths may exist by now (files are
+        // usually created before they're mentioned, but not mid-stream) — re-stat.
+        if self.laid.len() != self.link_stat_blocks {
+            self.link_stat_cache.borrow_mut().clear();
+            self.link_stat_blocks = self.laid.len();
+        }
         quads.extend(self.link_underline_quads());
 
         // Action buttons: placed right after the last block (scrolling with the
@@ -1960,19 +2002,12 @@ fn line_starts(buffer: &Buffer) -> Vec<usize> {
     starts
 }
 
-/// Editable extensions the host (`UntermCodeEditorWindow.IsEditable`) will open.
-/// Kept in sync so the dotted underline marks exactly the tokens a click opens.
-const PATH_EXTS: &[&str] = &[
-    ".cs", ".txt", ".json", ".xml", ".uxml", ".uss", ".shader", ".cginc", ".hlsl", ".compute", ".md",
-    ".markdown", ".yml", ".yaml", ".js", ".ts", ".py", ".rs", ".toml", ".csv", ".log", ".asmdef",
-    ".asmref",
-];
-
-/// Byte ranges (into `text`) of whitespace-delimited tokens that look like an
-/// openable file path: trimmed of the same surrounding brackets/quotes as
-/// `token_at`, and ending in a known editable extension. Used to dotted-underline
-/// clickable paths in the transcript.
-fn path_token_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+/// Byte ranges (into `text`) of whitespace-delimited tokens, trimmed of the same
+/// surrounding brackets/quotes as `token_at`. The caller filters these down to
+/// tokens that resolve to existing files (`token_is_file`) to dotted-underline
+/// clickable paths in the transcript — existence is the only gate; which files
+/// actually open in what is the host's (and Unity's) decision.
+fn token_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
     let bytes = text.as_bytes();
     let n = bytes.len();
     let trim = |c: u8| b"()[]{}<>,;:\"'`".contains(&c);
@@ -1996,10 +2031,7 @@ fn path_token_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
         if s >= e {
             continue;
         }
-        let lower = text[s..e].to_ascii_lowercase();
-        if PATH_EXTS.iter().any(|ext| lower.ends_with(ext)) {
-            out.push(s..e);
-        }
+        out.push(s..e);
     }
     out
 }

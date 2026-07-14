@@ -30,19 +30,36 @@ echo "==> building unterm ($PROFILE)"
 for arch in "${ARCHS[@]}"; do
   # Bash 3.2 (macOS) treats "${CARGO_FLAGS[@]}" as unbound under `set -u` when the
   # array is empty (the debug profile), so expand it guardedly.
-  cargo build -p unterm --locked ${CARGO_FLAGS[@]+"${CARGO_FLAGS[@]}"} --target "$arch"
+  cargo build -p unterm --locked --lib --bin unterm-debugger \
+    ${CARGO_FLAGS[@]+"${CARGO_FLAGS[@]}"} --target "$arch"
 done
 
-DEST="../Packages/dev.tnayuki.unterm/Editor/Plugins/macOS/unterm.dylib"
-mkdir -p "$(dirname "$DEST")"
+PLUGIN_DIR="../Packages/dev.tnayuki.unterm/Editor/Plugins/macOS"
+LIB_DEST="$PLUGIN_DIR/unterm.dylib"
+DEBUGGER_DEST="$PLUGIN_DIR/unterm-debugger"
+mkdir -p "$PLUGIN_DIR"
 
 LIBS=()
+DEBUGGERS=()
 for arch in "${ARCHS[@]}"; do
   LIBS+=("target/$arch/${TARGET_DIR}/libunterm.dylib")
+  DEBUGGERS+=("target/$arch/${TARGET_DIR}/unterm-debugger")
 done
 
-echo "==> lipo -> $DEST"
-lipo -create "${LIBS[@]}" -output "$DEST"
+echo "==> lipo library -> $LIB_DEST"
+lipo -create "${LIBS[@]}" -output "$LIB_DEST"
 
-echo "==> done: $DEST"
-lipo -info "$DEST"
+echo "==> lipo debugger -> $DEBUGGER_DEST"
+lipo -create "${DEBUGGERS[@]}" -output "$DEBUGGER_DEST"
+chmod 0755 "$DEBUGGER_DEST"
+# Lipo invalidates per-architecture Mach-O signatures. Re-sign the universal
+# executable deterministically (ad-hoc, no timestamp) before publishing it.
+codesign --force --sign - --timestamp=none \
+  --identifier dev.tnayuki.unterm.debugger "$DEBUGGER_DEST"
+codesign --verify --strict --verbose=2 "$DEBUGGER_DEST"
+
+echo "==> done: $LIB_DEST"
+lipo -info "$LIB_DEST"
+echo "==> done: $DEBUGGER_DEST"
+lipo -info "$DEBUGGER_DEST"
+test -x "$DEBUGGER_DEST"

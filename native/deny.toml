@@ -23,6 +23,10 @@ allow = [
     "ISC",
     "MIT",
     "MPL-2.0",
+    # egui's bundled debugger fonts. Redistribution requirements are satisfied
+    # by the generated Third Party Notices shipped with the Unity package.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
     "Unicode-3.0",
     "Unlicense",
     "Zlib",

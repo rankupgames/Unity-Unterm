@@ -39,17 +39,23 @@ if ($Configuration -eq 'release') {
 rustup target add $Target | Out-Null
 
 Write-Host "==> building unterm ($Configuration, $Target)"
-cargo build -p unterm --locked @cargoFlags --target $Target
+cargo build -p unterm --locked --lib --bin unterm-debugger @cargoFlags --target $Target
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed (exit $LASTEXITCODE)" }
 
-$dest = Join-Path $PSScriptRoot '..\Packages\dev.tnayuki.unterm\Editor\Plugins\Windows\x86_64\unterm.dll'
-$destDir = Split-Path -Parent $dest
-New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+$pluginDir = Join-Path $PSScriptRoot '..\Packages\dev.tnayuki.unterm\Editor\Plugins\Windows\x86_64'
+$libDest = Join-Path $pluginDir 'unterm.dll'
+$debuggerDest = Join-Path $pluginDir 'unterm-debugger.exe'
+New-Item -ItemType Directory -Force -Path $pluginDir | Out-Null
 
 $lib = Join-Path $PSScriptRoot "target\$Target\$targetDir\unterm.dll"
 if (-not (Test-Path -LiteralPath $lib)) { throw "built dll not found: $lib" }
+$debugger = Join-Path $PSScriptRoot "target\$Target\$targetDir\unterm-debugger.exe"
+if (-not (Test-Path -LiteralPath $debugger)) { throw "built debugger not found: $debugger" }
 
-Write-Host "==> copy -> $dest"
-Copy-Item -LiteralPath $lib -Destination $dest -Force
+Write-Host "==> copy -> $libDest"
+Copy-Item -LiteralPath $lib -Destination $libDest -Force
+Write-Host "==> copy -> $debuggerDest"
+Copy-Item -LiteralPath $debugger -Destination $debuggerDest -Force
 
-Write-Host "==> done: $dest"
+Write-Host "==> done: $libDest"
+Write-Host "==> done: $debuggerDest"

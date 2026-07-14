@@ -35,6 +35,8 @@ namespace Unterm.Editor
                 {
                     "unterm", "claude", "claude code", "agent", "terminal", "download",
                     "code editor", "undo", "history", "sound", "notify", "notification", "chime",
+                    "debug", "debugger", "breakpoint", "extension", "extensions", "open",
+                    "unity", "mcp", "tools", "security", "approval",
                 },
             };
         }
@@ -89,6 +91,20 @@ namespace Unterm.Editor
             if (nextLimit != curLimit)
                 UntermCodeEditorPrefs.UndoLimit = nextLimit;
 
+            string curExts = UntermOpenExtensions.Value;
+            string nextExts = EditorGUILayout.DelayedTextField(
+                new GUIContent("Openable extensions",
+                    "Semicolon-separated file extensions the Unterm code editor claims: " +
+                    "double-clicked assets (when Unterm is the External Script Editor) and " +
+                    "file links clicked in the agent transcript. Anything else falls through " +
+                    "to Unity's own handler or the OS default app."),
+                curExts);
+            if (nextExts != curExts)
+                UntermOpenExtensions.Value = nextExts;
+            if (nextExts != UntermOpenExtensions.Default &&
+                GUILayout.Button("Reset extensions to default", GUILayout.ExpandWidth(false)))
+                UntermOpenExtensions.Value = UntermOpenExtensions.Default;
+
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Agent", EditorStyles.boldLabel);
             bool notify = UntermAgentPrefs.NotifySoundEnabled;
@@ -100,6 +116,18 @@ namespace Unterm.Editor
                 notify);
             if (nextNotify != notify)
                 UntermAgentPrefs.NotifySoundEnabled = nextNotify;
+
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Debugger", EditorStyles.boldLabel);
+            bool curDbg = UntermDebuggerPrefs.Enabled;
+            bool nextDbg = EditorGUILayout.Toggle(
+                new GUIContent("Enable debugging",
+                    "Enables the Window/Unterm/Debugger (Standalone Process) menu and the code editor's breakpoint " +
+                    "gutter (click left of the line numbers to set breakpoints; entering Play " +
+                    "mode with breakpoints launches the debugger)."),
+                curDbg);
+            if (nextDbg != curDbg)
+                UntermDebuggerPrefs.Enabled = nextDbg;
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Unity MCP", EditorStyles.boldLabel);
