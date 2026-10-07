@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "source": {
     "repository": "https://github.com/tnayuki/Unity-Unterm",
-    "commit": "ead1391bd38532eebfb9f13f10064eddc372b769",
-    "packageVersion": "0.6.0",
+    "commit": "6edd1a37d660ff56734471637b5c9b954e24ae08",
+    "packageVersion": "0.7.0",
     "license": "MIT",
     "licenseFiles": [
       "LICENSE",

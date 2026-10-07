@@ -9,14 +9,23 @@
 - Breakpoints live in `Library/Unterm/breakpoints.json`, shared between the editor and the debugger and synced live in both directions: toggling in the code editor arms/disarms in a running debug session immediately (even mid-play), and toggling in the debugger — including while the editor is frozen at a breakpoint — updates the editor's gutter dots as soon as it runs again.
 - The debugger can attach to more than the editor: development builds with script debugging enabled are discovered on the network via Unity's player multicast and offered in a target picker (labelled with their project and host), and source locations reported by a player built on another machine are mapped back to this project's files for display and breakpoints.
 
+## [0.7.0] - 2026-07-24
+
+### Added
+
 - The code editor now syntax-highlights Markdown while editing and can render it (toggle Preview with ⇧⌘V, or the tab ⋮ / right-click menu); a `.md` opened from a transcript or preview link opens rendered by default, while a Project double-click opens for editing.
 
 - The set of file extensions the code editor opens is now its own preference (Preferences ▸ Unterm ▸ Code Editor, semicolon-separated, with a reset button) instead of borrowing Unity's C# project-generation extension settings — Unterm never generates `.csproj` files, so tying "what opens" to a generation setting that never runs was misleading. The default covers Unity's code and text formats plus the docs, configs, and native-plugin sources an agent transcript typically links (`md`, `yml`, `toml`, `rs`, `c`/`cpp`, `java`/`kt`, `swift`, shell scripts, …), so those open in-editor out of the box.
+
+- The Claude Code agent's permission requests can now be answered from the keyboard: Enter approves (only while the composer is empty, so a follow-up being typed is never swallowed as an approval) and Escape denies. Escape without a pending permission still interrupts the turn as before — refusing one tool call no longer requires the mouse or killing the whole turn. Plan approvals and the agent's multiple-choice questions keep their buttons only, since a reflexive Enter shouldn't pick an answer.
+
+- The Claude Code agent's follow-up queue and blocking prompts are now pinned to the bottom of the panel, Zed-style. Queued prompts live in their own section above the composer instead of drifting up the transcript as the turn streams — always visible, capped in height, internally scrollable — and each card can be managed, not just watched: `↑` sends it immediately (resolving any pending permission prompt and interrupting the running turn to make way; the rest of the queue then drains one at a time as usual), `×` cancels it, and clicking the card pulls the prompt back into the composer for editing. A pending permission request pins the same way, but without a separate "Permission requested" card: the tool call's own block — the one already naming the tool and showing its command — is lifted out of the transcript into the pinned section, expanded, with the Allow / Deny buttons attached directly beneath it, so what you're approving and the buttons are never in two places or scrolled apart. Plan approvals and the agent's multiple-choice questions pin their own card (their text isn't a tool block). Interrupting a turn while any such prompt was still awaiting an answer now resolves it (as a deny) instead of leaving its card and buttons stranded on screen.
 
 ### Fixed
 
 - The Unterm code editor stays selected as the External Script Editor across package updates — it's now recognized by package identity rather than the exact cached path (which changes each update), so script and link opens keep landing in Unterm instead of silently falling back to another editor.
 - File-path links in the Claude Code transcript now underline every existing file instead of only a hard-coded list of code extensions, and a click always opens the file somewhere: the configured script editor first, then Unity's own asset pipeline on decline (a scene link loads the scene, a prefab opens in prefab mode, an image opens in its associated app), and the OS default app for files outside the asset database — so paths like `native/**/*.rs` or `docs/*.md` no longer show an underline that does nothing when clicked.
+- Interrupting the Claude Code agent no longer auto-fires the next queued follow-up prompt the moment the aborted turn ends — stopping the agent now means it actually stops. Queued prompts stay put; sending a new message resumes the queue as before, or press Enter (or Send) with an empty composer to fire the next queued prompt explicitly.
 
 ## [0.6.0] - 2026-07-08
 

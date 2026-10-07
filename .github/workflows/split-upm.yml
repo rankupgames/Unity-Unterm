@@ -97,7 +97,7 @@ jobs:
       - name: Verify pinned source provenance
         env:
           HARDENING_BRANCH: feat/toolkit-icon-performance-mcp
-          UPSTREAM_BASE_COMMIT: ead1391bd38532eebfb9f13f10064eddc372b769
+          UPSTREAM_BASE_COMMIT: 6edd1a37d660ff56734471637b5c9b954e24ae08
         run: |
           jq -e \
             --arg hardeningBranch "$HARDENING_BRANCH" \

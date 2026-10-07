@@ -439,8 +439,12 @@ impl AgentView {
                 push_plan(&mut text, &plan);
             }
             // A distinct card, not dim status text — and no "Thinking" indicator: the
-            // session is blocked on the user's decision, not thinking.
-            push_notice(&mut text, &title);
+            // session is blocked on the user's decision, not thinking. A permission
+            // anchored on its tool block carries an empty title (the tool block is
+            // the card); skip the notice then and let the pinned buttons attach to it.
+            if !title.is_empty() {
+                push_notice(&mut text, &title);
+            }
             return text;
         }
         let status = d.status();
@@ -570,6 +574,16 @@ impl AgentView {
         let text = self.input.text();
         let trimmed = text.trim();
         if trimmed.is_empty() {
+            // Enter (or Send) with nothing typed fires the next queued prompt (the
+            // head of the queue) now — Zed's empty-Enter: it resumes a queue parked
+            // by an interrupt when idle, and fast-tracks the head (interrupting the
+            // running turn) while one is in flight.
+            if let Some(d) = &self.driver {
+                if d.queue_len() > 0 {
+                    d.send_queued_now(0);
+                    self.scroll = 0.0;
+                }
+            }
             return;
         }
         // `/login` and `/logout` are interactive built-in CLI commands (OAuth /
@@ -624,6 +638,33 @@ impl AgentView {
         if let Some(d) = &self.driver {
             d.interrupt();
         }
+    }
+
+    /// Escape: deny a pending tool-permission request, else interrupt the turn.
+    /// Keeps Escape's "back out" meaning without killing a whole turn just to
+    /// refuse one tool call.
+    pub fn escape(&mut self) {
+        if self.permission_pending() {
+            self.respond_pending("reject_once");
+        } else {
+            self.interrupt();
+        }
+    }
+
+    /// Answer the pending prompt with option `id` and drop its buttons.
+    fn respond_pending(&mut self, id: &str) {
+        if let Some(d) = &self.driver {
+            d.respond(id);
+        }
+        self.pending_ids.clear();
+        self.panel.set_buttons(Vec::new());
+    }
+
+    /// True when the pending prompt is a tool-permission request — recognized by
+    /// its synthesized `allow_once` first option, so Question/Plan prompts (whose
+    /// options aren't a symmetric allow/deny) never get answered by a bare key.
+    fn permission_pending(&self) -> bool {
+        self.pending_ids.first().is_some_and(|id| id == "allow_once")
     }
 
     // --- Runtime settings (mode / model / thinking) + follow-up queue ----------
@@ -695,13 +736,42 @@ impl AgentView {
             let idx = self.panel.hit_button(x, y);
             if idx >= 0 && (idx as usize) < self.pending_ids.len() {
                 let id = self.pending_ids[idx as usize].clone();
-                if let Some(d) = &self.driver {
-                    d.respond(&id);
-                }
-                self.pending_ids.clear();
-                self.panel.set_buttons(Vec::new());
+                self.respond_pending(&id);
                 return true;
             }
+        }
+        // Queued prompts: `↑` fires the prompt now (interrupting the running turn),
+        // `×` cancels it, and a click anywhere else on the card pulls it back into
+        // the composer for editing (appended below any text already being typed).
+        if let Some(i) = self.panel.hit_queued_send(x, y) {
+            if let Some(d) = &self.driver {
+                d.send_queued_now(i as u32);
+            }
+            self.scroll = 0.0;
+            return true;
+        }
+        if let Some(i) = self.panel.hit_queued_cancel(x, y) {
+            if let Some(d) = &self.driver {
+                d.cancel_queued(i as u32);
+            }
+            return true;
+        }
+        if let Some((i, text)) = self.panel.hit_queued_body(x, y) {
+            if let Some(d) = &self.driver {
+                d.cancel_queued(i as u32);
+            }
+            let cur = self.input.text();
+            if cur.trim().is_empty() {
+                self.input.set_text(&text);
+            } else {
+                self.input.set_text(&format!("{cur}\n{text}"));
+            }
+            return true;
+        }
+        // A click on the pinned bottom sections that missed their controls must
+        // not fall through to the transcript covered beneath.
+        if self.panel.hit_strip(x, y) {
+            return true;
         }
         // A click on a tool's header line folds/unfolds its content instead of
         // starting a selection.
@@ -767,6 +837,13 @@ impl AgentView {
                 if let Some((id, title)) = self.browser.as_ref().and_then(|b| b.first()) {
                     self.browse_open(id, title);
                 }
+                return;
+            }
+            // Enter on an empty composer answers a pending permission (Allow);
+            // with text it keeps its send/queue meaning, so a follow-up typed
+            // while the prompt is up can't be swallowed as an approval.
+            if self.permission_pending() && self.input.text().trim().is_empty() {
+                self.respond_pending("allow_once");
                 return;
             }
             self.send();

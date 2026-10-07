@@ -96,6 +96,12 @@ pub struct Conv {
     // tool_use ids we render via custom UI (ExitPlanMode / AskUserQuestion), so their
     // raw "▸ ToolName" line is suppressed in the transcript (incl. their tool_result).
     hidden_tools: HashSet<String>,
+    /// The tool call currently awaiting a permission decision, if any. Its block
+    /// is serialized with an `'X'` tag so the panel re-hosts it into the pinned
+    /// prompt section (with the Allow/Deny buttons) instead of showing a separate
+    /// "Permission requested" card — the tool block already names the call and
+    /// shows its command. Cleared once the decision is made.
+    awaiting_tool: Option<String>,
 }
 
 /// A quiet stretch this long between blocks gets a timestamp separator.
@@ -126,7 +132,32 @@ impl Conv {
             clock: None,
             tools: HashMap::new(),
             hidden_tools: HashSet::new(),
+            awaiting_tool: None,
         }
+    }
+
+    /// Tag the in-progress tool call awaiting permission so the panel can pin it.
+    /// Picks the in-progress (`▸`) tool whose name matches; `desc` (the salient
+    /// argument, from `describe_tool`) breaks ties when several are open. Returns
+    /// false when no such block exists (a fallback notice card is shown instead).
+    fn set_awaiting_tool(&mut self, tool_name: &str, desc: &str) -> bool {
+        let mut best: Option<&String> = None;
+        for (id, e) in &self.tools {
+            if e.glyph != "▸" || e.title != tool_name {
+                continue;
+            }
+            // Prefer an exact argument match; otherwise take any in-progress call
+            // with this name (there's usually only one).
+            if best.is_none() || (!desc.is_empty() && e.input.starts_with(desc)) {
+                best = Some(id);
+            }
+        }
+        self.awaiting_tool = best.cloned();
+        self.awaiting_tool.is_some()
+    }
+
+    fn clear_awaiting_tool(&mut self) -> bool {
+        self.awaiting_tool.take().is_some()
     }
 
     /// The creation stamp for a block appended right now: the reconstruction
@@ -214,8 +245,34 @@ impl Conv {
         self.blocks.iter().filter(|b| b.0 == 'q').count()
     }
 
+    /// Move a selected prompt to the front of the queue without changing any
+    /// tool block indices or marking an unsent prompt as a user turn.
+    fn prioritize_queued(&mut self, index: usize) -> bool {
+        let slots: Vec<usize> = self
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| (b.0 == 'q').then_some(i))
+            .take(index + 1)
+            .collect();
+        if slots.len() != index + 1 {
+            return false;
+        }
+        for pair in slots.windows(2).rev() {
+            self.blocks.swap(pair[0], pair[1]);
+            self.stamps.swap(pair[0], pair[1]);
+        }
+        true
+    }
+
     /// Drop the `index`-th queued prompt (0-based among queued blocks only).
     fn cancel_queued(&mut self, index: usize) {
+        self.take_queued(index);
+    }
+
+    /// Remove the `index`-th queued prompt (0-based among queued blocks only) and
+    /// return its text — for send-now / pull-back-into-composer.
+    fn take_queued(&mut self, index: usize) -> Option<String> {
         let mut seen = 0;
         let mut target = None;
         for (i, b) in self.blocks.iter().enumerate() {
@@ -227,9 +284,11 @@ impl Conv {
                 seen += 1;
             }
         }
-        if let Some(i) = target {
+        target.map(|i| {
+            let text = self.blocks[i].1.clone();
             self.remove_block(i);
-        }
+            text
+        })
     }
 
     /// Remove block `i`, keeping the tool-id → block-index map consistent.
@@ -438,7 +497,14 @@ impl Conv {
                 }
                 prev = Some(stamp);
             }
-            out.push(format!("{r}{US}{t}"));
+            // The tool call awaiting permission is tagged `'X'`, so the panel pins
+            // it (with the Allow/Deny buttons) instead of leaving it inline.
+            let role = if *r == 'x' && self.awaiting_tool.as_deref() == t.split(US).next() {
+                'X'
+            } else {
+                *r
+            };
+            out.push(format!("{role}{US}{t}"));
         }
         out.join(&RS.to_string())
     }
@@ -563,6 +629,10 @@ enum Pending {
         tool_name: String,
         input: Value,
         title: String,
+        /// Whether the awaiting tool's own block was found and tagged (so the
+        /// buttons pin onto it). False → fall back to a "Permission requested"
+        /// notice card so the buttons still have context.
+        anchored: bool,
     },
     /// An `AskUserQuestion` tool call: the questions are presented one at a time,
     /// answers accumulate, and the whole set is returned at once. stdio mode never
@@ -614,6 +684,11 @@ struct State {
     session_id: Mutex<String>,
     conv: Mutex<Conv>,
     remembered: Mutex<HashMap<String, bool>>, // tool_name -> allow (session "always")
+    /// Set by a user interrupt while a turn is running: the `result` that ends
+    /// the aborted turn must NOT auto-send the next queued prompt (the user just
+    /// said "stop" — firing a queued follow-up right after would undo that).
+    /// Consumed by that `result`; cleared early when the user re-engages (`send`).
+    queue_hold: AtomicBool,
     ready: AtomicBool,
     outbox: Mutex<Vec<String>>, // prompts buffered until `initialize` completes
     mcp: Option<McpDispatcher>,
@@ -819,6 +894,7 @@ impl Driver {
             session_id: Mutex::new(String::new()),
             conv: Mutex::new(seed),
             remembered: Mutex::new(HashMap::new()),
+            queue_hold: AtomicBool::new(false),
             ready: AtomicBool::new(false),
             outbox: Mutex::new(Vec::new()),
             mcp,
@@ -865,6 +941,9 @@ impl Driver {
                 return;
             }
         }
+        // Sending anything is re-engaging: a queue parked by an interrupt may
+        // drain again once the next turn ends.
+        self.state.queue_hold.store(false, Ordering::Relaxed);
         if self.state.ready.load(Ordering::Relaxed)
             && *self.state.status.lock_recover() == "thinking"
         {
@@ -893,6 +972,11 @@ impl Driver {
         let Some(p) = self.state.pending.lock_recover().take() else {
             return;
         };
+        // The decision is made: un-pin the awaiting tool block (no-op unless a
+        // permission was anchored on one).
+        if self.state.conv.lock_recover().clear_awaiting_tool() {
+            self.state.sync_transcript();
+        }
         match p {
             Pending::Permission {
                 request_id,
@@ -987,12 +1071,80 @@ impl Driver {
         if !self.state.ready.load(Ordering::Relaxed) {
             return;
         }
+        // Park the follow-up queue: the user asked the agent to stop, so the
+        // aborted turn's `result` must not immediately fire the next queued
+        // prompt. Only when a turn is actually running — an idle interrupt has
+        // no matching `result` to consume the flag.
+        if *self.state.status.lock_recover() == "thinking" {
+            self.state.queue_hold.store(true, Ordering::Relaxed);
+        }
+        self.cancel_pending_for_interrupt();
+        self.write_interrupt();
+    }
+
+    fn write_interrupt(&self) {
         let id = format!("unterm-int-{}", NEXT_REQ.fetch_add(1, Ordering::Relaxed));
         self.state.write_value(&json!({
             "type": "control_request",
             "request_id": id,
             "request": { "subtype": "interrupt" }
         }));
+    }
+
+    /// Resolve a pending prompt whose turn is being interrupted: deny it so the
+    /// engine's `can_use_tool` isn't left dangling and the buttons don't outlive
+    /// the (aborted) turn they belong to.
+    fn cancel_pending_for_interrupt(&self) {
+        let Some(p) = self.state.pending.lock_recover().take() else {
+            return;
+        };
+        if self.state.conv.lock_recover().clear_awaiting_tool() {
+            self.state.sync_transcript();
+        }
+        let request_id = match p {
+            Pending::Permission { request_id, .. }
+            | Pending::Question { request_id, .. }
+            | Pending::Plan { request_id, .. } => request_id,
+        };
+        self.state.write_value(&json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request_id,
+                "response": { "behavior": "deny", "message": "The user interrupted the turn." }
+            }
+        }));
+    }
+
+    /// Fire the `index`-th queued prompt immediately, Zed-style: any pending
+    /// permission/plan/question is denied, the running turn is interrupted, and
+    /// the prompt is sent as its own turn the moment the aborted turn's `result`
+    /// lands. When no turn is running (e.g. a queue parked by an interrupt) it
+    /// just sends.
+    pub fn send_queued_now(&self, index: u32) {
+        if self.state.ready.load(Ordering::Relaxed)
+            && *self.state.status.lock_recover() == "thinking"
+        {
+            // Keep it queued until the aborted turn finishes. Repeated actions
+            // preserve every prompt, and a later Stop can still park the queue.
+            if !self
+                .state
+                .conv
+                .lock_recover()
+                .prioritize_queued(index as usize)
+            {
+                return;
+            }
+            self.state.sync_transcript();
+            self.state.queue_hold.store(false, Ordering::Relaxed);
+            self.cancel_pending_for_interrupt();
+            self.write_interrupt();
+        } else {
+            let text = self.state.conv.lock_recover().take_queued(index as usize);
+            let Some(text) = text else { return };
+            self.state.sync_transcript();
+            self.send(&text);
+        }
     }
 
     /// Set a permission mode that preserves host authorization. Unknown modes,
@@ -1089,10 +1241,18 @@ impl Driver {
     pub fn pending_view(&self) -> Option<(String, Vec<(String, String, String)>)> {
         let guard = self.state.pending.lock_recover();
         match guard.as_ref()? {
-            Pending::Permission { title, .. } => {
-                // Just the tool name: the command is already shown (and expandable) in
-                // the tool block right above, so repeating it here reads as a duplicate.
-                let body = format!("Permission requested: {title}");
+            Pending::Permission {
+                title, anchored, ..
+            } => {
+                // When the awaiting tool's own block is pinned (`anchored`), it
+                // already names the call and shows its command, so no separate
+                // card — the buttons attach to it. Only the unanchored fallback
+                // needs a "Permission requested: {tool}" card for context.
+                let body = if *anchored {
+                    String::new()
+                } else {
+                    format!("Permission requested: {title}")
+                };
                 let opts = [
                     ("allow_once", "Allow"),
                     ("allow_always", "Always allow"),
@@ -1171,6 +1331,7 @@ impl Driver {
     /// turn doesn't keep a stale prompt up).
     pub fn clear_pending(&self) {
         *self.state.pending.lock_recover() = None;
+        self.state.conv.lock_recover().clear_awaiting_tool();
     }
 }
 
@@ -1519,10 +1680,15 @@ fn handle_message(state: &Arc<State>, v: Value) {
             state.sync_transcript();
         }
         Some("result") => {
-            // Turn finished. Send the next queued follow-up prompt as its own turn,
-            // else go idle. (An interrupt also ends in a `result`, so the queue
-            // survives an interrupt and keeps draining.)
-            let next = state.conv.lock_recover().promote_first_queued();
+            // Turn finished: send the next queued prompt, including one moved to
+            // the front by Send Now. An explicit Stop parks the whole queue until
+            // the user re-engages.
+            let held = state.queue_hold.swap(false, Ordering::Relaxed);
+            let next = if held {
+                None
+            } else {
+                state.conv.lock_recover().promote_first_queued()
+            };
             if let Some(text) = next {
                 state.sync_transcript();
                 let line = user_line(&text);
@@ -1581,11 +1747,19 @@ fn handle_control_request(state: &Arc<State>, v: &Value) {
             if let Some(allow) = remembered {
                 state.write_permission(&request_id, allow, &input);
             } else {
+                let anchored = {
+                    let mut c = state.conv.lock_recover();
+                    c.set_awaiting_tool(&tool_name, &sanitize(&describe_tool(&input)))
+                };
+                if anchored {
+                    state.sync_transcript();
+                }
                 *state.pending.lock_recover() = Some(Pending::Permission {
                     request_id,
                     tool_name,
                     input,
                     title,
+                    anchored,
                 });
             }
         }
@@ -1641,6 +1815,66 @@ fn handle_control_request(state: &Arc<State>, v: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn thinking_driver() -> Driver {
+        let mut conv = Conv::new();
+        conv.push_queued("first");
+        conv.push_queued("second");
+        Driver {
+            state: Arc::new(State {
+                writer: Mutex::new(None),
+                transcript_serial: AtomicU64::new(1),
+                transcript_cache: Mutex::new((0, String::new())),
+                status: Mutex::new("thinking".to_string()),
+                pending: Mutex::new(None),
+                session_id: Mutex::new(String::new()),
+                conv: Mutex::new(conv),
+                remembered: Mutex::new(HashMap::new()),
+                queue_hold: AtomicBool::new(false),
+                ready: AtomicBool::new(true),
+                outbox: Mutex::new(Vec::new()),
+                mcp: None,
+                init_id: String::new(),
+                permission_mode: Mutex::new("default".to_string()),
+                model: Mutex::new(String::new()),
+                models: Mutex::new(String::new()),
+                commands: Mutex::new(String::new()),
+            }),
+            child: None,
+        }
+    }
+
+    #[test]
+    fn send_now_then_stop_keeps_prompts_queued() {
+        let driver = thinking_driver();
+        driver.send_queued_now(0);
+        driver.interrupt();
+        handle_message(&driver.state, json!({"type": "result"}));
+        assert_eq!(*driver.state.status.lock_recover(), "ready");
+        assert_eq!(driver.state.conv.lock_recover().queued_count(), 2);
+        driver.send_queued_now(0);
+        assert_eq!(*driver.state.status.lock_recover(), "thinking");
+        assert_eq!(driver.state.conv.lock_recover().queued_count(), 1);
+    }
+
+    #[test]
+    fn repeated_send_now_preserves_both_prompts() {
+        for (index, first, second) in [(0, "first", "second"), (1, "second", "first")] {
+            let driver = thinking_driver();
+            driver.send_queued_now(index);
+            driver.send_queued_now(0);
+            handle_message(&driver.state, json!({"type": "result"}));
+            {
+                let conv = driver.state.conv.lock_recover();
+                assert!(conv.blocks.contains(&('u', first.to_string())));
+                assert!(conv.blocks.contains(&('q', second.to_string())));
+            }
+            handle_message(&driver.state, json!({"type": "result"}));
+            let conv = driver.state.conv.lock_recover();
+            assert_eq!(conv.queued_count(), 0);
+            assert!(conv.blocks.contains(&('u', second.to_string())));
+        }
+    }
 
     #[test]
     fn permission_modes_reject_bypass_and_unknown_values() {
