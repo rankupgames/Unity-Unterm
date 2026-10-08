@@ -42,6 +42,9 @@ namespace Unterm.Editor
                     if (string.IsNullOrWhiteSpace(code))
                         return new { ok = false, error = "code required" };
 
+                    if (!UntermRuntimeCapabilities.CanExecuteDynamicCode)
+                        return new { ok = false, error = "capability_unavailable: dynamic C# execution requires the Mono runtime. Use Unity script reload." };
+
                     string source =
                         "using System;\n" +
                         "using System.Linq;\n" +
@@ -102,7 +105,13 @@ namespace Unterm.Editor
             var refs = new List<MetadataReference>();
             void AddType(Type ty)
             {
-                try { refs.Add(MetadataReference.CreateFromFile(ty.Assembly.Location)); } catch (Exception e) { UntermLog.WarnOnce("executeCode.addType", e); }
+                try
+                {
+                    string location = ty.Assembly.Location;
+                    if (!string.IsNullOrEmpty(location) && File.Exists(location))
+                        refs.Add(MetadataReference.CreateFromFile(location));
+                }
+                catch (Exception e) { UntermLog.WarnOnce("executeCode.addType", e); }
             }
             AddType(typeof(object));
             AddType(typeof(Enumerable));
@@ -114,7 +123,7 @@ namespace Unterm.Editor
 
             try
             {
-                var ns = AppDomain.CurrentDomain.GetAssemblies()
+                var ns = UntermRuntimeCapabilities.GetLoadedAssemblies()
                     .FirstOrDefault(a => a.GetName().Name == "netstandard");
                 if (ns != null && !string.IsNullOrEmpty(ns.Location))
                     refs.Add(MetadataReference.CreateFromFile(ns.Location));

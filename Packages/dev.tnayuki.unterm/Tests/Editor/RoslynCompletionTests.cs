@@ -1,4 +1,6 @@
+using System.Collections;
 using System.Collections.Generic;
+using UnityEngine.TestTools;
 using System.Linq;
 using NUnit.Framework;
 using Unterm.Editor;
@@ -194,6 +196,159 @@ namespace Unterm.Editor.Tests
             Assert.IsNotNull(help, "no signature help inside call");
             Assert.GreaterOrEqual(help.Items.Count, 1);
             CollectionAssert.Contains(help.Items[0].Parameters, "int alpha");
+        }
+
+
+        [Test]
+        public void ExecuteCode_CoreCLR_RefusesBeforeCompilation()
+        {
+            if (!UntermRuntimeCapabilities.IsCoreCLR)
+                Assert.Ignore("This capability refusal requires an actual CoreCLR Editor.");
+            System.Func<Newtonsoft.Json.Linq.JObject, object> execute = null;
+            new UntermExecuteCodeTools().Register(new UntermToolSink(
+                (name, description, schema, handler) => { if (name == "unity_execute_code") execute = handler; }));
+            Assert.IsNotNull(execute);
+            var result = Newtonsoft.Json.Linq.JObject.FromObject(execute(
+                new Newtonsoft.Json.Linq.JObject { ["code"] = "deliberately invalid C# source" }));
+            Assert.IsFalse((bool)result["ok"]);
+            StringAssert.StartsWith("capability_unavailable:", (string)result["error"]);
+            Assert.IsNull(result["diagnostics"], "Roslyn compiled code on an unavailable runtime.");
+        }
+
+        [UnityTest]
+        public IEnumerator CompletionWorker_StopAndReinitialize_Restarts()
+        {
+            yield return WorkerRestarts(typeof(UntermCompletionWorker));
+        }
+
+        [UnityTest]
+        public IEnumerator SignatureWorker_StopAndReinitialize_Restarts()
+        {
+            yield return WorkerRestarts(typeof(UntermSignatureWorker));
+        }
+
+        [UnityTest]
+        public IEnumerator CompletionWorker_Stop_DiscardsUnreadResult()
+        {
+            yield return WorkerDiscardsResult(typeof(UntermCompletionWorker));
+        }
+
+        [UnityTest]
+        public IEnumerator SignatureWorker_Stop_DiscardsUnreadResult()
+        {
+            yield return WorkerDiscardsResult(typeof(UntermSignatureWorker));
+        }
+
+        private static IEnumerator WorkerRestarts(System.Type worker)
+        {
+            // Initial, never-started and repeated shutdowns must all be safe.
+            InvokeWorker(worker, "Shutdown");
+            InvokeWorker(worker, "Shutdown");
+            InvokeWorker(worker, "RegisterShutdown");
+            InvokeWorker(worker, "RegisterShutdown");
+            UntermRoslynCompletion.EnsureReferences();
+            try
+            {
+                object first = null;
+                long sequence = SubmitWorker(worker);
+                yield return AwaitWorker(() => HasWorkerResult(worker, sequence));
+                Assert.IsTrue(TakeWorker(worker, sequence, out first));
+                AssertWorkerResult(worker, first);
+                InvokeWorker(worker, "Shutdown");
+                InvokeWorker(worker, "Shutdown");
+                InvokeWorker(worker, "RegisterShutdown");
+                object second = null;
+                sequence = SubmitWorker(worker);
+                yield return AwaitWorker(() => HasWorkerResult(worker, sequence));
+                Assert.IsTrue(TakeWorker(worker, sequence, out second));
+                AssertWorkerResult(worker, second);
+            }
+            finally
+            {
+                InvokeWorker(worker, "Shutdown");
+                InvokeWorker(worker, "RegisterShutdown");
+            }
+        }
+
+        private static IEnumerator WorkerDiscardsResult(System.Type worker)
+        {
+            InvokeWorker(worker, "Shutdown");
+            InvokeWorker(worker, "RegisterShutdown");
+            UntermRoslynCompletion.EnsureReferences();
+            try
+            {
+                long sequence = SubmitWorker(worker);
+                var resultSequence = worker.GetField("s_resultSeq",
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                // Wait for a real unread semantic result, then observe the public polling boundary.
+                yield return AwaitWorker(() => (long)resultSequence.GetValue(null) == sequence);
+                AssertWorkerResult(worker, worker.GetField("s_result",
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic).GetValue(null));
+                InvokeWorker(worker, "Shutdown");
+                Assert.IsFalse(TakeWorker(worker, sequence, out _),
+                    "A stopped worker published an unread result from its previous lifecycle.");
+            }
+            finally
+            {
+                InvokeWorker(worker, "Shutdown");
+                InvokeWorker(worker, "RegisterShutdown");
+            }
+        }
+
+        private static long SubmitWorker(System.Type worker)
+        {
+            if (worker == typeof(UntermCompletionWorker))
+            {
+                const string source = "class C { void M() { System.Console. } }";
+                return UntermCompletionWorker.Submit(source, After(source, "System.Console."), 1);
+            }
+            const string signature = "class C { void Foo(int alpha) {} void M() { Foo(); } }";
+            return UntermSignatureWorker.Submit(signature, signature.IndexOf("Foo();") + 4);
+        }
+
+        private static bool HasWorkerResult(System.Type worker, long sequence) =>
+            (long)worker.GetField("s_resultSeq", System.Reflection.BindingFlags.Static |
+                System.Reflection.BindingFlags.NonPublic).GetValue(null) == sequence;
+
+        private static bool TakeWorker(System.Type worker, long sequence, out object result)
+        {
+            if (worker == typeof(UntermCompletionWorker))
+            {
+                bool ready = UntermCompletionWorker.TryTake(sequence, out var completion);
+                result = completion;
+                return ready;
+            }
+            bool signatureReady = UntermSignatureWorker.TryTake(sequence, out var signature);
+            result = signature;
+            return signatureReady;
+        }
+
+        private static void AssertWorkerResult(System.Type worker, object result)
+        {
+            Assert.IsNotNull(result, "The worker returned unavailable after reinitialization: accepting=" +
+                worker.GetField("s_accepting", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)?.GetValue(null) +
+                ", stop=" + worker.GetField("s_stop", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic).GetValue(null) +
+                ", thread=" + worker.GetField("s_thread", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic).GetValue(null));
+            if (worker == typeof(UntermCompletionWorker))
+                CollectionAssert.Contains(Inserts((List<(string insert, string label, char kind)>)result), "WriteLine");
+            else
+                CollectionAssert.Contains(((UntermRoslynCompletion.SigHelp)result).Items[0].Parameters, "int alpha");
+        }
+
+        private static IEnumerator AwaitWorker(System.Func<bool> ready)
+        {
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            while (!ready())
+            {
+                Assert.Less(timer.ElapsedMilliseconds, 10000, "Worker result exceeded the bounded deadline.");
+                yield return null;
+            }
+        }
+
+        private static void InvokeWorker(System.Type worker, string method)
+        {
+            worker.GetMethod(method, System.Reflection.BindingFlags.Static |
+                System.Reflection.BindingFlags.NonPublic).Invoke(null, null);
         }
     }
 }

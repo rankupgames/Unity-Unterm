@@ -858,7 +858,7 @@ namespace Unterm.Editor
         private static Type ResolveComponentType(string name)
         {
             if (string.IsNullOrEmpty(name)) return null;
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            foreach (var asm in UntermRuntimeCapabilities.GetLoadedAssemblies())
             {
                 Type[] types;
                 try { types = asm.GetTypes(); } catch { continue; }
