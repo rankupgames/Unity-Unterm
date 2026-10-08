@@ -12,7 +12,7 @@ namespace Unterm.Editor
     /// analyses. The main thread submits (cheap) and polls <see cref="TryTake"/> for the
     /// result of the sequence number it's waiting on.
     /// </summary>
-    internal static class UntermCompletionWorker
+    internal static partial class UntermCompletionWorker
     {
         // Mode: 0 = general (scope symbols), 1 = member (after `.`), 2 = attribute (after `[`).
         private struct Request { public long Seq; public string Text; public int Pos; public int Mode; }
@@ -22,48 +22,83 @@ namespace Unterm.Editor
         private static bool s_hasPending;
         private static long s_seq;
 
-        private static readonly object s_outLock = new object();
         private static long s_resultSeq = -1;
         private static List<(string insert, string label, char kind)> s_result;
 
-        private static readonly AutoResetEvent s_signal = new AutoResetEvent(false);
+        private static AutoResetEvent s_signal;
         private static Thread s_thread;
         private static volatile bool s_stop;
+        private static bool s_accepting;
+        private static bool s_shutdownUnconfirmed;
 
-        // Stop the worker before the domain reloads: without this the background
-        // thread is left to be aborted mid-analysis and the AutoResetEvent leaks its
-        // OS handle. Signalled once; re-entrant Submits in the fresh domain get a
-        // clean thread because the statics are reset by the reload.
+        // Stop and restart explicitly; CoreCLR may retain these statics.
+#if UNITY_7000_0_OR_NEWER
+        [Unity.Scripting.LifecycleManagement.OnCodeInitializing]
+#else
         [InitializeOnLoadMethod]
+#endif
         private static void RegisterShutdown()
         {
+#if !UNITY_7000_0_OR_NEWER
+            AssemblyReloadEvents.beforeAssemblyReload -= Shutdown;
             AssemblyReloadEvents.beforeAssemblyReload += Shutdown;
+#endif
+            EditorApplication.quitting -= Shutdown;
+            EditorApplication.quitting += Shutdown;
+            lock (s_inLock) s_accepting = true;
         }
 
+#if UNITY_7000_0_OR_NEWER
+        [Unity.Scripting.LifecycleManagement.OnCodeUnloading]
+#endif
         private static void Shutdown()
         {
-            s_stop = true;
-            s_signal.Set();
-            // Only dispose the event once the loop has actually exited — disposing it
-            // out from under a blocked WaitOne would throw on the worker thread.
-            if (s_thread != null && s_thread.Join(500))
-                s_signal.Dispose();
+#if !UNITY_7000_0_OR_NEWER
+            AssemblyReloadEvents.beforeAssemblyReload -= Shutdown;
+#endif
+            EditorApplication.quitting -= Shutdown;
+            Thread thread;
+            lock (s_inLock)
+            {
+                s_accepting = false;
+                s_stop = true;
+                s_pending = default;
+                s_hasPending = false;
+                s_result = null;
+                s_resultSeq = -1;
+                thread = s_thread;
+                if (thread != null && thread.IsAlive) s_signal?.Set();
+            }
+            if (thread != null && thread.IsAlive && !thread.Join(500))
+            {
+                lock (s_inLock) s_shutdownUnconfirmed = true;
+                return;
+            }
+            lock (s_inLock)
+            {
+                if (s_thread == thread) { s_thread = null; s_signal = null; s_shutdownUnconfirmed = false; }
+            }
         }
 
-        /// Queue a completion request (overwriting any not-yet-started one) and return
-        /// its sequence number. The reference set must already be built on the main
-        /// thread (UntermRoslynCompletion.EnsureReferences) before calling this.
         public static long Submit(string text, int pos, int mode)
         {
-            EnsureThread();
             long seq;
             lock (s_inLock)
             {
                 seq = ++s_seq;
+                if (s_accepting && s_shutdownUnconfirmed && s_thread != null && s_thread.IsAlive)
+                    UntermLog.WarnOnce("completion.shutdown", new TimeoutException(
+                        "Worker stop is unconfirmed; new requests are unavailable until the owned thread exits."));
+                if (!s_accepting || !EnsureThread())
+                {
+                    s_resultSeq = seq;
+                    s_result = null;
+                    return seq;
+                }
                 s_pending = new Request { Seq = seq, Text = text, Pos = pos, Mode = mode };
                 s_hasPending = true;
+                s_signal.Set();
             }
-            s_signal.Set();
             return seq;
         }
 
@@ -71,7 +106,7 @@ namespace Unterm.Editor
         /// clear it. (Older results are overwritten by newer ones and never match.)
         public static bool TryTake(long seq, out List<(string insert, string label, char kind)> result)
         {
-            lock (s_outLock)
+            lock (s_inLock)
             {
                 if (s_resultSeq == seq)
                 {
@@ -85,18 +120,47 @@ namespace Unterm.Editor
             return false;
         }
 
-        private static void EnsureThread()
+        // Called with s_inLock held. Never reset a still-running stopped generation.
+        private static bool EnsureThread()
         {
-            if (s_thread != null && s_thread.IsAlive) return;
+            if (s_thread != null && s_thread.IsAlive) return !s_stop;
+            s_signal = new AutoResetEvent(false);
+            s_stop = false;
             s_thread = new Thread(Loop) { IsBackground = true, Name = "UntermCompletion" };
-            s_thread.Start();
+            try { s_thread.Start(); }
+            catch (Exception e)
+            {
+                s_signal.Dispose();
+                s_signal = null;
+                s_thread = null;
+                s_stop = true;
+                UntermLog.WarnOnce("completion.start", e);
+                return false;
+            }
+            s_shutdownUnconfirmed = false;
+            return true;
         }
 
         private static void Loop()
         {
+            var signal = s_signal;
+            try { ProcessRequests(signal); }
+            finally
+            {
+                lock (s_inLock)
+                {
+                    s_stop = true;
+                    if (ReferenceEquals(s_signal, signal)) s_signal = null;
+                    signal.Dispose();
+                }
+            }
+        }
+
+        private static void ProcessRequests(AutoResetEvent signal)
+        {
             while (true)
             {
-                s_signal.WaitOne();
+                signal.WaitOne();
                 if (s_stop) return;
                 // Drain: always process the LATEST pending request; if newer ones
                 // arrive while computing, the slot holds only the newest, so older
@@ -106,8 +170,10 @@ namespace Unterm.Editor
                     Request req;
                     lock (s_inLock)
                     {
+                        if (s_stop) return;
                         if (!s_hasPending) break;
                         req = s_pending;
+                        s_pending = default;
                         s_hasPending = false;
                     }
                     List<(string insert, string label, char kind)> r;
@@ -123,9 +189,17 @@ namespace Unterm.Editor
                             default: r = UntermRoslynCompletion.GeneralCompletions(req.Text, req.Pos); break;
                         }
                     }
-                    catch (Exception e) { r = null; UntermLog.WarnOnce("completion.worker", e); }
-                    lock (s_outLock)
+                    catch (Exception e)
                     {
+                        r = null;
+                        lock (s_inLock)
+                        {
+                            if (!s_stop) UntermLog.WarnOnce("completion.worker", e);
+                        }
+                    }
+                    lock (s_inLock)
+                    {
+                        if (s_stop) return;
                         s_resultSeq = req.Seq;
                         s_result = r;
                     }

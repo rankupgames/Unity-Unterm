@@ -1,0 +1,105 @@
+{
+  "editorVersion": "7000.0.0a7",
+  "editorMetadata": "7000.0.0a7_581996e1a8f7",
+  "variant": "fixed",
+  "packageVersions": [
+    {
+      "name": "com.unity.test-framework",
+      "version": "1.9.0",
+      "source": "selected_editor_builtin"
+    },
+    {
+      "name": "com.unity.ext.nunit",
+      "version": "2.1.2",
+      "source": "selected_editor_builtin"
+    },
+    {
+      "name": "com.unity.nuget.newtonsoft-json",
+      "version": "3.2.2",
+      "source": "existing_owned_sample_cache"
+    }
+  ],
+  "vendorPin": "7caf244b213b62d95d2d76ad480d22c31778994b",
+  "fixtureDependency": null,
+  "artifactHashes": {
+    "Plugins/Roslyn/Microsoft.CodeAnalysis.CSharp.dll": "bc4e4cfe276fb97e70978e1d484e806c5a1c9301d1f9752c6d39840840118723",
+    "Plugins/Roslyn/Microsoft.CodeAnalysis.dll": "aab3674134122f9c04fcb55a2d1af2d19342cf92a1e593159236dfbce05de59c",
+    "Plugins/Roslyn/System.Collections.Immutable.dll": "5b1b1c83ba3d135c2fdfe425842fbe9c7432878b7e468623acb554c69b4c130f",
+    "Plugins/Roslyn/System.Reflection.Metadata.dll": "55ef768ffa305de58e38e15420669258b16f420618eb1f702bddb30e5c797961",
+    "Plugins/Windows/x86_64/unterm.dll": "a7315797c7b7ced79eb212d90d8fc494dd3ebc7b39f0e085d36ab70ada72910c"
+  },
+  "selectedTests": [
+    "Member_StaticType_OffersStaticMembers",
+    "SignatureHelp_ReportsParameters",
+    "CompletionWorker_StopAndReinitialize_Restarts",
+    "SignatureWorker_StopAndReinitialize_Restarts",
+    "CompletionWorker_Stop_DiscardsUnreadResult",
+    "SignatureWorker_Stop_DiscardsUnreadResult",
+    "ExecuteCode_CoreCLR_RefusesBeforeCompilation"
+  ],
+  "fixtureSourceHashes": {
+    "Editor/UntermCompletionWorker.cs": "c9c77148fa9f721667d2fde532e7e6bb299037ed5d14d2ba5bae7de5f13bbe05",
+    "Editor/UntermSignatureWorker.cs": "689c56f955cb8ce9303c47cf3e3bfc438dd13707e9a9a612d6e579ed89a10d9c",
+    "Editor/UntermExecuteCodeTools.cs": "5d4950efdbd631de3f9479373b061985372230e5c6bf0c1d7bd0e42a167edf6e",
+    "Editor/UntermRuntimeCapabilities.cs": "101299a2fcbbcae3efda3669b3c8d29ecccda2456425bd98664881db76285320",
+    "Editor/UntermRoslynCompletion.cs": "6d4c023f400badb1a209c6709ef908dfa9c7a3f2a6642281e7b6ebedd4c463a5",
+    "Editor/Unterm.Editor.asmdef": "2db2a411809b93400fab9fea99f02a39a9cfe159c0ce8aa339afffea5d33cf75",
+    "Tests/Editor/RoslynCompletionTests.cs": "da9e6f03351e5d451f7df700277054ecdec77040f738cf5ebfa18d7a32be170e",
+    "Tests/Editor/Unterm.Editor.Tests.asmdef": "9de22899cbff9a38135d2407723d51b9fe79e049f2e068d1bd5f326c7290890a"
+  },
+  "fixtureOnlyRoslynDiagnostics": true,
+  "shutdownMarkerHash": "e2b8ab33304d2c2621e5e11c30d32d42e84855c2b5dc2e7c81e7f6805ba97b43",
+  "roslynDiagnostics": [],
+  "checkedAt": "2026-10-08T09:51:13.200Z",
+  "passed": true,
+  "normalExitConfirmed": true,
+  "exitCode": 0,
+  "spawnError": "",
+  "forcedCleanup": false,
+  "remainingOwnedPids": [],
+  "exactSelection": true,
+  "tests": [
+    {
+      "fullName": "Unterm.Editor.Tests.RoslynCompletionTests.CompletionWorker_Stop_DiscardsUnreadResult",
+      "result": "Passed",
+      "label": "",
+      "message": ""
+    },
+    {
+      "fullName": "Unterm.Editor.Tests.RoslynCompletionTests.CompletionWorker_StopAndReinitialize_Restarts",
+      "result": "Passed",
+      "label": "",
+      "message": ""
+    },
+    {
+      "fullName": "Unterm.Editor.Tests.RoslynCompletionTests.ExecuteCode_CoreCLR_RefusesBeforeCompilation",
+      "result": "Passed",
+      "label": "",
+      "message": ""
+    },
+    {
+      "fullName": "Unterm.Editor.Tests.RoslynCompletionTests.Member_StaticType_OffersStaticMembers",
+      "result": "Passed",
+      "label": "",
+      "message": ""
+    },
+    {
+      "fullName": "Unterm.Editor.Tests.RoslynCompletionTests.SignatureHelp_ReportsParameters",
+      "result": "Passed",
+      "label": "",
+      "message": ""
+    },
+    {
+      "fullName": "Unterm.Editor.Tests.RoslynCompletionTests.SignatureWorker_Stop_DiscardsUnreadResult",
+      "result": "Passed",
+      "label": "",
+      "message": ""
+    },
+    {
+      "fullName": "Unterm.Editor.Tests.RoslynCompletionTests.SignatureWorker_StopAndReinitialize_Restarts",
+      "result": "Passed",
+      "label": "",
+      "message": ""
+    }
+  ]
+}

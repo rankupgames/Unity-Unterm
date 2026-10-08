@@ -1,0 +1,19 @@
+{
+  "capturedAfterRun": "2026-10-08T09:56:01.158Z",
+  "fixtureOnlyCatchDiagnostics": true,
+  "errors": [
+    "FileNotFoundException: Could not load file or assembly 'System.Runtime.CompilerServices.Unsafe, Version=6.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a' or one of its dependencies.",
+    "FileNotFoundException: Could not load file or assembly 'System.Runtime.CompilerServices.Unsafe, Version=6.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a' or one of its dependencies.",
+    "FileNotFoundException: Could not load file or assembly 'System.Runtime.CompilerServices.Unsafe, Version=6.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a' or one of its dependencies.",
+    "FileNotFoundException: Could not load file or assembly 'System.Runtime.CompilerServices.Unsafe, Version=6.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a' or one of its dependencies.",
+    "FileNotFoundException: Could not load file or assembly 'System.Runtime.CompilerServices.Unsafe, Version=6.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a' or one of its dependencies.",
+    "FileNotFoundException: Could not load file or assembly 'System.Runtime.CompilerServices.Unsafe, Version=6.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a' or one of its dependencies."
+  ],
+  "fixtureSourceHashes": {
+    "Editor/UntermRoslynCompletion.cs": "6d4c023f400badb1a209c6709ef908dfa9c7a3f2a6642281e7b6ebedd4c463a5",
+    "Editor/UntermCompletionWorker.cs": "676d0533a8d5400d6d40427b5660c9cb4f618bc04be23554a10948c1197d96c7",
+    "Editor/UntermSignatureWorker.cs": "19c5da01b55324aeacdbc78389324be8e0526f66030c6bd7928e67e3bc3b6304",
+    "Tests/Editor/RoslynCompletionTests.cs": "89b536d1b7bee3db197026011fac50f223fab575f9e4e5d3c69038da774347a0",
+    "Tests/Editor/Unterm.Editor.Tests.asmdef": "302174c2eaf7cdeb38a38148662a9d3fd00efd6ade7fe33fbbe4099c8e104252"
+  }
+}

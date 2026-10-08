@@ -1,0 +1,82 @@
+{
+  "editorVersion": "6000.3.9f1",
+  "editorMetadata": "6000.3.9f1_7a9955a4f2fa",
+  "variant": "fixed",
+  "packageVersions": [
+    {
+      "name": "com.unity.test-framework",
+      "version": "1.6.0",
+      "source": "selected_editor_builtin"
+    },
+    {
+      "name": "com.unity.ext.nunit",
+      "version": "2.0.5",
+      "source": "selected_editor_builtin"
+    },
+    {
+      "name": "com.unity.nuget.newtonsoft-json",
+      "version": "3.2.2",
+      "source": "existing_owned_sample_cache"
+    }
+  ],
+  "vendorPin": "7caf244b213b62d95d2d76ad480d22c31778994b",
+  "artifactHashes": {
+    "Plugins/Roslyn/Microsoft.CodeAnalysis.CSharp.dll": "bc4e4cfe276fb97e70978e1d484e806c5a1c9301d1f9752c6d39840840118723",
+    "Plugins/Roslyn/Microsoft.CodeAnalysis.dll": "aab3674134122f9c04fcb55a2d1af2d19342cf92a1e593159236dfbce05de59c",
+    "Plugins/Roslyn/System.Collections.Immutable.dll": "5b1b1c83ba3d135c2fdfe425842fbe9c7432878b7e468623acb554c69b4c130f",
+    "Plugins/Roslyn/System.Reflection.Metadata.dll": "55ef768ffa305de58e38e15420669258b16f420618eb1f702bddb30e5c797961",
+    "Plugins/Windows/x86_64/unterm.dll": "a7315797c7b7ced79eb212d90d8fc494dd3ebc7b39f0e085d36ab70ada72910c"
+  },
+  "selectedTests": [
+    "CompletionWorker_StopAndReinitialize_Restarts",
+    "SignatureWorker_StopAndReinitialize_Restarts",
+    "CompletionWorker_Stop_DiscardsUnreadResult",
+    "SignatureWorker_Stop_DiscardsUnreadResult",
+    "ExecuteCode_CoreCLR_RefusesBeforeCompilation"
+  ],
+  "fixtureSourceHashes": {
+    "UntermCompletionWorker.cs": "676d0533a8d5400d6d40427b5660c9cb4f618bc04be23554a10948c1197d96c7",
+    "UntermSignatureWorker.cs": "19c5da01b55324aeacdbc78389324be8e0526f66030c6bd7928e67e3bc3b6304",
+    "UntermExecuteCodeTools.cs": "5d4950efdbd631de3f9479373b061985372230e5c6bf0c1d7bd0e42a167edf6e"
+  },
+  "checkedAt": "2026-10-08T09:34:52.912Z",
+  "passed": false,
+  "normalExitConfirmed": true,
+  "exitCode": 2,
+  "spawnError": "",
+  "forcedCleanup": false,
+  "remainingOwnedPids": [],
+  "exactSelection": true,
+  "tests": [
+    {
+      "fullName": "Unterm.Editor.Tests.RoslynCompletionTests.CompletionWorker_Stop_DiscardsUnreadResult",
+      "result": "Passed",
+      "label": "",
+      "message": ""
+    },
+    {
+      "fullName": "Unterm.Editor.Tests.RoslynCompletionTests.CompletionWorker_StopAndReinitialize_Restarts",
+      "result": "Failed",
+      "label": "",
+      "message": "  The worker returned unavailable after reinitialization.\r\n  Expected: not null\r\n  But was:  null\r\n"
+    },
+    {
+      "fullName": "Unterm.Editor.Tests.RoslynCompletionTests.ExecuteCode_CoreCLR_RefusesBeforeCompilation",
+      "result": "Skipped",
+      "label": "Ignored",
+      "message": ""
+    },
+    {
+      "fullName": "Unterm.Editor.Tests.RoslynCompletionTests.SignatureWorker_Stop_DiscardsUnreadResult",
+      "result": "Passed",
+      "label": "",
+      "message": ""
+    },
+    {
+      "fullName": "Unterm.Editor.Tests.RoslynCompletionTests.SignatureWorker_StopAndReinitialize_Restarts",
+      "result": "Failed",
+      "label": "",
+      "message": "  The worker returned unavailable after reinitialization.\r\n  Expected: not null\r\n  But was:  null\r\n"
+    }
+  ]
+}
